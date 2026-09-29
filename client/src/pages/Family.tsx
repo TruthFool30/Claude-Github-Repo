@@ -31,7 +31,7 @@ async function copy(text: string, what: string) {
 }
 
 export default function FamilyPage() {
-  const { family, user, isAdmin, refresh, expectFamilyExit } = useAuth();
+  const { family, user, isAdmin, refresh, forgetFamily } = useAuth();
   const confirm = useConfirm();
   const navigate = useNavigate();
   const [editOpen, setEditOpen] = useState(false);
@@ -106,9 +106,8 @@ export default function FamilyPage() {
     });
     if (!ok) return;
     try {
-      expectFamilyExit(family.id);
       await api.del(`/family/members/${user.id}`);
-      await refresh();
+      await forgetFamily(family.id);
       toast.success(last ? `${family.name} was deleted` : `You left ${family.name}`);
       navigate('/home');
     } catch (e) {
@@ -244,7 +243,6 @@ export default function FamilyPage() {
           onDeleted={() => {
             navigate('/home');
           }}
-          beforeDelete={() => expectFamilyExit(family.id)}
         />
       )}
       {isAdmin && <EditFamilyModal open={editOpen} onClose={() => setEditOpen(false)} family={family} />}
@@ -413,9 +411,9 @@ function AddMemberModal({ open, onClose, usedColors }: { open: boolean; onClose:
 }
 
 function DeleteFamilyModal({
-  open, onClose, family, onDeleted, beforeDelete,
-}: { open: boolean; onClose: () => void; family: FamilyT; onDeleted: () => void; beforeDelete: () => void }) {
-  const { refresh } = useAuth();
+  open, onClose, family, onDeleted,
+}: { open: boolean; onClose: () => void; family: FamilyT; onDeleted: () => void }) {
+  const { forgetFamily } = useAuth();
   const [typed, setTyped] = useState('');
   const [busy, setBusy] = useState(false);
   const matches = typed.trim().toLowerCase() === family.name.trim().toLowerCase();
@@ -425,9 +423,8 @@ function DeleteFamilyModal({
     if (!matches) return;
     setBusy(true);
     try {
-      beforeDelete();
       await api.del('/family', { confirm_name: typed });
-      await refresh();
+      await forgetFamily(family.id);
       toast.success(`${family.name} was deleted`);
       onClose();
       onDeleted();

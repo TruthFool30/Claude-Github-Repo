@@ -8,6 +8,9 @@ const q = (name) => `"${name.replace(/"/g, '""')}"`;
  * with a `family_id` column, then (repeatedly) rows whose single-column foreign key now points
  * at nothing (or SET NULL when the FK says so). Works for module tables without knowing them.
  * Module tables must therefore have a `family_id` column or an ON DELETE CASCADE FK chain to one.
+ *
+ * NOT callable inside tx()/BEGIN: it runs its own transaction and must toggle
+ * `PRAGMA foreign_keys`, which SQLite ignores inside a transaction. It throws if you try.
  */
 export function purge(db, { familyIds = [], userIds = [] }) {
   if (!familyIds.length && !userIds.length) return;
@@ -15,6 +18,13 @@ export function purge(db, { familyIds = [], userIds = [] }) {
     .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")
     .all()
     .map((t) => t.name);
+  try {
+    db.exec('BEGIN');
+    db.exec('ROLLBACK');
+  } catch (err) {
+    if (/within a transaction/i.test(err.message)) throw new Error('purge() cannot run inside a transaction (tx/BEGIN)');
+    throw err;
+  }
   db.exec('PRAGMA foreign_keys = OFF');
   try {
     db.exec('BEGIN');

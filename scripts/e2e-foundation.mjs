@@ -56,6 +56,50 @@ for (const mobile of [false, true]) {
   });
 }
 
+// 1b. Every overlay moves focus inside itself on open.
+const focusInDialog = (page) => page.evaluate(() => !!document.activeElement?.closest('[role=dialog]'));
+for (const mobile of [false, true]) {
+  await check(`overlays take focus on open (${mobile ? 'mobile' : 'desktop'})`, async () => {
+    const { ctx, page } = await newPage({ mobile });
+    await login(page);
+    await page.goto(`${BASE}/family`);
+    await page.getByRole('button', { name: 'Add member' }).click();
+    await page.waitForTimeout(150);
+    assert.ok(await focusInDialog(page), 'Add member modal');
+    await page.keyboard.press('Escape');
+    await page.waitForTimeout(300);
+    await page.getByRole('button', { name: 'Delete family' }).click();
+    await page.waitForTimeout(150);
+    assert.ok(await focusInDialog(page), 'Delete family modal');
+    await page.keyboard.press('Escape');
+    await page.waitForTimeout(300);
+    await page.getByRole('button', { name: 'New code' }).click();
+    await page.waitForTimeout(150);
+    assert.ok(await focusInDialog(page), 'Confirm dialog');
+    assert.equal(await page.evaluate(() => document.activeElement?.textContent), 'New code');
+    await page.keyboard.press('Escape');
+    await page.waitForTimeout(300);
+    assert.equal(await page.getByRole('dialog').count(), 0);
+    await ctx.close();
+  });
+}
+
+await check('search palette: Ctrl+K, type, Enter navigates', async () => {
+  const { ctx, page } = await newPage();
+  await login(page);
+  await page.goto(`${BASE}/settings`);
+  await page.waitForSelector('main h1');
+  await page.keyboard.press('Control+k');
+  await page.waitForTimeout(150);
+  assert.ok(await focusInDialog(page), 'palette focused');
+  await page.keyboard.type('sa');
+  assert.equal(await page.getByRole('combobox').inputValue(), 'sa');
+  await page.getByRole('option', { name: /Sam Rivera/ }).waitFor();
+  await page.keyboard.press('Enter');
+  await page.waitForURL('**/family');
+  await ctx.close();
+});
+
 // 2. Exactly one notification bell (one live subscription) at each breakpoint; no console errors on public pages.
 for (const mobile of [false, true]) {
   await check(`single notification bell (${mobile ? 'mobile' : 'desktop'})`, async () => {
@@ -132,7 +176,18 @@ await check('join link flows', async () => {
   await page.fill('input[name=password]', 'hearth123');
   await page.click('button[type=submit]');
   await page.getByText("You're already in Rivera Family").waitFor();
+  // signed in + /register?code= -> join screen; Register's "Sign in" link keeps the code
+  await page.goto(`${BASE}/register?code=HRTH-2026`);
+  await page.waitForURL('**/join/HRTH-2026');
   await ctx.close();
+  const anon = await newPage();
+  await anon.page.goto(`${BASE}/register?code=HRTH-2026`);
+  await anon.page.getByRole('link', { name: 'Sign in' }).click();
+  await anon.page.fill('input[name=email]', 'mia@hearth.test');
+  await anon.page.fill('input[name=password]', 'hearth123');
+  await anon.page.click('button[type=submit]');
+  await anon.page.getByText("You're already in Rivera Family").waitFor();
+  await anon.ctx.close();
 
   const n = await newPage();
   await n.page.goto(`${BASE}/join/HRTH-2026`);
@@ -141,10 +196,9 @@ await check('join link flows', async () => {
   await n.page.getByLabel('Email').fill(`jo${Date.now()}@example.test`);
   await n.page.getByLabel('Password', { exact: true }).fill('secret123');
   await n.page.getByRole('button', { name: 'Continue' }).click();
-  const code = n.page.getByLabel('Invite code');
-  await code.waitFor();
-  assert.equal(await code.inputValue(), 'HRTH-2026');
-  await n.page.getByRole('button', { name: 'Join family' }).click();
+  // the code survives sign-up: the new account lands on the join confirmation
+  await n.page.getByText('Join Rivera Family?').waitFor();
+  await n.page.getByRole('button', { name: 'Join Rivera Family' }).click();
   await n.page.waitForURL('**/home');
   // leave again so the demo family stays at 4 members
   const api = n.page.request;

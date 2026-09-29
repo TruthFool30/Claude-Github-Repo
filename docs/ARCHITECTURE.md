@@ -162,7 +162,8 @@ client sends it on every call, holding the family per browser tab). `requireFami
 membership and sets `req.family`; a family you don't belong to → `403 {code:'NOT_MEMBER'}`. Without
 the header the session's default family is used. So two tabs can safely work in two families.
 `invite_code` is only returned to admins (`null` for everyone else). Login/register/join/invite
-lookups are rate-limited (429 `{error}` + `Retry-After`); set `HEARTH_RATE_LIMITS=off` on scripted
+lookups are rate-limited (429 `{error}` + `Retry-After`; login counts only FAILED attempts, per IP
+and per email+IP, so nobody can lock another user out); set `HEARTH_RATE_LIMITS=off` on scripted
 test instances if needed.
 
 Optional module exports: `search(ctx, familyId, q)` (see above) and `dashboard(ctx, req)` returning a
@@ -319,7 +320,8 @@ export function router(ctx) {
   - `removeFile(url)` — delete an uploaded file when its row is deleted.
   - `tx(db, () => { ... })` — synchronous transaction wrapper; **re-entrant** (nested calls, or a
     call inside a manual `BEGIN`, use SAVEPOINTs, so an inner failure only rolls back the inner part).
-    `publicUser(row)` — strip secrets.
+    `publicUser(row)` — strip secrets. (`purge()` from `../purge.js` runs its own transaction and
+    throws if called inside `tx()`.)
   - `rateLimit(rule, req => key)` — middleware using a rule from `DEFAULT_LIMITS` in `app.js`.
 - **Errors**: `throw httpError(status, 'Message')` (or `ctx.httpError`) anywhere in a handler, or
   `res.status(4xx).json({ error })`. Unknown errors → 500 `{ error: 'Something went wrong on our side' }`.
@@ -400,6 +402,12 @@ import type { ModuleDef } from '../types';
   family changes (switch, removal, deletion), and the SSE stream is re-opened for the new family —
   you never need family ids in query keys. `useAuth().familyId` is this tab's family id; the client
   sends it as `X-Family-Id` automatically. Notification toasts are shown once by the shell.
+  A GET that fails with `403 NOT_MEMBER` (a family the tab just lost) never rejects — the tab is
+  moved and queries reset instead — so modules never flash errors for it. After leaving/deleting a
+  family yourself call `useAuth().forgetFamily(id)`.
+- **Text on member colors**: `import { readableOn } from '../../lib/color'` → `{ bg, fg }` with ≥4.5:1
+  contrast (white text on a slightly darkened color, or dark text on light colors like yellow/orange).
+  `Avatar`, `ColorPicker` and `MemberPicker` already use it; use it for any filled chip with text.
 - **Dates**: API dates `YYYY-MM-DD` are local calendar days — parse with `toDate()`, format a `Date` back with `toDateKey()`.
 - **Layout**: pages render inside a padded, max-width `<main>` (`max-w-6xl`). Start each page with
   `<PageHeader title subtitle icon={mod.icon} accent={mod.accent} actions={…} />` (it also sets the tab title).

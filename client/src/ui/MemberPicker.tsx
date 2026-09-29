@@ -4,6 +4,7 @@ import { cn } from '../lib/cn';
 import { firstName } from '../lib/format';
 import type { Member } from '../lib/types';
 import { Avatar } from './Avatar';
+import { readableOn } from '../lib/color';
 
 interface BaseProps {
   /** Defaults to the active family's members. */
@@ -82,8 +83,8 @@ export function MemberPicker(props: MemberPickerProps) {
               <Avatar user={m} size={props.size === 'md' ? 'md' : 'sm'} title="" />
               {on && (
                 <span
-                  className="absolute -bottom-0.5 -right-0.5 flex size-3.5 items-center justify-center rounded-full text-white ring-2 ring-surface animate-check"
-                  style={{ backgroundColor: m.color }}
+                  className="absolute -bottom-0.5 -right-0.5 flex size-3.5 items-center justify-center rounded-full ring-2 ring-surface animate-check"
+                  style={{ backgroundColor: readableOn(m.color).bg, color: readableOn(m.color).fg }}
                 >
                   <Check size={9} strokeWidth={4} />
                 </span>

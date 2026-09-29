@@ -38,13 +38,14 @@ export function authRouter(ctx) {
     res.status(201).json(payload(Number(userId), familyId));
   });
 
-  // Brute-force protection counts FAILED attempts per IP and per email.
+  // Brute-force protection counts FAILED attempts per IP (global) and per email+IP. Keying the
+  // email rule by IP too means strangers can't lock a real user out of their account.
   r.post(
     '/login',
     (req, res) => {
     const email = String(req.body?.email ?? '').trim().toLowerCase();
     const password = String(req.body?.password ?? '');
-    const limit = failureLimit([['login-ip', req.ip], ['login-email', email]]);
+    const limit = failureLimit([['login-ip', req.ip], ['login-email', `${email}|${req.ip}`]]);
     if (limit.check(res)) return;
     const row = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
     if (!row || !verifyPassword(password, row.password_hash)) {

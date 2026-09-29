@@ -1,5 +1,6 @@
 import { Check } from 'lucide-react';
 import { cn } from '../lib/cn';
+import { readableOn } from '../lib/color';
 
 /** Member color palette (see design language). */
 export const PALETTE = ['#5B5BD6', '#E5484D', '#F76B15', '#FFB224', '#30A46C', '#12A594', '#0090FF', '#8E4EC6', '#D6409F', '#978365'];
@@ -29,11 +30,11 @@ export function ColorPicker({ value, onChange, colors = PALETTE, size = 'md', cl
             onClick={() => onChange(c)}
             className={cn(
               dim,
-              'flex items-center justify-center rounded-full text-white transition-all duration-150 hover:scale-110 active:scale-95',
+              'flex items-center justify-center rounded-full transition-all duration-150 hover:scale-110 active:scale-95',
               'focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-ring',
               on && 'ring-2 ring-offset-2 ring-offset-surface',
             )}
-            style={{ backgroundColor: c, ['--tw-ring-color' as string]: c }}
+            style={{ backgroundColor: c, color: readableOn(c).fg, ['--tw-ring-color' as string]: c }}
           >
             {on && <Check size={size === 'sm' ? 14 : 17} strokeWidth={3} className="animate-check" />}
           </button>

@@ -28,6 +28,11 @@ export interface AuthState {
   setMe: (me: MeResponse) => void;
   /** Call before leaving/deleting a family yourself so no "you were removed" toast is shown. */
   expectFamilyExit: (familyId: number) => void;
+  /**
+   * After you left/deleted a family: cancels in-flight queries, moves this tab to another family
+   * right away (no burst of requests for the old one) and refreshes the session.
+   */
+  forgetFamily: (familyId: number) => Promise<void>;
 }
 
 const AuthContext = createContext<AuthState | null>(null);
@@ -220,6 +225,27 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     expectedExit.current.add(familyId);
   }, []);
 
+  const forgetFamily = useCallback(
+    async (familyId: number) => {
+      expectedExit.current.add(familyId);
+      await qc.cancelQueries();
+      const current = qc.getQueryData<MeResponse | null>(ME_KEY);
+      if (current) {
+        const families = current.families.filter((f) => f.id !== familyId);
+        const next = families[0]?.id ?? null;
+        setApiFamily(next);
+        setTabFamily(next);
+        qc.setQueryData(ME_KEY, {
+          ...current,
+          families,
+          active_family_id: current.active_family_id === familyId ? next : current.active_family_id,
+        });
+      }
+      await qc.invalidateQueries({ queryKey: ME_KEY });
+    },
+    [qc],
+  );
+
   const family = activeFamilyId && familyQuery.data?.id === activeFamilyId ? familyQuery.data : null;
   const loading = meQuery.isPending || (!!activeFamilyId && !family && familyQuery.isPending && !familyQuery.isError);
 
@@ -240,8 +266,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       logout,
       setMe,
       expectFamilyExit,
+      forgetFamily,
     }),
-    [me, family, activeFamilyId, loading, refresh, switchFamily, login, register, logout, setMe, expectFamilyExit],
+    [me, family, activeFamilyId, loading, refresh, switchFamily, login, register, logout, setMe, expectFamilyExit, forgetFamily],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

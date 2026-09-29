@@ -64,14 +64,22 @@ export function useFocusTrap(ref: React.RefObject<HTMLElement | null>, active: b
   useEffect(() => {
     if (!active) return;
     const previouslyFocused = document.activeElement as HTMLElement | null;
-    const raf = requestAnimationFrame(() => {
+    let raf = 0;
+    let tries = 0;
+    const focusInitial = () => {
       const root = ref.current;
-      if (!root || root.contains(document.activeElement)) return;
+      // The panel may mount a frame after `active` flips — keep trying briefly.
+      if (!root) {
+        if (tries++ < 20) raf = requestAnimationFrame(focusInitial);
+        return;
+      }
+      if (root.contains(document.activeElement)) return;
       const preferred = root.querySelector<HTMLElement>('[data-autofocus]');
       const firstField = root.querySelector<HTMLElement>('input:not([type="hidden"]):not([disabled]), textarea:not([disabled]), select:not([disabled])');
       const target = preferred ?? (window.matchMedia('(pointer: fine)').matches ? firstField : null) ?? root;
       target.focus({ preventScroll: true });
-    });
+    };
+    raf = requestAnimationFrame(focusInitial);
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Tab' || !(isTopRef.current?.() ?? true)) return;
       const root = ref.current;
@@ -109,13 +117,11 @@ export function useFocusTrap(ref: React.RefObject<HTMLElement | null>, active: b
 export function usePresence(open: boolean, exitMs = 220) {
   const [mounted, setMounted] = useState(open);
   const [closing, setClosing] = useState(false);
+  // Mount in the same render that opens (derived state), so refs exist when effects run.
+  if (open && !mounted) setMounted(true);
+  if (open && closing) setClosing(false);
   useEffect(() => {
-    if (open) {
-      setMounted(true);
-      setClosing(false);
-      return;
-    }
-    if (!mounted) return;
+    if (open || !mounted) return;
     setClosing(true);
     const t = setTimeout(() => {
       setMounted(false);

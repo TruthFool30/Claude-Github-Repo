@@ -32,7 +32,7 @@ export function Badge({ tone = 'neutral', color, dot, size = 'sm', className, ch
         !color && tones[tone],
         className,
       )}
-      style={color ? { backgroundColor: `color-mix(in oklab, ${color} 15%, transparent)`, color: `color-mix(in oklab, ${color} 80%, var(--fg))` } : undefined}
+      style={color ? { backgroundColor: `color-mix(in oklab, ${color} 15%, transparent)`, color: `color-mix(in oklab, ${color} 55%, var(--fg))` } : undefined}
     >
       {dot && <span className="size-1.5 rounded-full bg-current" />}
       {children}

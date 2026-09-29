@@ -64,6 +64,9 @@ async function request<T>(method: Method, path: string, body?: unknown, init: Re
     }
     if (res.status === 403 && data && typeof data === 'object' && (data as { code?: string }).code === 'NOT_MEMBER') {
       window.dispatchEvent(new CustomEvent(FAMILY_LOST_EVENT));
+      // A read for a family this tab just lost (left / removed / deleted): the AuthProvider is about
+      // to move the tab and reset every query, so don't surface an error — leave it pending.
+      if (method === 'GET') return new Promise<T>(() => {});
     }
     throw new ApiError(res.status, message, data);
   }

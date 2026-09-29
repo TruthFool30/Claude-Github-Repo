@@ -11,7 +11,7 @@ export function FamilyAvatar({ family, size = 36, className }: { family: { name:
         height: size,
         borderRadius: size * 0.3,
         fontSize: size * 0.36,
-        background: family?.cover_url ? undefined : 'linear-gradient(145deg, #F7A84A, #E5484D)',
+        background: family?.cover_url ? undefined : 'linear-gradient(145deg, #C84B1C, #B42D59)', // ≥4.5:1 with white
       }}
     >
       {family?.cover_url ? <img src={family.cover_url} alt="" className="size-full object-cover" /> : initials(family?.name)}

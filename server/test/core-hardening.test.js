@@ -197,6 +197,9 @@ describe('hardening', () => {
     });
     const vals = db.prepare('SELECT v FROM probe_rows WHERE family_id = 0 ORDER BY id').all().map((r) => r.v);
     assert.deepEqual(vals, ['outer', 'inner-ok']);
+    // purge() refuses to run inside a transaction (it needs PRAGMA foreign_keys)
+    const { purge } = await import('../src/purge.js');
+    assert.throws(() => tx(db, () => purge(db, { familyIds: [999999] })), /cannot run inside a transaction/);
   });
 
   test('(17) seeding only replaces the demo family', async () => {
@@ -238,6 +241,11 @@ describe('rate limiting (14)', () => {
     // successful sign-ins never use up the budget
     await a.post('/api/auth/register', { name: 'Ok', email: 'ok@y.test', password: 'secret123' });
     for (let i = 0; i < 5; i++) assert.equal((await a.post('/api/auth/login', { email: 'ok@y.test', password: 'secret123' })).status, 200);
+    // the same email from another IP (e.g. the real owner) is not locked out
+    assert.equal((await a.post('/api/auth/register', { name: 'V', email: 'victim@y.test', password: 'secret123' }, { headers: { 'x-forwarded-for': '10.0.0.9' } })).status, 201);
+    for (let i = 0; i < 3; i++) await a.post('/api/auth/login', { email: 'victim@y.test', password: 'bad' }, { headers: { 'x-forwarded-for': '10.0.0.66' } });
+    assert.equal((await a.post('/api/auth/login', { email: 'victim@y.test', password: 'bad' }, { headers: { 'x-forwarded-for': '10.0.0.66' } })).status, 429);
+    assert.equal((await a.post('/api/auth/login', { email: 'victim@y.test', password: 'secret123' }, { headers: { 'x-forwarded-for': '10.0.0.9' } })).status, 200);
     // a different email is not blocked by the per-email rule
     assert.equal((await a.post('/api/auth/login', { email: 'other@y.test', password: 'bad' })).status, 401);
     assert.equal((await a.post('/api/auth/register', { name: 'A', email: 'a1@y.test', password: 'secret123' })).status, 201);

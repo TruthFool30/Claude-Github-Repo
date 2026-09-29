@@ -18,7 +18,7 @@ import { config } from './config.js';
 /** Default rate limits (per key, fixed window). Override with createApp({ limits }). */
 export const DEFAULT_LIMITS = {
   'login-ip': { max: 100, windowMs: 10 * 60_000 },
-  'login-email': { max: 10, windowMs: 10 * 60_000 },
+  'login-email': { max: 10, windowMs: 10 * 60_000 }, // failures per email+IP
   'register-ip': { max: 30, windowMs: 60 * 60_000 },
   'join-ip': { max: 60, windowMs: 10 * 60_000 },
   'invite-ip': { max: 120, windowMs: 10 * 60_000 },

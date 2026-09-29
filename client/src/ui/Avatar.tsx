@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { cn } from '../lib/cn';
 import { initials } from '../lib/format';
 import type { AvatarUser } from '../lib/types';
+import { readableOn } from '../lib/color';
 
 export type AvatarSize = 'xs' | 'sm' | 'md' | 'lg' | 'xl' | '2xl';
 
@@ -26,6 +27,7 @@ export function Avatar({ user, size = 'md', ring, status, className, title }: Av
   const [failed, setFailed] = useState<string | null>(null);
   const dim = px[size];
   const color = user?.color || '#8d90a0';
+  const { bg, fg } = readableOn(color); // AA contrast for the initials
   const src = user?.avatar_url && failed !== user.avatar_url ? user.avatar_url : null;
   return (
     <span
@@ -35,12 +37,14 @@ export function Avatar({ user, size = 'md', ring, status, className, title }: Av
     >
       <span
         className={cn(
-          'flex size-full items-center justify-center overflow-hidden rounded-full font-semibold text-white',
+          'flex size-full items-center justify-center overflow-hidden rounded-full font-semibold',
           text[size],
           ring && 'ring-2 ring-offset-2 ring-offset-surface',
         )}
         style={{
-          background: src ? undefined : `linear-gradient(145deg, ${color}, color-mix(in oklab, ${color} 78%, black))`,
+          // Gradient only darkens toward the bottom, so the lightest point (bg) still meets AA.
+          background: src ? undefined : `linear-gradient(145deg, ${bg}, color-mix(in oklab, ${bg} 82%, black))`,
+          color: fg,
           ['--tw-ring-color' as string]: color,
         }}
       >

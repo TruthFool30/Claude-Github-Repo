@@ -70,7 +70,7 @@ export default function Register() {
       </form>
       <p className="mt-6 text-center text-sm text-muted">
         Already have an account?{' '}
-        <Link to="/login" className="font-semibold text-primary hover:underline">
+        <Link to="/login" state={code ? { from: `/join/${code}` } : undefined} className="font-semibold text-primary hover:underline">
           Sign in
         </Link>
       </p>

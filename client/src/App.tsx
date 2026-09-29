@@ -45,7 +45,8 @@ function RequireFamily({ children }: { children: ReactNode }) {
 function PublicOnly({ children, allowNoFamily }: { children: ReactNode; allowNoFamily?: boolean }) {
   const { user, families, loading } = useAuth();
   const location = useLocation();
-  const from = (location.state as { from?: string } | null)?.from;
+  const code = new URLSearchParams(location.search).get('code');
+  const from = (location.state as { from?: string } | null)?.from ?? (code && location.pathname === '/register' ? `/join/${code}` : undefined);
   if (loading) return <Splash />;
   if (user && from?.startsWith('/join/')) return <Navigate to={from} replace />;
   if (user && families.length) return <Navigate to={from || '/home'} replace />;
