@@ -22,4 +22,10 @@ export interface ModuleDef {
   accent: string;
   /** One-liner shown in the More sheet / search palette. */
   description?: string;
+  /**
+   * Optional hook returning a count shown as a badge on this module's nav items (e.g. unread
+   * messages). Called once per rendered nav item, so keep it cheap (share a TanStack query).
+   * Return 0/undefined for no badge.
+   */
+  useBadge?: () => number | undefined;
 }

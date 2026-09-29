@@ -83,14 +83,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // queries of a render already use it).
   setApiFamily(activeFamilyId);
 
+  // Only touch the stored tab family once the session has loaded: clearing it while /auth/me is
+  // still pending would make a quick reload fall back to another tab's family.
+  const meLoaded = meQuery.isSuccess;
   useEffect(() => {
+    if (!meLoaded) return;
     try {
       if (activeFamilyId) sessionStorage.setItem(TAB_KEY, String(activeFamilyId));
-      else sessionStorage.removeItem(TAB_KEY);
+      else if (me && me.families.length === 0) sessionStorage.removeItem(TAB_KEY);
     } catch {
       /* ignore */
     }
-  }, [activeFamilyId]);
+  }, [activeFamilyId, meLoaded, me]);
 
   const familyQuery = useQuery({
     queryKey: FAMILY_KEY,
@@ -167,6 +171,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (event.type === 'family.removed') {
         const p = event.payload as { family_id: number; reason?: string };
         lastRemoval.current = { familyId: p.family_id, reason: p.reason };
+        if (p.family_id === prevFamily.current) {
+          // Move this tab first so no request goes out with the removed family's id.
+          dropFamilyLocally(p.family_id);
+          qc.invalidateQueries({ queryKey: ME_KEY });
+          return;
+        }
       }
       if (matchesPrefix(event.type, 'family')) {
         qc.invalidateQueries({ queryKey: FAMILY_KEY });
@@ -177,7 +187,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       offReconnect();
       offFamily();
     };
-  }, [signedIn, qc]);
+  }, [signedIn, qc, dropFamilyLocally]);
 
   // 401 from a non-auth call: session gone. 403 NOT_MEMBER: this tab's family is gone.
   useEffect(() => {
@@ -234,6 +244,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
     stopLive();
     qc.clear();
+    try {
+      sessionStorage.removeItem(TAB_KEY);
+    } catch {
+      /* ignore */
+    }
     setTabFamily(null);
     qc.setQueryData(ME_KEY, null);
   }, [qc]);

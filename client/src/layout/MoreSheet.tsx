@@ -1,4 +1,5 @@
 import { ChevronRight, LogOut, Monitor, Moon, Settings, Sun, Users } from 'lucide-react';
+import { NavBadge } from './NavBadge';
 import { useNavigate } from 'react-router';
 import { useAuth } from '../lib/auth';
 import { setShell, useShell } from '../lib/shell';
@@ -29,10 +30,11 @@ export function MoreSheet() {
             className="flex flex-col items-center gap-2 rounded-2xl border border-border bg-surface-2/50 px-2 py-4 text-center transition active:scale-95 hover:bg-surface-2"
           >
             <span
-              className="flex size-12 items-center justify-center rounded-2xl text-white shadow-card"
+              className="relative flex size-12 items-center justify-center rounded-2xl text-white shadow-card"
               style={{ background: `linear-gradient(145deg, ${m.accent}, color-mix(in oklab, ${m.accent} 75%, black))` }}
             >
               <m.icon size={22} />
+              <NavBadge mod={m} className="absolute -right-1.5 -top-1.5 ring-2 ring-surface" />
             </span>
             <span className="text-[13px] font-semibold leading-tight text-fg">{m.label}</span>
           </button>

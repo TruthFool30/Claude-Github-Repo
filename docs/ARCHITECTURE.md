@@ -489,3 +489,22 @@ Foundation browser regressions: `BASE=http://localhost:4011 npm run e2e` (runs
 
 Dev mode alternative: `API_PORT=4011 VITE_PORT=5180 npm run dev -w client` points a Vite dev server
 at an already running API.
+
+### Nav badges and cross-module contracts (added before module fan-out)
+
+- `ModuleDef.useBadge?: () => number | undefined` — optional hook; the count is rendered as a red
+  badge on the module's sidebar item, bottom-bar icon and More-sheet tile (`layout/NavBadge.tsx`).
+  It is called once per rendered nav item, so back it with a shared TanStack query (e.g.
+  `useQuery({ queryKey: ['messages', 'unread'], ... }).data?.total`) kept fresh by `useLive`.
+  Messages uses it for unread counts; Lists may use it for overdue tasks assigned to me.
+- Modules are built in parallel and must not import each other's code. Cross-module features go
+  through the HTTP API only and must degrade gracefully (hide the feature / friendly message) when
+  the other module's endpoint is missing or returns an error:
+  - Meals → Lists: `GET /api/lists?type=shopping` returns `[{ id, name, type, ... }]`;
+    `POST /api/lists/:id/items/bulk { items: [{ text, quantity?, category? }] }` → `201 { items }`.
+  - Wall → others: `GET /api/dashboard` returns `{ calendar?, lists?, meals?, ... }` — each key is
+    optional. Keys: `calendar: { today: Event[], upcoming: Event[] }` (Event has `id, title, start,
+    end, all_day, color, location`), `lists: { due: Item[], overdue: Item[], lists: [{id,name,type,open_count}] }`
+    (Item has `id, list_id, list_name, text, due_date, assignee_id`), `meals: { today: [{ slot, title, recipe_id? }] }`.
+  - Wall reads `GET /api/activity` (core) for other modules' entries; each module's `logActivity`
+    `link` must point to a route inside that module.

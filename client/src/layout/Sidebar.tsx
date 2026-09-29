@@ -5,8 +5,10 @@ import { modules } from '../modules/registry';
 import { FamilySwitcher } from './FamilySwitcher';
 import { Logo } from './Logo';
 import { UserMenu } from './UserMenu';
+import { NavBadge } from './NavBadge';
+import type { ModuleDef } from '../modules/types';
 
-function NavItem({ to, label, icon: Icon, accent }: { to: string; label: string; icon: LucideIcon; accent: string }) {
+function NavItem({ to, label, icon: Icon, accent, mod }: { to: string; label: string; icon: LucideIcon; accent: string; mod?: ModuleDef }) {
   return (
     <NavLink
       to={to}
@@ -26,7 +28,8 @@ function NavItem({ to, label, icon: Icon, accent }: { to: string; label: string;
           >
             <Icon size={17} strokeWidth={isActive ? 2.25 : 2} />
           </span>
-          <span className={cn(isActive && 'font-semibold')}>{label}</span>
+          <span className={cn('flex-1', isActive && 'font-semibold')}>{label}</span>
+          {mod && <NavBadge mod={mod} />}
         </>
       )}
     </NavLink>
@@ -45,7 +48,7 @@ export function Sidebar() {
       </div>
       <nav aria-label="Main" className="flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto px-3 py-2 scrollbar-thin">
         {modules.map((m) => (
-          <NavItem key={m.id} to={m.path} label={m.label} icon={m.icon} accent={m.accent} />
+          <NavItem key={m.id} to={m.path} label={m.label} icon={m.icon} accent={m.accent} mod={m} />
         ))}
         <div className="mx-3 my-3 h-px bg-border" />
         <NavItem to="/family" label="Family" icon={Users} accent="#F76B15" />

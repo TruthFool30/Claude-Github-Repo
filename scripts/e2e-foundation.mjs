@@ -144,34 +144,44 @@ await check('menu keyboard + focus return', async () => {
 await check('per-tab active family', async () => {
   const { ctx, page } = await newPage();
   await login(page);
-  const created = await page.request.post(`${BASE}/api/families`, { data: { name: 'Second Home' } });
+  const name = `Second Home ${Date.now()}`;
+  const created = await page.request.post(`${BASE}/api/families`, { data: { name } });
   const second = await created.json();
-  await page.request.post(`${BASE}/api/families/${second.id - 0}/activate`);
-  // tab A: explicitly switch to Rivera through the UI
-  await page.goto(`${BASE}/home`);
-  await page.getByRole('button', { name: /Second Home/ }).first().click();
-  await page.getByRole('menuitem', { name: /Rivera Family/ }).click();
-  await page.waitForFunction(() => document.body.innerText.includes('Rivera Family'));
-  // tab B (same session): switch to Second Home
-  const tabB = await ctx.newPage();
-  await tabB.goto(`${BASE}/home`);
-  await tabB.getByRole('button', { name: /Rivera Family/ }).first().click();
-  await tabB.getByRole('menuitem', { name: /Second Home/ }).click();
-  await tabB.waitForFunction(() => document.querySelector('aside')?.textContent?.includes('Second Home'));
-  // tab A still Rivera after a reload, and its API calls are pinned
-  await page.reload();
-  await page.goto(`${BASE}/family`);
-  await page.waitForSelector('main h2');
-  assert.equal(await page.locator('main h2').first().textContent(), 'Rivera Family');
-  const pinned = await page.evaluate(async () => (await (await fetch('/api/family', { headers: { 'X-Family-Id': sessionStorage.getItem('hearth-tab-family') } })).json()).name);
-  assert.equal(pinned, 'Rivera Family');
-  // clean up the extra family
-  await tabB.goto(`${BASE}/family`);
-  await tabB.getByRole('button', { name: 'Delete family' }).click();
-  await tabB.getByRole('dialog').getByRole('textbox').fill('Second Home');
-  await tabB.getByRole('button', { name: 'Delete forever' }).click();
-  await tabB.waitForURL('**/home');
-  await ctx.close();
+  const exact = new RegExp(name); // unique per run (timestamped), so a substring match is exact enough
+  try {
+    await page.request.post(`${BASE}/api/families/${second.id}/activate`);
+    // tab A: explicitly switch to Rivera through the UI
+    await page.goto(`${BASE}/home`);
+    await page.getByRole('button', { name: new RegExp(name) }).first().click();
+    await page.getByRole('menuitem', { name: /Rivera Family/ }).click();
+    await page.waitForFunction(() => document.body.innerText.includes('Rivera Family'));
+    // tab B (same session): switch to the second family
+    const tabB = await ctx.newPage();
+    await tabB.goto(`${BASE}/home`);
+    await tabB.getByRole('button', { name: /Rivera Family/ }).first().click();
+    await tabB.getByRole('menuitem', { name: exact }).click();
+    await tabB.waitForFunction((n) => document.querySelector('aside')?.textContent?.includes(n), name);
+    // tab A still Rivera after a reload + immediate navigation, and its API calls are pinned
+    await page.reload();
+    await page.goto(`${BASE}/family`);
+    await page.waitForSelector('main h2');
+    assert.equal(await page.locator('main h2').first().textContent(), 'Rivera Family');
+    const pinned = await page.evaluate(async () => (await (await fetch('/api/family', { headers: { 'X-Family-Id': sessionStorage.getItem('hearth-tab-family') } })).json()).name);
+    assert.equal(pinned, 'Rivera Family');
+    // delete the extra family through the UI
+    await tabB.goto(`${BASE}/family`);
+    await tabB.getByRole('button', { name: 'Delete family' }).click();
+    await tabB.getByRole('dialog').getByRole('textbox').fill(name);
+    await tabB.getByRole('button', { name: 'Delete forever' }).click();
+    await tabB.waitForURL('**/home');
+  } finally {
+    // make sure the extra family never leaks into later runs, even when a step above failed
+    await page.request.delete(`${BASE}/api/family`, {
+      headers: { 'X-Family-Id': String(second.id) },
+      data: { confirm_name: name },
+    }).catch(() => {});
+    await ctx.close();
+  }
 });
 
 // 5. /join/<code> signed out -> sign in -> "already in" screen; new user -> register -> join step prefilled.
