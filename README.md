@@ -76,6 +76,7 @@ scratch (other families are left untouched).
 | `UPLOAD_DIR` | `./data/uploads` | Uploaded files (served only to family members) |
 | `CLIENT_DIST` | `client/dist` | Built web app to serve |
 | `COOKIE_SECURE` | unset | `1` to mark the session cookie `Secure` (HTTPS) |
+| `TRUST_PROXY` | `loopback` | Which reverse proxies may set `X-Forwarded-For` (used for rate limiting): `true`, `false`, a hop count like `1`, or a comma list of names/subnets (`loopback, 10.0.0.0/8`) |
 | `HEARTH_RATE_LIMITS` | on | `off` disables login/register/join rate limiting (test instances only) |
 | `API_PORT` | `3000` | (dev only) where Vite proxies API calls |
 

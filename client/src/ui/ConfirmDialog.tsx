@@ -36,10 +36,11 @@ export function ConfirmDialog({
         <h2 className="text-lg font-bold tracking-tight text-fg">{title}</h2>
         {message && <div className="mt-1.5 text-sm leading-relaxed text-muted">{message}</div>}
         <div className="mt-6 flex w-full flex-col-reverse gap-2 sm:flex-row">
-          <Button variant="secondary" block onClick={onCancel} disabled={loading}>
+          {/* Destructive dialogs focus Cancel so a stray Enter can't delete anything. */}
+          <Button variant="secondary" block onClick={onCancel} disabled={loading} data-autofocus={danger || undefined}>
             {cancelLabel}
           </Button>
-          <Button variant={danger ? 'danger' : 'primary'} block onClick={onConfirm} loading={loading} data-autofocus>
+          <Button variant={danger ? 'danger' : 'primary'} block onClick={onConfirm} loading={loading} data-autofocus={!danger || undefined}>
             {confirmLabel}
           </Button>
         </div>

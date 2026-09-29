@@ -164,7 +164,7 @@ the header the session's default family is used. So two tabs can safely work in 
 `invite_code` is only returned to admins (`null` for everyone else). Login/register/join/invite
 lookups are rate-limited (429 `{error}` + `Retry-After`; login counts only FAILED attempts, per IP
 and per email+IP, so nobody can lock another user out); set `HEARTH_RATE_LIMITS=off` on scripted
-test instances if needed.
+test instances if needed. Client IPs come from `req.ip`, governed by `TRUST_PROXY` (default `loopback`).
 
 Optional module exports: `search(ctx, familyId, q)` (see above) and `dashboard(ctx, req)` returning a
 small object the Wall can show (e.g. calendar returns today's events). The foundation exposes
@@ -402,9 +402,12 @@ import type { ModuleDef } from '../types';
   family changes (switch, removal, deletion), and the SSE stream is re-opened for the new family —
   you never need family ids in query keys. `useAuth().familyId` is this tab's family id; the client
   sends it as `X-Family-Id` automatically. Notification toasts are shown once by the shell.
-  A GET that fails with `403 NOT_MEMBER` (a family the tab just lost) never rejects — the tab is
-  moved and queries reset instead — so modules never flash errors for it. After leaving/deleting a
-  family yourself call `useAuth().forgetFamily(id)`.
+  A request that fails with `403 NOT_MEMBER` (a family the tab just lost) rejects with
+  `ApiError { status: 403, code: 'NOT_MEMBER' }`, but before it lands the AuthProvider has already
+  cancelled in-flight queries and moved the tab to another family, so pages don't flash an error.
+  `isFamilyLost(err)` (from `lib/api`) detects it; `errorMessage(err)` returns `''` for it and
+  `toast.error('')` shows nothing, so the usual `toast.error(errorMessage(e))` pattern stays quiet.
+  After leaving/deleting a family yourself call `useAuth().forgetFamily(id)`.
 - **Text on member colors**: `import { readableOn } from '../../lib/color'` → `{ bg, fg }` with ≥4.5:1
   contrast (white text on a slightly darkened color, or dark text on light colors like yellow/orange).
   `Avatar`, `ColorPicker` and `MemberPicker` already use it; use it for any filled chip with text.

@@ -105,6 +105,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const lastRemoval = useRef<{ familyId: number; reason?: string } | null>(null);
   const expectedExit = useRef(new Set<number>());
 
+  /**
+   * Synchronously forget a family in this tab: cancel in-flight non-auth queries (so their
+   * NOT_MEMBER rejections are ignored and no error state flashes), drop it from the cached
+   * session and move the tab (and the X-Family-Id header) to the next family.
+   */
+  const dropFamilyLocally = useCallback(
+    (familyId: number) => {
+      void qc.cancelQueries({ predicate: notAuthQuery });
+      const current = qc.getQueryData<MeResponse | null>(ME_KEY);
+      if (!current || !current.families.some((f) => f.id === familyId)) return;
+      const families = current.families.filter((f) => f.id !== familyId);
+      const next = families[0]?.id ?? null;
+      setApiFamily(next);
+      setTabFamily(next);
+      qc.setQueryData(ME_KEY, {
+        ...current,
+        families,
+        active_family_id: current.active_family_id === familyId ? next : current.active_family_id,
+      });
+    },
+    [qc],
+  );
+
   // Active family changed for ANY reason (switch, removal, deletion): drop every cached
   // non-auth query so nothing from the previous family can leak into this one.
   const prevFamily = useRef<number | null>(activeFamilyId);
@@ -163,14 +186,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       qc.setQueryData(ME_KEY, null);
       qc.removeQueries({ predicate: notAuthQuery });
     };
-    const onFamilyLost = () => qc.invalidateQueries({ queryKey: ME_KEY });
+    const onFamilyLost = (e: Event) => {
+      const lost = (e as CustomEvent<{ familyId: number | null }>).detail?.familyId;
+      if (lost && lost === prevFamily.current) dropFamilyLocally(lost);
+      qc.invalidateQueries({ queryKey: ME_KEY }); // confirm with the server
+    };
     window.addEventListener(UNAUTHORIZED_EVENT, onUnauthorized);
     window.addEventListener(FAMILY_LOST_EVENT, onFamilyLost);
     return () => {
       window.removeEventListener(UNAUTHORIZED_EVENT, onUnauthorized);
       window.removeEventListener(FAMILY_LOST_EVENT, onFamilyLost);
     };
-  }, [qc]);
+  }, [qc, dropFamilyLocally]);
 
   const refresh = useCallback(async () => {
     await Promise.all([qc.invalidateQueries({ queryKey: ME_KEY }), qc.invalidateQueries({ queryKey: FAMILY_KEY })]);
@@ -228,22 +255,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const forgetFamily = useCallback(
     async (familyId: number) => {
       expectedExit.current.add(familyId);
-      await qc.cancelQueries();
-      const current = qc.getQueryData<MeResponse | null>(ME_KEY);
-      if (current) {
-        const families = current.families.filter((f) => f.id !== familyId);
-        const next = families[0]?.id ?? null;
-        setApiFamily(next);
-        setTabFamily(next);
-        qc.setQueryData(ME_KEY, {
-          ...current,
-          families,
-          active_family_id: current.active_family_id === familyId ? next : current.active_family_id,
-        });
-      }
+      dropFamilyLocally(familyId);
       await qc.invalidateQueries({ queryKey: ME_KEY });
     },
-    [qc],
+    [qc, dropFamilyLocally],
   );
 
   const family = activeFamilyId && familyQuery.data?.id === activeFamilyId ? familyQuery.data : null;

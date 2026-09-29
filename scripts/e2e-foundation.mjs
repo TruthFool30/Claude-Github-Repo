@@ -76,10 +76,19 @@ for (const mobile of [false, true]) {
     await page.getByRole('button', { name: 'New code' }).click();
     await page.waitForTimeout(150);
     assert.ok(await focusInDialog(page), 'Confirm dialog');
-    assert.equal(await page.evaluate(() => document.activeElement?.textContent), 'New code');
+    assert.equal(await page.evaluate(() => document.activeElement?.textContent), 'New code'); // non-destructive: confirm focused
     await page.keyboard.press('Escape');
     await page.waitForTimeout(300);
+    // destructive confirm: Cancel gets focus so Enter can't delete by accident
+    await page.getByRole('button', { name: /Actions for Sam/ }).click();
+    await page.getByRole('menuitem', { name: 'Remove from family' }).click();
+    await page.waitForTimeout(150);
+    assert.ok(await focusInDialog(page), 'Danger confirm dialog');
+    assert.equal(await page.evaluate(() => document.activeElement?.textContent), 'Cancel');
+    await page.keyboard.press('Enter'); // activates Cancel
+    await page.waitForTimeout(300);
     assert.equal(await page.getByRole('dialog').count(), 0);
+    assert.ok(await page.getByText('Sam Rivera').first().isVisible(), 'Sam not removed');
     await ctx.close();
   });
 }
@@ -248,6 +257,7 @@ await check('removed from family -> toast + redirect', async () => {
   await admin.delete(`${BASE}/api/family/members/${sam.id}`, { headers: { 'X-Family-Id': String(fam.id) } });
   await page.getByText('You were removed from Rivera Family').waitFor({ timeout: 8000 });
   await page.waitForURL('**/onboarding');
+  assert.equal(await page.locator('[role=alert]').count(), 0, 'no error toast/state for NOT_MEMBER');
   // restore demo state: Sam rejoins with the invite code and gets their role back
   await page.request.post(`${BASE}/api/families/join`, { data: { invite_code: 'HRTH-2026' } });
   await admin.patch(`${BASE}/api/family/members/${sam.id}`, { data: { role: 'member' }, headers: { 'X-Family-Id': String(fam.id) } });

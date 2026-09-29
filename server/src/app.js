@@ -106,6 +106,7 @@ export function createApp({
   clientDist = config.clientDist,
   modules = defaultModules,
   limits = {},
+  trustProxy = config.trustProxy,
 } = {}) {
   validateModules(modules);
   fs.mkdirSync(uploadDir, { recursive: true });
@@ -116,7 +117,8 @@ export function createApp({
 
   const app = express();
   app.disable('x-powered-by');
-  app.set('trust proxy', 'loopback');
+  // Which proxies may set X-Forwarded-For (req.ip is used for rate limiting). See TRUST_PROXY.
+  app.set('trust proxy', trustProxy);
   app.use(express.json({ limit: '2mb' }));
   app.use(express.urlencoded({ extended: false }));
   app.use(cookieParser());

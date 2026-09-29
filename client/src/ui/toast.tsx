@@ -26,6 +26,8 @@ let seq = 0;
 
 function push(tone: ToastTone, message: ReactNode, opts: ToastOptions = {}) {
   const id = opts.id ?? `t${++seq}`;
+  // Empty messages (e.g. errorMessage() of a handled NOT_MEMBER error) are ignored.
+  if (message === '' || message === null || message === undefined || message === false) return id;
   const item: ToastItem = { ...opts, id, tone, message };
   items = [...items.filter((t) => t.id !== id), item].slice(-4);
   emit();

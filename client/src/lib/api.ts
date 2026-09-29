@@ -9,12 +9,24 @@
 export class ApiError extends Error {
   status: number;
   data: unknown;
+  /** Machine-readable code from the server, e.g. 'NOT_MEMBER', 'NO_FAMILY'. */
+  code?: string;
   constructor(status: number, message: string, data?: unknown) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.data = data;
+    const code = data && typeof data === 'object' ? (data as { code?: unknown }).code : undefined;
+    if (typeof code === 'string') this.code = code;
   }
+}
+
+/**
+ * true for "this tab's family is gone" errors (403 NOT_MEMBER). The app handles these itself
+ * (moves the tab to another family and resets queries), so don't show them to the user.
+ */
+export function isFamilyLost(err: unknown): boolean {
+  return err instanceof ApiError && err.code === 'NOT_MEMBER';
 }
 
 export const UNAUTHORIZED_EVENT = 'hearth:unauthorized';
@@ -62,13 +74,13 @@ async function request<T>(method: Method, path: string, body?: unknown, init: Re
     if (res.status === 401 && !url.startsWith('/api/auth/')) {
       window.dispatchEvent(new CustomEvent(UNAUTHORIZED_EVENT));
     }
-    if (res.status === 403 && data && typeof data === 'object' && (data as { code?: string }).code === 'NOT_MEMBER') {
-      window.dispatchEvent(new CustomEvent(FAMILY_LOST_EVENT));
-      // A read for a family this tab just lost (left / removed / deleted): the AuthProvider is about
-      // to move the tab and reset every query, so don't surface an error — leave it pending.
-      if (method === 'GET') return new Promise<T>(() => {});
+    const error = new ApiError(res.status, message, data);
+    if (isFamilyLost(error)) {
+      // Synchronously tell the AuthProvider which family was lost: it moves the tab and cancels /
+      // resets queries before this rejection lands, so pages don't flash an error state.
+      window.dispatchEvent(new CustomEvent(FAMILY_LOST_EVENT, { detail: { familyId: Number(headers.get('X-Family-Id')) || null } }));
     }
-    throw new ApiError(res.status, message, data);
+    throw error;
   }
   return data as T;
 }
@@ -84,8 +96,9 @@ export const api = {
   upload: <T = unknown>(path: string, formData: FormData, init?: RequestInit) => request<T>('POST', path, formData, init),
 };
 
-/** Human message for any thrown value (use in toast.error(errorMessage(e))). */
+/** Human message for any thrown value (use in toast.error(errorMessage(e))). Empty for NOT_MEMBER. */
 export function errorMessage(err: unknown): string {
+  if (isFamilyLost(err)) return ''; // handled globally; toast.error('') shows nothing
   if (err instanceof ApiError || err instanceof Error) return err.message;
   return 'Something went wrong';
 }
