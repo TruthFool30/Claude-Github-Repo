@@ -48,7 +48,7 @@ export function Checkbox({
             shape === 'circle' ? 'rounded-full' : 'rounded-md',
             'flex items-center justify-center border-2 transition-all duration-150',
             'peer-focus-visible:ring-4 peer-focus-visible:ring-ring',
-            checked ? 'border-primary bg-primary text-white' : 'border-border-strong bg-surface group-hover:border-primary/60',
+            checked ? 'border-primary-solid bg-primary-solid text-white' : 'border-border-strong bg-surface group-hover:border-primary/60',
           )}
         >
           {checked && <Check size={checkSize[size]} strokeWidth={3.5} className="animate-check" />}

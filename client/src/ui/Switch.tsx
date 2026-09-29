@@ -26,7 +26,7 @@ export function Switch({ checked, onChange, label, description, disabled, classN
       className={cn(
         'relative inline-flex h-7 w-12 shrink-0 items-center rounded-full p-0.5 transition-colors duration-200',
         'focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-ring disabled:opacity-50',
-        checked ? 'bg-primary' : 'bg-surface-3',
+        checked ? 'bg-primary-solid' : 'bg-surface-3',
       )}
     >
       <span

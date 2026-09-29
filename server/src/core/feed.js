@@ -56,9 +56,10 @@ export function notificationsRouter(ctx) {
 /** GET /api/stream — SSE. Requires auth; bound to the active family when there is one. */
 export function streamHandler(ctx) {
   return (req, res) => {
-    const resolved = ctx.auth.resolveActiveFamily(req);
+    const resolved = ctx.auth.resolveRequestFamily(req);
+    if (resolved?.error) return res.status(403).json({ error: "You're not a member of that family anymore", code: 'NOT_MEMBER' });
     if (resolved) req.family = resolved.family;
-    ctx.hub.connect(req, res);
+    ctx.hub.connect(req, res, { explicitFamily: !!resolved?.explicit });
   };
 }
 

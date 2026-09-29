@@ -26,7 +26,8 @@ export interface FamilySummary {
   name: string;
   cover_url: string | null;
   currency: string;
-  invite_code: string;
+  /** null unless you are an admin of this family. */
+  invite_code: string | null;
   role: Role;
   nickname: string | null;
   member_count: number;
@@ -36,7 +37,8 @@ export interface FamilySummary {
 export interface Family {
   id: number;
   name: string;
-  invite_code: string;
+  /** null unless you are an admin of this family. */
+  invite_code: string | null;
   cover_url: string | null;
   currency: string;
   created_by: number | null;

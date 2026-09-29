@@ -5,6 +5,7 @@ import {
   randomInviteCode, userFamilies,
 } from '../auth.js';
 import { tx } from '../db.js';
+import { purge, removeFamilyUploads } from '../purge.js';
 import { cleanStr, httpError, isColor, isDate, isEmail, toId } from '../util.js';
 
 export function uniqueInviteCode(db) {
@@ -44,11 +45,37 @@ export function listMembers(db, familyId) {
     }));
 }
 
+/** 'abcd2345' / 'ABCD-2345' -> 'ABCD-2345' */
+export function normalizeInviteCode(raw) {
+  const code = String(raw ?? '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+  return code.length === 8 ? `${code.slice(0, 4)}-${code.slice(4)}` : code;
+}
+
+/**
+ * Delete a family and all of its data (module tables included), its uploads, and managed
+ * (no-login) members who belonged only to it. Every member's streams get 'family.removed'.
+ */
+export function deleteFamily(ctx, familyId, { reason = 'deleted' } = {}) {
+  const { db, hub, uploadDir } = ctx;
+  const managedOnly = db
+    .prepare(
+      `SELECT u.id, u.email FROM memberships m JOIN users u ON u.id = m.user_id
+        WHERE m.family_id = ? AND (SELECT COUNT(*) FROM memberships x WHERE x.user_id = u.id) = 1`,
+    )
+    .all(familyId)
+    .filter((u) => isManagedEmail(u.email))
+    .map((u) => u.id);
+  hub.detachFamily(familyId, { reason });
+  purge(db, { familyIds: [familyId], userIds: managedOnly });
+  removeFamilyUploads(uploadDir, familyId);
+}
+
 function familyPayload(db, family, role) {
   return {
     id: family.id,
     name: family.name,
-    invite_code: family.invite_code,
+    // Only admins may see (and share) the invite code.
+    invite_code: role === 'admin' ? family.invite_code : null,
     cover_url: family.cover_url ?? null,
     currency: family.currency,
     created_by: family.created_by,
@@ -62,7 +89,7 @@ const CURRENCY = /^[A-Z]{3}$/;
 
 /** /api/families — requires auth only (no active family needed). */
 export function familiesRouter(ctx) {
-  const { db, hub, logActivity } = ctx;
+  const { db, hub, logActivity, rateLimit } = ctx;
   const r = Router();
 
   r.get('/', (req, res) => res.json(userFamilies(db, req.user.id)));
@@ -77,10 +104,9 @@ export function familiesRouter(ctx) {
     res.status(201).json(familyPayload(db, family, 'admin'));
   });
 
-  r.post('/join', (req, res) => {
-    const code = String(req.body?.invite_code ?? '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
-    if (!code) throw httpError(400, 'Please enter an invite code');
-    const formatted = code.length === 8 ? `${code.slice(0, 4)}-${code.slice(4)}` : code;
+  r.post('/join', rateLimit('join-ip', (req) => req.ip), (req, res) => {
+    const formatted = normalizeInviteCode(req.body?.invite_code);
+    if (!formatted) throw httpError(400, 'Please enter an invite code');
     const family = db.prepare('SELECT * FROM families WHERE invite_code = ?').get(formatted);
     if (!family) throw httpError(404, 'That invite code does not match any family');
     let membership = getMembership(db, family.id, req.user.id);
@@ -106,6 +132,20 @@ export function familiesRouter(ctx) {
   });
 
   return r;
+}
+
+/**
+ * GET /api/families/invite/:code — public (rate-limited) preview for /join/<code> links:
+ * only the family name and member count (+ already_member when signed in).
+ */
+export function invitePreviewHandler(ctx) {
+  return (req, res) => {
+    const family = ctx.db.prepare('SELECT id, name FROM families WHERE invite_code = ?').get(normalizeInviteCode(req.params.code));
+    if (!family) throw httpError(404, 'This invite link is invalid or has expired');
+    const memberCount = ctx.db.prepare('SELECT COUNT(*) AS n FROM memberships WHERE family_id = ?').get(family.id).n;
+    const alreadyMember = req.user ? !!getMembership(ctx.db, family.id, req.user.id) : false;
+    res.json({ name: family.name, member_count: memberCount, already_member: alreadyMember, family_id: alreadyMember ? family.id : null });
+  };
 }
 
 /** /api/family — the active family (requireAuth + requireFamily). */
@@ -143,6 +183,16 @@ export function familyRouter(ctx) {
     res.json(familyPayload(db, reload(req), req.role));
   });
 
+  // Delete the whole family (admin). Body: { confirm_name } must equal the family name.
+  r.delete('/', requireAdmin, (req, res) => {
+    const typed = String(req.body?.confirm_name ?? '').trim();
+    if (typed.toLowerCase() !== req.family.name.trim().toLowerCase()) {
+      throw httpError(400, 'Type the family name exactly to confirm');
+    }
+    deleteFamily(ctx, req.family.id);
+    res.json({ ok: true });
+  });
+
   r.post('/cover', requireAdmin, coverUpload.single('file'), (req, res) => {
     if (!req.file) throw httpError(400, 'Please choose an image');
     const old = req.family.cover_url;
@@ -166,7 +216,7 @@ export function familyRouter(ctx) {
     if (!['child', 'member'].includes(role)) throw httpError(400, 'Role must be child or member');
     let email = cleanStr(b.email, { field: 'Email', max: 200 })?.toLowerCase() ?? null;
     const password = b.password ? String(b.password) : null;
-    if (email && !isEmail(email)) throw httpError(400, 'Please enter a valid email address');
+    if (email && (!isEmail(email) || isManagedEmail(email))) throw httpError(400, 'Please enter a valid email address');
     if (email && !password) throw httpError(400, 'Set a password so they can sign in with that email');
     if (password && password.length < 6) throw httpError(400, 'Password must be at least 6 characters');
     if (b.birthday && !isDate(b.birthday)) throw httpError(400, 'Birthday must be YYYY-MM-DD');
@@ -227,15 +277,25 @@ export function familyRouter(ctx) {
     if (!self && req.role !== 'admin') throw httpError(403, 'Only family admins can remove members');
     const current = getMembership(db, req.family.id, userId);
     if (!current) throw httpError(404, 'Member not found');
-    const total = db.prepare('SELECT COUNT(*) AS n FROM memberships WHERE family_id = ?').get(req.family.id).n;
-    if (current.role === 'admin' && total > 1) {
-      const admins = db.prepare("SELECT COUNT(*) AS n FROM memberships WHERE family_id = ? AND role = 'admin'").get(req.family.id).n;
-      if (admins <= 1) throw httpError(400, 'Make someone else an admin before leaving');
-    }
     const target = db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
+    const loginMembers = db
+      .prepare('SELECT u.email FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.family_id = ? AND u.id != ?')
+      .all(req.family.id, userId)
+      .filter((u) => !isManagedEmail(u.email));
+    if (self && loginMembers.length === 0) {
+      // The last person who can sign in is leaving: nobody could ever reach this family again,
+      // so it is deleted together with its data (and managed members who belong nowhere else).
+      deleteFamily(ctx, req.family.id, { reason: 'left' });
+      return res.json({ ok: true, family_deleted: true });
+    }
+    if (current.role === 'admin') {
+      const admins = db.prepare("SELECT COUNT(*) AS n FROM memberships WHERE family_id = ? AND role = 'admin'").get(req.family.id).n;
+      // Policy: the sole admin must promote someone before leaving (no silent auto-promotion).
+      if (admins <= 1) throw httpError(400, self ? 'Make someone else an admin before leaving' : 'A family needs at least one admin');
+    }
     db.prepare('DELETE FROM memberships WHERE family_id = ? AND user_id = ?').run(req.family.id, userId);
     db.prepare('UPDATE sessions SET active_family_id = NULL WHERE user_id = ? AND active_family_id = ?').run(userId, req.family.id);
-    hub.detachUser(userId, req.family.id);
+    hub.detachUser(userId, req.family.id, { reason: self ? 'left' : 'removed', family_name: req.family.name });
     logActivity({
       familyId: req.family.id,
       userId: self ? userId : req.user.id,

@@ -1,9 +1,8 @@
 import { useState, type FormEvent } from 'react';
-import { useQueryClient } from '@tanstack/react-query';
 import { Home, KeyRound, Ticket } from 'lucide-react';
 import { useNavigate } from 'react-router';
 import { api, errorMessage } from '../lib/api';
-import { ME_KEY } from '../lib/auth';
+import { useAuth } from '../lib/auth';
 import { Button, Field, Input, SegmentedControl, toast } from '../ui';
 import type { Family } from '../lib/types';
 
@@ -14,7 +13,7 @@ export function FamilySetup({ initialCode = '', defaultName = '' }: { initialCod
   const [code, setCode] = useState(initialCode);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const qc = useQueryClient();
+  const { switchFamily } = useAuth();
   const navigate = useNavigate();
 
   const submit = async (e: FormEvent) => {
@@ -26,8 +25,7 @@ export function FamilySetup({ initialCode = '', defaultName = '' }: { initialCod
         mode === 'create'
           ? await api.post<Family>('/families', { name })
           : await api.post<Family>('/families/join', { invite_code: code });
-      qc.removeQueries({ predicate: (q) => q.queryKey[0] !== 'auth' });
-      await qc.invalidateQueries({ queryKey: ME_KEY });
+      await switchFamily(family.id);
       toast.success(mode === 'create' ? `${family.name} is ready!` : `You joined ${family.name}`);
       navigate('/home', { replace: true });
     } catch (err) {

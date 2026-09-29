@@ -45,6 +45,7 @@ export default function SettingsPage() {
 function ProfileCard() {
   const { user, setMe } = useAuth();
   const [form, setForm] = useState({ name: '', email: '', phone: '', birthday: '', color: '#5B5BD6' });
+  const [emailPassword, setEmailPassword] = useState('');
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -52,6 +53,7 @@ function ProfileCard() {
   }, [user]);
 
   if (!user) return null;
+  const emailChanged = !!user.email && form.email.trim().toLowerCase() !== user.email.toLowerCase();
   const dirty =
     form.name !== user.name || form.email !== (user.email ?? '') || form.phone !== (user.phone ?? '') || form.birthday !== (user.birthday ?? '') || form.color !== user.color;
 
@@ -60,8 +62,12 @@ function ProfileCard() {
     setSaving(true);
     try {
       const patch: Record<string, unknown> = { name: form.name, phone: form.phone, birthday: form.birthday || null, color: form.color };
-      if (user.email && form.email !== user.email) patch.email = form.email;
+      if (emailChanged) {
+        patch.email = form.email.trim();
+        patch.current_password = emailPassword;
+      }
       setMe(await api.patch<MeResponse>('/auth/me', patch));
+      setEmailPassword('');
       toast.success('Profile saved');
     } catch (err) {
       toast.error(errorMessage(err));
@@ -80,6 +86,7 @@ function ProfileCard() {
             size={104}
             value={user.avatar_url}
             placeholder={<Avatar user={{ ...user, color: form.color, name: form.name || user.name }} size="2xl" />}
+            hint="Photo changes save right away"
             maxSize={800}
             onSelect={async (file) => {
               setMe(await api.upload<MeResponse>('/auth/me/avatar', fileForm(file)));
@@ -99,6 +106,11 @@ function ProfileCard() {
           <Field label="Email">
             <Input type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} autoComplete="email" disabled={!user.email} />
           </Field>
+          {emailChanged && (
+            <Field label="Current password" hint="Required to change your email." className="animate-fade-in sm:col-span-2">
+              <PasswordInput autoComplete="current-password" value={emailPassword} onChange={(e) => setEmailPassword(e.target.value)} />
+            </Field>
+          )}
           <Field label="Phone">
             <Input type="tel" value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} placeholder="+1 555 0100" autoComplete="tel" />
           </Field>
@@ -106,11 +118,16 @@ function ProfileCard() {
             <Input type="date" value={form.birthday} onChange={(e) => setForm({ ...form, birthday: e.target.value })} />
           </Field>
         </div>
-        <Field label="Your color" hint="Used for your avatar, calendar events and map pin.">
+        <Field label="Your color" hint="Used for your avatar, calendar events and map pin. Saved with the rest of your profile.">
           <ColorPicker value={form.color} onChange={(color) => setForm({ ...form, color })} />
         </Field>
-        <div className="flex justify-end border-t border-border pt-5">
-          <Button type="submit" loading={saving} disabled={!dirty || !form.name.trim()}>
+        <div className="flex items-center justify-end gap-3 border-t border-border pt-5">
+          {dirty && (
+            <span className="flex items-center gap-1.5 text-[13px] font-medium text-warning-soft-fg animate-fade-in" role="status">
+              <span className="size-1.5 rounded-full bg-warning" /> Unsaved changes
+            </span>
+          )}
+          <Button type="submit" loading={saving} disabled={!dirty || !form.name.trim() || (emailChanged && !emailPassword)}>
             Save profile
           </Button>
         </div>
@@ -176,7 +193,7 @@ function AppearanceCard() {
                 <t.icon size={14} className="text-muted" /> {t.label}
               </span>
               {on && (
-                <span className="absolute right-1 top-1 flex size-5 items-center justify-center rounded-full bg-primary text-white animate-check">
+                <span className="absolute right-1 top-1 flex size-5 items-center justify-center rounded-full bg-primary-solid text-white animate-check">
                   <Check size={12} strokeWidth={3} />
                 </span>
               )}

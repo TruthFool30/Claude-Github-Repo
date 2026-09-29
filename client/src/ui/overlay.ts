@@ -1,12 +1,12 @@
 /** Shared helpers for overlays (Modal, Lightbox, SearchPalette…): stacking, scroll lock, focus trap. */
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 const stack: symbol[] = [];
 let lockCount = 0;
 let savedOverflow = '';
 let savedPadding = '';
 
-/** Registers an open overlay; returns a function telling whether it is the topmost one. */
+/** Registers an open overlay; returns a STABLE function telling whether it is the topmost one. */
 export function useOverlayStack(active: boolean) {
   const idRef = useRef<symbol>(Symbol('overlay'));
   useEffect(() => {
@@ -18,7 +18,7 @@ export function useOverlayStack(active: boolean) {
       if (i >= 0) stack.splice(i, 1);
     };
   }, [active]);
-  return () => stack[stack.length - 1] === idRef.current;
+  return useCallback(() => stack[stack.length - 1] === idRef.current, []);
 }
 
 /** Lock body scroll while active (ref-counted, compensates scrollbar width). */
@@ -56,7 +56,11 @@ export function focusableIn(root: HTMLElement): HTMLElement[] {
  * Trap Tab focus inside `ref` while active, focus the first field (or `[data-autofocus]`) on open,
  * and restore focus to the previously focused element on close.
  */
-export function useFocusTrap(ref: React.RefObject<HTMLElement | null>, active: boolean, isTop: () => boolean = () => true) {
+export function useFocusTrap(ref: React.RefObject<HTMLElement | null>, active: boolean, isTop?: () => boolean) {
+  // Keep the latest isTop in a ref so the effect below only re-runs when `active` changes —
+  // re-running it would steal focus back to the first field on every parent re-render.
+  const isTopRef = useRef(isTop);
+  isTopRef.current = isTop;
   useEffect(() => {
     if (!active) return;
     const previouslyFocused = document.activeElement as HTMLElement | null;
@@ -69,7 +73,7 @@ export function useFocusTrap(ref: React.RefObject<HTMLElement | null>, active: b
       target.focus({ preventScroll: true });
     });
     const onKey = (e: KeyboardEvent) => {
-      if (e.key !== 'Tab' || !isTop()) return;
+      if (e.key !== 'Tab' || !(isTopRef.current?.() ?? true)) return;
       const root = ref.current;
       if (!root) return;
       const items = focusableIn(root);
@@ -95,7 +99,7 @@ export function useFocusTrap(ref: React.RefObject<HTMLElement | null>, active: b
       document.removeEventListener('keydown', onKey);
       if (previouslyFocused && document.contains(previouslyFocused)) previouslyFocused.focus({ preventScroll: true });
     };
-  }, [active, ref, isTop]);
+  }, [active, ref]);
 }
 
 /**
@@ -127,15 +131,17 @@ export function usePresence(open: boolean, exitMs = 220) {
 export function useEscape(active: boolean, isTop: () => boolean, onEscape: () => void) {
   const cb = useRef(onEscape);
   cb.current = onEscape;
+  const isTopRef = useRef(isTop);
+  isTopRef.current = isTop;
   useEffect(() => {
     if (!active) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && isTop()) {
+      if (e.key === 'Escape' && isTopRef.current()) {
         e.stopPropagation();
         cb.current();
       }
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [active, isTop]);
+  }, [active]);
 }

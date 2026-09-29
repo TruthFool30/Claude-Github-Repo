@@ -18,7 +18,7 @@ export interface IconButtonProps extends Omit<ButtonHTMLAttributes<HTMLButtonEle
 const variants = {
   ghost: 'text-muted hover:bg-surface-2 hover:text-fg',
   secondary: 'bg-surface border border-border text-fg hover:bg-surface-2 shadow-xs',
-  primary: 'bg-primary text-on-primary hover:bg-primary-hover shadow-xs',
+  primary: 'bg-primary-solid text-on-primary hover:bg-primary-solid-hover shadow-xs',
   danger: 'text-danger hover:bg-danger-soft',
   soft: 'bg-primary-soft text-primary-soft-fg hover:brightness-95 dark:hover:brightness-125',
 };
@@ -47,11 +47,11 @@ export function IconButton({
       {loading ? <Spinner size={iconSizes[size] - 2} /> : renderIcon(icon, undefined, iconSizes[size])}
       {badge ? (
         typeof badge === 'number' ? (
-          <span className="absolute -right-0.5 -top-0.5 flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-danger px-1 text-[10px] font-bold leading-none text-white ring-2 ring-surface tabular">
+          <span className="absolute -right-0.5 -top-0.5 flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-danger-solid px-1 text-[10px] font-bold leading-none text-white ring-2 ring-surface tabular">
             {badge > 99 ? '99+' : badge}
           </span>
         ) : (
-          <span className="absolute right-2 top-2 size-2 rounded-full bg-danger ring-2 ring-surface" />
+          <span className="absolute right-2 top-2 size-2 rounded-full bg-danger-solid ring-2 ring-surface" />
         )
       ) : null}
     </button>

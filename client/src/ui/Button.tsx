@@ -11,12 +11,12 @@ const base =
   'focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 active:scale-[0.97]';
 
 const variants: Record<ButtonVariant, string> = {
-  primary: 'bg-primary text-on-primary shadow-xs hover:bg-primary-hover shadow-[inset_0_1px_0_rgb(255_255_255/0.15)]',
+  primary: 'bg-primary-solid text-on-primary shadow-xs hover:bg-primary-solid-hover shadow-[inset_0_1px_0_rgb(255_255_255/0.15)]',
   secondary: 'bg-surface text-fg border border-border shadow-xs hover:bg-surface-2 hover:border-border-strong',
   outline: 'bg-transparent text-fg border border-border-strong hover:bg-surface-2',
   ghost: 'bg-transparent text-muted hover:bg-surface-2 hover:text-fg',
   soft: 'bg-primary-soft text-primary-soft-fg hover:brightness-95 dark:hover:brightness-125',
-  danger: 'bg-danger text-white shadow-xs hover:bg-danger-hover',
+  danger: 'bg-danger-solid text-white shadow-xs hover:bg-danger-solid-hover',
 };
 
 const sizes: Record<ButtonSize, string> = {

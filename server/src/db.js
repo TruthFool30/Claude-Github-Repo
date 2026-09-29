@@ -98,15 +98,47 @@ export function openDb(dbPath, modules = []) {
   return db;
 }
 
-/** Run `fn` inside a transaction (BEGIN/COMMIT, ROLLBACK on throw). Returns fn's result. */
+const txDepth = new WeakMap();
+let savepointSeq = 0;
+
+/**
+ * Run `fn` inside a transaction and return its result. Re-entrant: when already inside a
+ * transaction (an outer tx() or a manual BEGIN) it uses a SAVEPOINT, so helpers can call tx()
+ * freely. Throwing inside `fn` rolls back (only the inner savepoint when nested) and rethrows.
+ * `fn` must be synchronous (node:sqlite is synchronous anyway).
+ */
 export function tx(db, fn) {
-  db.exec('BEGIN');
+  const depth = txDepth.get(db) ?? 0;
+  let savepoint = null;
+  if (depth > 0) {
+    savepoint = `hearth_sp_${++savepointSeq}`;
+    db.exec(`SAVEPOINT ${savepoint}`);
+  } else {
+    try {
+      db.exec('BEGIN');
+    } catch (err) {
+      if (!/within a transaction/i.test(err.message)) throw err;
+      savepoint = `hearth_sp_${++savepointSeq}`;
+      db.exec(`SAVEPOINT ${savepoint}`);
+    }
+  }
+  txDepth.set(db, depth + 1);
   try {
     const result = fn();
-    db.exec('COMMIT');
+    if (result && typeof result.then === 'function') throw new Error('tx(): fn must be synchronous');
+    db.exec(savepoint ? `RELEASE ${savepoint}` : 'COMMIT');
     return result;
   } catch (err) {
-    db.exec('ROLLBACK');
+    try {
+      if (savepoint) {
+        db.exec(`ROLLBACK TO ${savepoint}`);
+        db.exec(`RELEASE ${savepoint}`);
+      } else {
+        db.exec('ROLLBACK');
+      }
+    } catch { /* already rolled back */ }
     throw err;
+  } finally {
+    txDepth.set(db, depth);
   }
 }

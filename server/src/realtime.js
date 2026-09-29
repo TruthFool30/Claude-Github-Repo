@@ -1,12 +1,13 @@
 /**
  * Server-Sent Events hub.
- * Each connected client is bound to (sessionToken, userId, familyId). Events are
- * delivered either to every client of a family (`broadcast`) or to specific users
- * (`sendToUsers`, optionally only while they're viewing a given family).
+ * Each connected client is bound to (sessionToken, userId, familyId). A browser tab passes
+ * `?family_id=` so each tab's stream follows that tab's family; streams opened without it follow
+ * the session's default family. Events go to every client of a family (`broadcast`) or to
+ * specific users (`sendToUsers`, optionally only while they're viewing a given family).
  *
  * Wire format: `data: {"type": "...", "payload": {...}, "at": "<iso>"}\n\n`
  */
-export function createHub({ heartbeatMs = 25000 } = {}) {
+export function createHub({ heartbeatMs = 25000, isSessionValid = null } = {}) {
   const clients = new Set();
   let nextId = 1;
 
@@ -19,8 +20,19 @@ export function createHub({ heartbeatMs = 25000 } = {}) {
     }
   }
 
+  function end(client, type = null, payload = null) {
+    if (type) write(client, type, payload);
+    clients.delete(client);
+    try { client.res.end(); } catch { /* ignore */ }
+  }
+
   const timer = setInterval(() => {
     for (const c of clients) {
+      // Long-lived streams must not outlive their session (logout elsewhere, expiry, password change).
+      if (isSessionValid && c.token && !isSessionValid(c.token)) {
+        end(c, 'session.ended', null);
+        continue;
+      }
       try {
         c.res.write(`: ping ${Date.now()}\n\n`);
       } catch {
@@ -31,8 +43,8 @@ export function createHub({ heartbeatMs = 25000 } = {}) {
   timer.unref?.();
 
   return {
-    /** Express handler body for GET /api/stream (after requireAuth; family optional). */
-    connect(req, res) {
+    /** Express handler body for GET /api/stream (after requireAuth; req.family optional). */
+    connect(req, res, { explicitFamily = false } = {}) {
       res.status(200);
       res.set({
         'Content-Type': 'text/event-stream; charset=utf-8',
@@ -48,6 +60,7 @@ export function createHub({ heartbeatMs = 25000 } = {}) {
         token: req.session?.token,
         userId: req.user.id,
         familyId: req.family?.id ?? null,
+        explicit: explicitFamily,
       };
       clients.add(client);
       write(client, 'hello', { user_id: client.userId, family_id: client.familyId });
@@ -69,28 +82,40 @@ export function createHub({ heartbeatMs = 25000 } = {}) {
       }
     },
 
-    /** Re-bind a session's open streams to another family (after /families/:id/activate). */
+    /** Re-bind a session's streams that follow the session default (no explicit ?family_id). */
     rebindSession(token, familyId) {
-      for (const c of clients) if (c.token === token) c.familyId = familyId ?? null;
+      for (const c of clients) if (c.token === token && !c.explicit) c.familyId = familyId ?? null;
     },
 
     /** Detach a user's streams from a family (user removed / left). */
-    detachUser(userId, familyId) {
+    detachUser(userId, familyId, payload = {}) {
       for (const c of clients) {
         if (c.userId === Number(userId) && c.familyId === Number(familyId)) {
+          write(c, 'family.removed', { family_id: Number(familyId), ...payload });
           c.familyId = null;
-          write(c, 'family.removed', { family_id: Number(familyId) });
         }
       }
     },
 
-    /** End sessions' streams (logout). */
-    closeSession(token) {
+    /** Detach every stream from a family (family deleted). */
+    detachFamily(familyId, payload = {}) {
       for (const c of clients) {
-        if (c.token === token) {
-          clients.delete(c);
-          try { c.res.end(); } catch { /* ignore */ }
+        if (c.familyId === Number(familyId)) {
+          write(c, 'family.removed', { family_id: Number(familyId), ...payload });
+          c.familyId = null;
         }
+      }
+    },
+
+    /** End one session's streams (logout). */
+    closeSession(token) {
+      for (const c of clients) if (c.token === token) end(c, 'session.ended', null);
+    },
+
+    /** End all of a user's streams except those of `exceptToken` (password change). */
+    closeUserSessions(userId, { exceptToken = null } = {}) {
+      for (const c of clients) {
+        if (c.userId === Number(userId) && c.token !== exceptToken) end(c, 'session.ended', null);
       }
     },
 

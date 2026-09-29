@@ -134,25 +134,36 @@ export function router(ctx) {                 // ctx described below
 POST /api/auth/register {name,email,password, family_name?}     -> {user, families}
 POST /api/auth/login {email,password}                             -> {user, families}
 POST /api/auth/logout
-GET  /api/auth/me                    -> {user, families:[{id,name,role,...}], active_family_id}
-PATCH /api/auth/me {name,color,birthday,phone,password?,current_password?}
+GET  /api/auth/me                    -> {user, families:[{id,name,role,...}], active_family_id}  (signed out: 200 {user:null, families:[], active_family_id:null})
+PATCH /api/auth/me {name,color,birthday,phone,email?,password?,current_password?}  (email or password change requires current_password)
 POST /api/auth/me/avatar (multipart file) -> {user}
 POST /api/families {name}            -> family (creator becomes admin, becomes active)
 POST /api/families/join {invite_code} -> family
-POST /api/families/:id/activate      -> sets session active_family_id
+POST /api/families/:id/activate      -> sets the session's DEFAULT family (used by tabs/requests without X-Family-Id)
+GET  /api/families/invite/:code      -> {name, member_count, already_member, family_id}  (no auth needed, rate-limited; for /join/<code> links)
 GET  /api/family                     -> active family + members [{id,name,color,avatar_url,role,birthday,...}]
 PATCH /api/family {name,currency}    (admin)
+DELETE /api/family {confirm_name}    (admin; deletes the family and ALL its data; confirm_name must equal the family name)
 POST /api/family/cover (multipart)   (admin)
 POST /api/family/invite-code/rotate  (admin)
 PATCH /api/family/members/:userId {role,nickname} (admin)
-DELETE /api/family/members/:userId   (admin, or self = leave)
+DELETE /api/family/members/:userId   (admin, or self = leave; the sole admin must promote someone first;
+                                      when the last member who can sign in leaves, the family is deleted -> {ok, family_deleted:true})
 POST /api/family/members {name,email?,role:'child',password?}  (admin: add a child/managed member)
 GET  /api/activity?before=<id>&limit=30  -> [{..., user}]
 GET  /api/notifications              -> {items, unread}
 POST /api/notifications/read {ids?}  (all if omitted)
-GET  /api/stream                     -> SSE (event: message, data: {type,payload,at})
+GET  /api/stream?family_id=<id>      -> SSE (event: message, data: {type,payload,at}); bound to that family (default: session family)
 GET  /api/search?q=                  -> aggregated results (modules may register a `search(ctx, familyId, q)` export returning [{module,title,subtitle,link}])
 ```
+
+**Which family a request is for.** Every request may carry an `X-Family-Id: <id>` header (the web
+client sends it on every call, holding the family per browser tab). `requireFamily` verifies
+membership and sets `req.family`; a family you don't belong to → `403 {code:'NOT_MEMBER'}`. Without
+the header the session's default family is used. So two tabs can safely work in two families.
+`invite_code` is only returned to admins (`null` for everyone else). Login/register/join/invite
+lookups are rate-limited (429 `{error}` + `Retry-After`); set `HEARTH_RATE_LIMITS=off` on scripted
+test instances if needed.
 
 Optional module exports: `search(ctx, familyId, q)` (see above) and `dashboard(ctx, req)` returning a
 small object the Wall can show (e.g. calendar returns today's events). The foundation exposes
@@ -189,7 +200,7 @@ shared component is missing, build a local one inside the module folder.
 - TanStack Query: query keys start with the module id: `['lists']`, `['lists', id]`.
 - `useLive(prefix, handler?)` — subscribes to SSE; **by default any event whose type starts with
   `<prefix>.` invalidates queries with key `[prefix]`** so data stays live across devices.
-- `useAuth()` → `{ user, family, members, families, role, isAdmin, refresh, switchFamily, logout }`.
+- `useAuth()` → `{ user, family, familyId, members, families, role, isAdmin, loading, refresh, switchFamily, logout, expectFamilyExit }` (family is per browser tab).
   `members` are `{id,name,color,avatar_url,role,birthday}`.
 - `lib/format.ts` → `fmtDate`, `fmtTime`, `fmtRelative`, `fmtMoney(amount, currency)`, `initials`.
 - `ui/` exports (from `ui/index.ts`): `Button` (variants primary/secondary/ghost/danger, sizes sm/md/lg,
@@ -290,20 +301,26 @@ export function router(ctx) {
   for managed members), `req.family` = the full `families` row (`id, name, invite_code, cover_url,
   currency, created_by, created_at`), `req.role` = `'admin' | 'member' | 'child'`.
 - **`ctx`** — `{ db, broadcast, sendToUsers, logActivity, notify, upload, publicUser, storeFile,
-  removeFile, tx, httpError, uploadDir, hub, auth }`:
+  removeFile, tx, httpError, uploadDir, hub, auth, rateLimit, failureLimit }`:
   - `broadcast(familyId, type, payload)` — SSE to every member currently viewing that family.
   - `sendToUsers(userIds, type, payload, familyId?)` — SSE to specific users only.
   - `logActivity({ familyId, userId, module, verb, entityId?, summary, link?, createdAt? })` — returns the
     row (with `user`) and broadcasts `'activity'`. `createdAt` (ISO) lets seeds backdate entries.
     The summary is rendered after the actor's name ("Alex **added 3 items to Groceries**").
   - `notify({ familyId, userIds, module, title, body?, link?, excludeUserId? })` — skips non-members
-    and `excludeUserId` (pass `req.user.id` so people aren't notified about their own actions).
+    and `excludeUserId` (pass `req.user.id` so people aren't notified about their own actions). Live
+    delivery only reaches the recipients' streams that are viewing that family.
   - `upload` — multer: `r.post('/', ctx.upload.single('file'), handler)` → `req.file.url`
     (`/uploads/<familyId>/<random>.<ext>`), plus `req.file.size/mimetype/originalname`. 25 MB limit,
     any file type (validate `mimetype` yourself; oversize → 413 JSON). `upload.array('files', 20)` works too.
+    **Automatic cleanup:** if the response ends with status ≥ 400 (you `res.status(400)`, throw
+    `httpError`, or crash), the files multer stored for that request are deleted — no manual cleanup.
   - `storeFile(familyId, buffer, ext)` → URL (for seeds/server-generated files, e.g. SVG placeholder photos).
   - `removeFile(url)` — delete an uploaded file when its row is deleted.
-  - `tx(db, () => { ... })` — BEGIN/COMMIT/ROLLBACK wrapper. `publicUser(row)` — strip secrets.
+  - `tx(db, () => { ... })` — synchronous transaction wrapper; **re-entrant** (nested calls, or a
+    call inside a manual `BEGIN`, use SAVEPOINTs, so an inner failure only rolls back the inner part).
+    `publicUser(row)` — strip secrets.
+  - `rateLimit(rule, req => key)` — middleware using a rule from `DEFAULT_LIMITS` in `app.js`.
 - **Errors**: `throw httpError(status, 'Message')` (or `ctx.httpError`) anywhere in a handler, or
   `res.status(4xx).json({ error })`. Unknown errors → 500 `{ error: 'Something went wrong on our side' }`.
 - **Timestamps**: core tables store ISO-8601 UTC (`2026-09-29T07:41:00.123Z`). Use `ISO_NOW` as the
@@ -319,7 +336,10 @@ export function router(ctx) {
   - `dashboard(ctx, req)` → small JSON object; `GET /api/dashboard` returns `{ [module]: value }`.
 - **Core SSE event types** (besides your `'<module>.*'` events): `hello` (on connect), `activity`,
   `notification`, `notification.read`, `family.updated`, `family.member.joined`,
-  `family.member.left`, `family.removed`.
+  `family.member.left`, `family.removed` (`{family_id, reason: 'removed'|'left'|'deleted'}`),
+  `session.ended` (session revoked: logout elsewhere, password change, expiry — the stream closes).
+- **Validation helpers** (`../util.js`): `cleanStr` rejects non-strings (400), `isDate` requires a real
+  calendar date (`2020-02-31` is invalid), `isColor`, `isEmail`, `toId`.
 - **Core API response notes**: `GET /api/search` → `{ q, results: [{ module, title, subtitle, link, avatar? }] }`;
   `GET /api/family` → family fields + `role` + `members[]` (`{ id, name, email, color, avatar_url,
   birthday, phone, role, nickname, joined_at, managed }`); also `GET /api/family/members`.
@@ -346,7 +366,9 @@ test('lists are family-scoped', async () => {
 });
 ```
 
-Agent methods: `get/post/patch/put/del(url, body?)` → `{ status, body, headers }`;
+Agent methods: `get/post/patch/put(url, body?)`, `del(url, { body }?)` → `{ status, body, headers }`;
+`agent.familyId = id` pins the agent like a browser tab (sends `X-Family-Id`), `agent.tab()` returns a
+second agent on the same session; rate limits are relaxed in `startServer()` unless you pass `limits`;
 `upload(url, { file: PNG_1X1, filename, type, field = 'file', fields })`. `collectEvents(agent, { count | until, timeoutMs })`
 resolves once the SSE stream is connected and returns `{ events: Promise<event[]> }`.
 `srv.ctx` / `srv.db` give direct access (e.g. to call your `seed`). Run one file:
@@ -357,7 +379,7 @@ resolves once the SSE stream is connected and returns `{ events: Promise<event[]
 Import paths from inside `client/src/modules/<name>/`:
 
 ```ts
-import { api, qs, errorMessage, ApiError } from '../../lib/api';
+import { api, qs, errorMessage, ApiError } from '../../lib/api';   // api.del(path, body?) supports a JSON body
 import { useAuth, useMember } from '../../lib/auth';
 import { useLive } from '../../lib/live';
 import { fmtDate, fmtTime, fmtDateTime, fmtDay, fmtRelative, fmtMoney, initials, firstName, plural, toDate, toDateKey, age, fmtBytes } from '../../lib/format';
@@ -374,14 +396,19 @@ import type { ModuleDef } from '../types';
 - **Data**: `useQuery({ queryKey: ['lists'], queryFn: () => api.get<List[]>('/lists') })`; after mutations
   `queryClient.invalidateQueries({ queryKey: ['lists'] })`. `useLive('lists')` keeps every `['lists', …]`
   query fresh when anyone changes data (optional handler: `useLive('lists', (e) => …)`; pass
-  `{ invalidate: false }` to handle events yourself). Queries are cleared automatically on family switch.
+  `{ invalidate: false }` to handle events yourself). All non-auth queries are reset whenever the tab's
+  family changes (switch, removal, deletion), and the SSE stream is re-opened for the new family —
+  you never need family ids in query keys. `useAuth().familyId` is this tab's family id; the client
+  sends it as `X-Family-Id` automatically. Notification toasts are shown once by the shell.
 - **Dates**: API dates `YYYY-MM-DD` are local calendar days — parse with `toDate()`, format a `Date` back with `toDateKey()`.
 - **Layout**: pages render inside a padded, max-width `<main>` (`max-w-6xl`). Start each page with
   `<PageHeader title subtitle icon={mod.icon} accent={mod.accent} actions={…} />` (it also sets the tab title).
   For full-height layouts (chat, map) use `className="h-[calc(100dvh-var(--shell-chrome))]"`.
   On mobile, the bottom nav is 64px + safe area; `<Fab>` already sits above it (hidden ≥1024px unless `desktop`).
 - **Styling**: token classes work in both themes — `bg-bg`, `bg-surface`, `bg-surface-2/-3`, `text-fg`,
-  `text-muted`, `text-subtle`, `border-border`, `border-border-strong`, `bg-primary`, `text-primary`,
+  `text-muted`, `text-subtle`, `border-border`, `border-border-strong`, `text-primary` (text/icons),
+  `bg-primary-solid` / `bg-danger-solid` (filled backgrounds under white text — AA in both themes;
+  prefer these over `bg-primary`/`bg-danger` for anything with white text),
   `bg-primary-soft text-primary-soft-fg`, `bg-danger|success|warning|info` and their `-soft` / `-soft-fg`
   pairs, `shadow-card|lift|pop`, `ring-ring`, animations `animate-fade-in|scale-in|pop-in`. Tint with a
   module/member color via inline style, e.g.
@@ -445,6 +472,9 @@ await page.goto('http://localhost:4011/lists');
 await page.screenshot({ path: '/tmp/lists.png' });
 await browser.close();
 ```
+
+Foundation browser regressions: `BASE=http://localhost:4011 npm run e2e` (runs
+`scripts/e2e-foundation.mjs` — modal typing, menu focus, per-tab families, join links, rate-limit UI…).
 
 Dev mode alternative: `API_PORT=4011 VITE_PORT=5180 npm run dev -w client` points a Vite dev server
 at an already running API.

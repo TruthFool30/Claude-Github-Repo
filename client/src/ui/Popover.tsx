@@ -5,7 +5,8 @@ import { useEscape, useOverlayStack, usePresence } from './overlay';
 
 export interface PopoverProps {
   open: boolean;
-  onClose: () => void;
+  /** Called with 'escape' (Esc key) or 'outside' (click/tap elsewhere, resize). */
+  onClose: (reason: 'escape' | 'outside') => void;
   /** Element the popover is positioned against. */
   anchorRef: RefObject<HTMLElement | null>;
   align?: 'start' | 'end';
@@ -14,6 +15,7 @@ export interface PopoverProps {
   className?: string;
   children: ReactNode;
   role?: string;
+  id?: string;
   'aria-label'?: string;
 }
 
@@ -27,7 +29,7 @@ export function Popover({ open, onClose, anchorRef, align = 'end', offset = 8, c
   const panelRef = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState<{ top: number; left: number; origin: string } | null>(null);
 
-  useEscape(open, isTop, onClose);
+  useEscape(open, isTop, () => onClose('escape'));
 
   useLayoutEffect(() => {
     if (!mounted) return;
@@ -63,7 +65,7 @@ export function Popover({ open, onClose, anchorRef, align = 'end', offset = 8, c
     const onDown = (e: PointerEvent) => {
       const t = e.target as Node;
       if (panelRef.current?.contains(t) || anchorRef.current?.contains(t)) return;
-      onClose();
+      onClose('outside');
     };
     document.addEventListener('pointerdown', onDown, true);
     return () => document.removeEventListener('pointerdown', onDown, true);

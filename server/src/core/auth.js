@@ -1,13 +1,13 @@
 import { Router } from 'express';
 import {
-  PALETTE, clearSessionCookie, createSession, destroySession, hashPassword, publicUser,
+  PALETTE, clearSessionCookie, isManagedEmail, createSession, destroySession, hashPassword, publicUser,
   setSessionCookie, userFamilies, verifyPassword,
 } from '../auth.js';
 import { cleanStr, httpError, isColor, isDate, isEmail } from '../util.js';
 import { createFamily } from './families.js';
 
 export function authRouter(ctx) {
-  const { db, auth, hub, avatarUpload, removeFile } = ctx;
+  const { db, auth, hub, avatarUpload, removeFile, rateLimit, failureLimit } = ctx;
   const r = Router();
 
   const payload = (userId, activeFamilyId) => ({
@@ -16,12 +16,12 @@ export function authRouter(ctx) {
     active_family_id: activeFamilyId ?? null,
   });
 
-  r.post('/register', (req, res) => {
+  r.post('/register', rateLimit('register-ip', (req) => req.ip), (req, res) => {
     const name = cleanStr(req.body?.name, { field: 'Name', required: true, max: 80 });
     const email = cleanStr(req.body?.email, { field: 'Email', required: true, max: 200 })?.toLowerCase();
     const password = String(req.body?.password ?? '');
     const familyName = cleanStr(req.body?.family_name, { field: 'Family name', max: 80 });
-    if (!isEmail(email)) throw httpError(400, 'Please enter a valid email address');
+    if (!isEmail(email) || isManagedEmail(email)) throw httpError(400, 'Please enter a valid email address');
     if (password.length < 6) throw httpError(400, 'Password must be at least 6 characters');
     if (db.prepare('SELECT 1 FROM users WHERE email = ?').get(email)) {
       throw httpError(409, 'An account with this email already exists');
@@ -38,18 +38,26 @@ export function authRouter(ctx) {
     res.status(201).json(payload(Number(userId), familyId));
   });
 
-  r.post('/login', (req, res) => {
+  // Brute-force protection counts FAILED attempts per IP and per email.
+  r.post(
+    '/login',
+    (req, res) => {
     const email = String(req.body?.email ?? '').trim().toLowerCase();
     const password = String(req.body?.password ?? '');
+    const limit = failureLimit([['login-ip', req.ip], ['login-email', email]]);
+    if (limit.check(res)) return;
     const row = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
     if (!row || !verifyPassword(password, row.password_hash)) {
+      limit.fail();
       throw httpError(401, 'Incorrect email or password');
     }
+    limit.succeed();
     const families = userFamilies(db, row.id);
     const token = createSession(db, row.id, families[0]?.id ?? null);
     setSessionCookie(res, token);
     res.json(payload(row.id, families[0]?.id ?? null));
-  });
+    },
+  );
 
   r.post('/logout', auth.requireAuth, (req, res) => {
     hub.closeSession(req.session.token);
@@ -58,7 +66,9 @@ export function authRouter(ctx) {
     res.json({ ok: true });
   });
 
-  r.get('/me', auth.requireAuth, (req, res) => {
+  // Signed out -> 200 { user: null } so public pages don't log a 401.
+  r.get('/me', auth.optionalAuth, (req, res) => {
+    if (!req.user) return res.json({ user: null, families: [], active_family_id: null });
     const resolved = auth.resolveActiveFamily(req); // repairs a stale active family
     res.json(payload(req.user.id, resolved?.family.id ?? null));
   });
@@ -78,7 +88,10 @@ export function authRouter(ctx) {
     if ('phone' in b) updates.phone = cleanStr(b.phone, { field: 'Phone', max: 40 });
     if ('email' in b) {
       const email = cleanStr(b.email, { field: 'Email', required: true, max: 200 }).toLowerCase();
-      if (!isEmail(email)) throw httpError(400, 'Please enter a valid email address');
+      if (!isEmail(email) || isManagedEmail(email)) throw httpError(400, 'Please enter a valid email address');
+      if (email !== String(req.userRow.email).toLowerCase() && !verifyPassword(b.current_password ?? '', req.userRow.password_hash)) {
+        throw httpError(400, 'Enter your current password to change your email');
+      }
       const clash = db.prepare('SELECT id FROM users WHERE email = ? AND id != ?').get(email, req.user.id);
       if (clash) throw httpError(409, 'That email is already in use');
       updates.email = email;
@@ -97,6 +110,7 @@ export function authRouter(ctx) {
       if (updates.password_hash) {
         // Sign out other devices after a password change.
         db.prepare('DELETE FROM sessions WHERE user_id = ? AND token != ?').run(req.user.id, req.session.token);
+        hub.closeUserSessions(req.user.id, { exceptToken: req.session.token });
       }
       broadcastMemberChange(ctx, req.user.id);
     }

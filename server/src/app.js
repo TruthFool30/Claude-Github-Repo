@@ -2,26 +2,80 @@ import fs from 'node:fs';
 import path from 'node:path';
 import express from 'express';
 import cookieParser from 'cookie-parser';
-import { makeAuth, publicUser } from './auth.js';
+import { isSessionValid, makeAuth, publicUser } from './auth.js';
 import { openDb, tx } from './db.js';
 import { createHub } from './realtime.js';
 import { makeLogActivity } from './activity.js';
 import { makeNotify } from './notifications.js';
 import { imageOnly, makeRemoveFile, makeStoreFile, makeUpload, makeUploadServer } from './uploads.js';
-import { httpError } from './util.js';
+import { TOO_MANY, createRateLimiter, httpError } from './util.js';
 import { authRouter } from './core/auth.js';
-import { familiesRouter, familyRouter } from './core/families.js';
+import { familiesRouter, familyRouter, invitePreviewHandler } from './core/families.js';
 import { activityRouter, dashboardHandler, notificationsRouter, searchHandler, streamHandler } from './core/feed.js';
 import { modules as defaultModules, validateModules } from './modules/index.js';
 import { config } from './config.js';
+
+/** Default rate limits (per key, fixed window). Override with createApp({ limits }). */
+export const DEFAULT_LIMITS = {
+  'login-ip': { max: 100, windowMs: 10 * 60_000 },
+  'login-email': { max: 10, windowMs: 10 * 60_000 },
+  'register-ip': { max: 30, windowMs: 60 * 60_000 },
+  'join-ip': { max: 60, windowMs: 10 * 60_000 },
+  'invite-ip': { max: 120, windowMs: 10 * 60_000 },
+};
+
+/** HEARTH_RATE_LIMITS=off disables rate limiting (handy for scripted test instances). */
+function envLimits() {
+  if (process.env.HEARTH_RATE_LIMITS !== 'off') return {};
+  return Object.fromEntries(Object.keys(DEFAULT_LIMITS).map((k) => [k, { max: Number.MAX_SAFE_INTEGER, windowMs: 60_000 }]));
+}
 
 /**
  * Build the context object shared by core routers, module routers and seeds.
  * Exposed separately so seed.js can build it without an HTTP server.
  */
-export function createContext({ db, uploadDir, hub = createHub() }) {
+export function createContext({ db, uploadDir, hub = createHub(), limits = {} }) {
   const auth = makeAuth(db);
+  const limiter = createRateLimiter();
+  const rules = { ...DEFAULT_LIMITS, ...envLimits(), ...limits };
+  /** Middleware: rateLimit('login-ip', (req) => req.ip) -> 429 JSON when the rule's budget is spent. */
+  const rateLimit = (rule, keyFn) => (req, res, next) => {
+    const cfg = rules[rule];
+    const key = keyFn(req);
+    if (!cfg || !key) return next();
+    const { ok, retryAfter } = limiter.hit(`${rule}:${key}`, cfg);
+    if (ok) return next();
+    res.set('Retry-After', String(retryAfter));
+    res.status(429).json({ error: TOO_MANY, retry_after: retryAfter });
+  };
+  /**
+   * Failure-only limiter (login): check(keys) -> 429 sent? ; fail(keys) counts a failed attempt;
+   * succeed(keys) clears the counters. Successful sign-ins never use up the budget.
+   */
+  const failureLimit = (entries) => ({
+    check(res) {
+      for (const [rule, key] of entries) {
+        const cfg = rules[rule];
+        if (cfg && key && limiter.blocked(`${rule}:${key}`, cfg)) {
+          const retryAfter = limiter.retryAfter(`${rule}:${key}`);
+          res.set('Retry-After', String(retryAfter));
+          res.status(429).json({ error: TOO_MANY, retry_after: retryAfter });
+          return true;
+        }
+      }
+      return false;
+    },
+    fail() {
+      for (const [rule, key] of entries) if (rules[rule] && key) limiter.hit(`${rule}:${key}`, rules[rule]);
+    },
+    succeed() {
+      for (const [rule, key] of entries) if (key && rule.endsWith('-email')) limiter.clear(`${rule}:${key}`);
+    },
+  });
   const ctx = {
+    rateLimit,
+    failureLimit,
+    limiter,
     db,
     hub,
     auth,
@@ -51,12 +105,13 @@ export function createApp({
   uploadDir = config.uploadDir,
   clientDist = config.clientDist,
   modules = defaultModules,
+  limits = {},
 } = {}) {
   validateModules(modules);
   fs.mkdirSync(uploadDir, { recursive: true });
   const db = openDb(dbPath, modules);
-  const hub = createHub();
-  const ctx = createContext({ db, uploadDir, hub });
+  const hub = createHub({ isSessionValid: (token) => isSessionValid(db, token) });
+  const ctx = createContext({ db, uploadDir, hub, limits });
   const { requireAuth, requireFamily } = ctx.auth;
 
   const app = express();
@@ -66,9 +121,24 @@ export function createApp({
   app.use(express.urlencoded({ extended: false }));
   app.use(cookieParser());
 
+  // Uploaded files of a request that ends in an error (validation 4xx, thrown error, 5xx) are
+  // deleted automatically, so handlers never leave orphans on disk.
+  app.use((req, res, next) => {
+    res.on('finish', () => {
+      if (res.statusCode < 400) return;
+      const files = [
+        ...(req.file ? [req.file] : []),
+        ...(Array.isArray(req.files) ? req.files : Object.values(req.files ?? {}).flat()),
+      ];
+      for (const f of files) if (f?.path) fs.rm(f.path, { force: true }, () => {});
+    });
+    next();
+  });
+
   // ---- core API ----
   app.get('/api/health', (req, res) => res.json({ ok: true, modules: modules.map((m) => m.name) }));
   app.use('/api/auth', authRouter(ctx));
+  app.get('/api/families/invite/:code', ctx.auth.optionalAuth, ctx.rateLimit('invite-ip', (req) => req.ip), invitePreviewHandler(ctx));
   app.use('/api/families', requireAuth, familiesRouter(ctx));
   app.use('/api/family', requireAuth, requireFamily, familyRouter(ctx));
   app.use('/api/activity', requireAuth, requireFamily, activityRouter(ctx));

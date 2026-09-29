@@ -8,6 +8,7 @@ import { hashPassword } from './auth.js';
 import { createContext } from './app.js';
 import { config } from './config.js';
 import { openDb } from './db.js';
+import { purge } from './purge.js';
 import { modules as defaultModules, validateModules } from './modules/index.js';
 
 export const DEMO_PASSWORD = 'hearth123';
@@ -19,78 +20,32 @@ export const DEMO_USERS = [
   { key: 'leo', name: 'Leo Rivera', email: 'leo@hearth.test', role: 'child', color: '#F76B15', birthday: '2017-11-08', phone: null },
 ];
 
-const q = (name) => `"${name.replace(/"/g, '""')}"`;
-
-/**
- * Delete families + users and everything that references them, generically: rows in any table
- * with a `family_id` column, then (repeatedly) rows whose single-column foreign key now points
- * at nothing (or SET NULL when the FK says so). Works for module tables without knowing them.
- */
-export function purge(db, { familyIds = [], userIds = [] }) {
-  if (!familyIds.length && !userIds.length) return;
-  const tables = db
-    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")
-    .all()
-    .map((t) => t.name);
-  db.exec('PRAGMA foreign_keys = OFF');
-  try {
-    db.exec('BEGIN');
-    const inList = (ids) => `(${ids.map(Number).join(',')})`;
-    if (familyIds.length) {
-      for (const t of tables) {
-        const cols = db.prepare(`PRAGMA table_info(${q(t)})`).all().map((c) => c.name);
-        if (cols.includes('family_id')) db.exec(`DELETE FROM ${q(t)} WHERE family_id IN ${inList(familyIds)}`);
-      }
-      db.exec(`DELETE FROM families WHERE id IN ${inList(familyIds)}`);
-    }
-    if (userIds.length) db.exec(`DELETE FROM users WHERE id IN ${inList(userIds)}`);
-    for (let pass = 0; pass < 10; pass++) {
-      let changes = 0;
-      for (const t of tables) {
-        const fks = db.prepare(`PRAGMA foreign_key_list(${q(t)})`).all();
-        const groups = new Map();
-        for (const fk of fks) groups.set(fk.id, [...(groups.get(fk.id) || []), fk]);
-        for (const [, cols] of groups) {
-          if (cols.length !== 1) continue;
-          const fk = cols[0];
-          const parentCol = fk.to || 'rowid';
-          const orphan = `${q(fk.from)} IS NOT NULL AND ${q(fk.from)} NOT IN (SELECT ${q(parentCol)} FROM ${q(fk.table)})`;
-          const sql = fk.on_delete === 'SET NULL'
-            ? `UPDATE ${q(t)} SET ${q(fk.from)} = NULL WHERE ${orphan}`
-            : `DELETE FROM ${q(t)} WHERE ${orphan}`;
-          changes += Number(db.prepare(sql).run().changes);
-        }
-      }
-      if (!changes) break;
-    }
-    db.exec('COMMIT');
-  } catch (err) {
-    db.exec('ROLLBACK');
-    throw err;
-  } finally {
-    db.exec('PRAGMA foreign_keys = ON');
-  }
-}
+export { purge } from './purge.js';
 
 /** Seed the demo family into an open db. Returns { familyId, users }. */
 export async function seedDemo(ctx, modules = defaultModules, { log = console.log } = {}) {
   const { db, uploadDir } = ctx;
-  const emails = DEMO_USERS.map((u) => u.email);
-  const existingUsers = db.prepare(`SELECT id FROM users WHERE email IN (${emails.map(() => '?').join(',')})`).all(...emails).map((r) => r.id);
-  const existingFamilies = db
-    .prepare(`SELECT id FROM families WHERE invite_code = ? OR id IN (SELECT family_id FROM memberships WHERE user_id IN (${existingUsers.map(() => '?').join(',') || 'NULL'}))`)
-    .all(DEMO_INVITE_CODE, ...existingUsers)
-    .map((r) => r.id);
-  purge(db, { familyIds: existingFamilies, userIds: existingUsers });
-  for (const id of existingFamilies) fs.rmSync(path.join(uploadDir, String(id)), { recursive: true, force: true });
-  for (const id of existingUsers) fs.rmSync(path.join(uploadDir, 'users', String(id)), { recursive: true, force: true });
+  // Only the demo family itself (identified by its fixed invite code) is wiped. Demo users are
+  // reused (profile + password reset) so any other family they belong to stays intact.
+  const demoFamilies = db.prepare('SELECT id FROM families WHERE invite_code = ?').all(DEMO_INVITE_CODE).map((r) => r.id);
+  purge(db, { familyIds: demoFamilies });
+  for (const id of demoFamilies) fs.rmSync(path.join(uploadDir, String(id)), { recursive: true, force: true });
 
   const users = {};
   const hash = hashPassword(DEMO_PASSWORD);
   const insertUser = db.prepare('INSERT INTO users (email, password_hash, name, color, birthday, phone) VALUES (?, ?, ?, ?, ?, ?)');
+  const resetUser = db.prepare('UPDATE users SET password_hash = ?, name = ?, color = ?, birthday = ?, phone = ?, avatar_url = NULL WHERE id = ?');
   for (const u of DEMO_USERS) {
-    const { lastInsertRowid } = insertUser.run(u.email, hash, u.name, u.color, u.birthday, u.phone);
-    users[u.key] = db.prepare('SELECT * FROM users WHERE id = ?').get(lastInsertRowid);
+    const existing = db.prepare('SELECT id FROM users WHERE email = ?').get(u.email);
+    let id;
+    if (existing) {
+      resetUser.run(hash, u.name, u.color, u.birthday, u.phone, existing.id);
+      fs.rmSync(path.join(uploadDir, 'users', String(existing.id)), { recursive: true, force: true });
+      id = existing.id;
+    } else {
+      id = insertUser.run(u.email, hash, u.name, u.color, u.birthday, u.phone).lastInsertRowid;
+    }
+    users[u.key] = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
   }
   const { lastInsertRowid: fid } = db
     .prepare("INSERT INTO families (name, invite_code, currency, created_by, created_at) VALUES ('Rivera Family', ?, 'USD', ?, ?)")

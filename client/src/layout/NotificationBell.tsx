@@ -8,6 +8,7 @@ import { fmtRelative } from '../lib/format';
 import { useLive } from '../lib/live';
 import type { Notification } from '../lib/types';
 import { EmptyState, IconButton, Popover, SkeletonList, toast } from '../ui';
+import { useAuth } from '../lib/auth';
 import { moduleMeta } from './moduleMeta';
 
 interface NotificationsResponse {
@@ -16,7 +17,28 @@ interface NotificationsResponse {
 }
 const KEY = ['notifications'];
 
-/** Bell icon with unread badge and a live dropdown panel. */
+/**
+ * Toasts for incoming notifications. Mounted exactly once (in AppShell) so each notification
+ * toasts once, and only when it belongs to this tab's family.
+ */
+export function useNotificationToasts() {
+  const { familyId } = useAuth();
+  const navigate = useNavigate();
+  useLive<Notification>(
+    'notification',
+    (e) => {
+      const n = e.payload;
+      if (e.type !== 'notification' || !n || n.family_id !== familyId) return;
+      toast.info(n.title, {
+        description: n.body ?? undefined,
+        action: n.link ? { label: 'View', onClick: () => navigate(n.link!) } : undefined,
+      });
+    },
+    { invalidate: false },
+  );
+}
+
+/** Bell icon with unread badge and a live dropdown panel. Render only one per page. */
 export function NotificationBell() {
   const [open, setOpen] = useState(false);
   const anchor = useRef<HTMLButtonElement>(null);
@@ -28,19 +50,7 @@ export function NotificationBell() {
     staleTime: 30_000,
   });
 
-  useLive<Notification>(
-    'notification',
-    (e) => {
-      if (e.type === 'notification' && e.payload) {
-        const n = e.payload;
-        toast.info(n.title, {
-          description: n.body ?? undefined,
-          action: n.link ? { label: 'View', onClick: () => navigate(n.link!) } : undefined,
-        });
-      }
-    },
-    { queryKey: KEY },
-  );
+  useLive('notification', undefined, { queryKey: KEY });
 
   const markRead = async (ids?: number[]) => {
     qc.setQueryData<NotificationsResponse>(KEY, (old) =>
@@ -68,7 +78,10 @@ export function NotificationBell() {
       />
       <Popover
         open={open}
-        onClose={() => setOpen(false)}
+        onClose={(reason) => {
+          setOpen(false);
+          if (reason === 'escape') anchor.current?.focus();
+        }}
         anchorRef={anchor}
         align="end"
         role="dialog"
@@ -78,7 +91,7 @@ export function NotificationBell() {
         <div className="flex items-center justify-between border-b border-border px-4 py-3">
           <div className="flex items-center gap-2">
             <h2 className="text-[15px] font-bold text-fg">Notifications</h2>
-            {unread > 0 && <span className="rounded-full bg-danger px-1.5 py-px text-[11px] font-bold text-white tabular">{unread}</span>}
+            {unread > 0 && <span className="rounded-full bg-danger-solid px-1.5 py-px text-[11px] font-bold text-white tabular">{unread}</span>}
           </div>
           {unread > 0 && (
             <button

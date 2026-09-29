@@ -25,7 +25,8 @@ export default function Login() {
     setLoading(true);
     try {
       const me = await login(email, password);
-      navigate(me.families.length ? next || '/home' : '/onboarding', { replace: true });
+      if (next?.startsWith('/join/')) navigate(next, { replace: true });
+      else navigate(me.families.length ? next || '/home' : '/onboarding', { replace: true });
     } catch (err) {
       setError(errorMessage(err));
       setLoading(false);

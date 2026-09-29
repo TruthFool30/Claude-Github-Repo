@@ -17,7 +17,7 @@ export function makeNotify(db, hub) {
       const { lastInsertRowid } = insert.run(raw, familyId, module, title, body, link);
       const row = db.prepare('SELECT * FROM notifications WHERE id = ?').get(lastInsertRowid);
       rows.push(row);
-      hub?.sendToUsers([raw], 'notification', row);
+      hub?.sendToUsers([raw], 'notification', row, familyId); // only to streams viewing this family
     }
     return rows;
   };

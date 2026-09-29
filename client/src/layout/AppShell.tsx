@@ -4,6 +4,7 @@ import { openSearch, setShell } from '../lib/shell';
 import { PageSpinner } from '../ui';
 import { BottomNav } from './BottomNav';
 import { MoreSheet } from './MoreSheet';
+import { useNotificationToasts } from './NotificationBell';
 import { SearchPalette } from './SearchPalette';
 import { Sidebar } from './Sidebar';
 import { DesktopHeader, TopBar } from './TopBar';
@@ -15,6 +16,7 @@ import { DesktopHeader, TopBar } from './TopBar';
  */
 export function AppShell() {
   const { pathname } = useLocation();
+  useNotificationToasts();
 
   useEffect(() => {
     window.scrollTo({ top: 0 });

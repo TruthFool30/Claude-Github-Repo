@@ -31,15 +31,18 @@ async function copy(text: string, what: string) {
 }
 
 export default function FamilyPage() {
-  const { family, user, isAdmin, refresh } = useAuth();
+  const { family, user, isAdmin, refresh, expectFamilyExit } = useAuth();
   const confirm = useConfirm();
   const navigate = useNavigate();
   const [editOpen, setEditOpen] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const [rotating, setRotating] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
   if (!family || !user) return null;
 
-  const inviteLink = `${window.location.origin}/register?code=${family.invite_code}`;
+  const inviteLink = family.invite_code ? `${window.location.origin}/join/${family.invite_code}` : '';
+  const loginMembers = family.members.filter((m) => !m.managed && m.id !== user.id);
+  const soleAdmin = isAdmin && family.members.filter((m) => m.role === 'admin').length === 1 && loginMembers.length > 0;
 
   const rotate = async () => {
     const ok = await confirm({
@@ -88,17 +91,25 @@ export default function FamilyPage() {
   };
 
   const leave = async () => {
+    if (soleAdmin) {
+      toast.warning('Make someone else an admin first', { description: 'A family needs at least one admin.' });
+      return;
+    }
+    const last = loginMembers.length === 0;
     const ok = await confirm({
       title: `Leave ${family.name}?`,
-      message: "You'll lose access to everything shared in this family until someone invites you back.",
-      confirmLabel: 'Leave family',
+      message: last
+        ? "You're the last person who can sign in, so the family and everything in it will be deleted."
+        : "You'll lose access to everything shared in this family until someone invites you back.",
+      confirmLabel: last ? 'Leave and delete' : 'Leave family',
       danger: true,
     });
     if (!ok) return;
     try {
+      expectFamilyExit(family.id);
       await api.del(`/family/members/${user.id}`);
       await refresh();
-      toast.success(`You left ${family.name}`);
+      toast.success(last ? `${family.name} was deleted` : `You left ${family.name}`);
       navigate('/home');
     } catch (e) {
       toast.error(errorMessage(e));
@@ -147,7 +158,7 @@ export default function FamilyPage() {
               const years = age(m.birthday);
               const isMe = m.id === user.id;
               return (
-                <li key={m.id} className="flex items-center gap-3 rounded-xl px-2 py-3">
+                <li key={m.id} className="flex items-center gap-3 px-2 py-3">
                   <Avatar user={m} size="lg" />
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
@@ -186,35 +197,56 @@ export default function FamilyPage() {
         </Card>
 
         <div className="flex flex-col gap-6">
+          {isAdmin && family.invite_code ? (
           <Card>
-            <CardHeader title="Invite family" subtitle="Share this code to let someone join" icon={Link2} accent="#5B5BD6" />
+            <CardHeader title="Invite family" subtitle="Share the code or link" icon={Link2} accent="#5B5BD6" />
             <div className="flex items-center gap-2 rounded-2xl border border-dashed border-border-strong bg-surface-2/60 p-2 pl-4">
               <span className="flex-1 select-all font-mono text-[22px] font-bold tracking-[0.18em] text-fg" data-testid="invite-code">
                 {family.invite_code}
               </span>
-              <IconButton icon={Copy} label="Copy invite code" variant="secondary" onClick={() => copy(family.invite_code, 'Invite code')} />
+              <IconButton icon={Copy} label="Copy invite code" variant="secondary" onClick={() => copy(family.invite_code!, 'Invite code')} />
             </div>
             <div className="mt-3 flex flex-wrap gap-2">
               <Button size="sm" variant="secondary" icon={Link2} onClick={() => copy(inviteLink, 'Invite link')} className="flex-1">
                 Copy invite link
               </Button>
-              {isAdmin && (
-                <Button size="sm" variant="ghost" icon={RefreshCw} loading={rotating} onClick={rotate}>
-                  New code
-                </Button>
-              )}
+              <Button size="sm" variant="ghost" icon={RefreshCw} loading={rotating} onClick={rotate}>
+                New code
+              </Button>
             </div>
           </Card>
+          ) : (
+            <Card>
+              <CardHeader title="Invite family" subtitle="Want to add someone?" icon={Link2} accent="#5B5BD6" />
+              <p className="text-sm text-muted">Ask a family admin for the invite link — only admins can share it.</p>
+            </Card>
+          )}
 
           <Card>
-            <CardHeader title="Leave family" subtitle="Remove yourself from this family" icon={LogOut} accent="#E5484D" />
+            <CardHeader title="Leave family" subtitle={soleAdmin ? 'Make someone else an admin first' : 'Remove yourself from this family'} icon={LogOut} accent="#E5484D" />
             <Button variant="secondary" block icon={LogOut} className="text-danger" onClick={leave}>
               Leave {family.name}
             </Button>
+            {isAdmin && (
+              <Button variant="ghost" block icon={Trash2} className="mt-2 text-danger" onClick={() => setDeleteOpen(true)}>
+                Delete family
+              </Button>
+            )}
           </Card>
         </div>
       </div>
 
+      {isAdmin && (
+        <DeleteFamilyModal
+          open={deleteOpen}
+          onClose={() => setDeleteOpen(false)}
+          family={family}
+          onDeleted={() => {
+            navigate('/home');
+          }}
+          beforeDelete={() => expectFamilyExit(family.id)}
+        />
+      )}
       {isAdmin && <EditFamilyModal open={editOpen} onClose={() => setEditOpen(false)} family={family} />}
       {isAdmin && <AddMemberModal open={addOpen} onClose={() => setAddOpen(false)} usedColors={family.members.map((m) => m.color)} />}
     </div>
@@ -375,6 +407,58 @@ function AddMemberModal({ open, onClose, usedColors }: { open: boolean; onClose:
           )}
         </div>
         {error && <p className="rounded-xl bg-danger-soft px-3.5 py-2.5 text-sm font-medium text-danger-soft-fg" role="alert">{error}</p>}
+      </form>
+    </Modal>
+  );
+}
+
+function DeleteFamilyModal({
+  open, onClose, family, onDeleted, beforeDelete,
+}: { open: boolean; onClose: () => void; family: FamilyT; onDeleted: () => void; beforeDelete: () => void }) {
+  const { refresh } = useAuth();
+  const [typed, setTyped] = useState('');
+  const [busy, setBusy] = useState(false);
+  const matches = typed.trim().toLowerCase() === family.name.trim().toLowerCase();
+
+  const submit = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!matches) return;
+    setBusy(true);
+    try {
+      beforeDelete();
+      await api.del('/family', { confirm_name: typed });
+      await refresh();
+      toast.success(`${family.name} was deleted`);
+      onClose();
+      onDeleted();
+    } catch (err) {
+      toast.error(errorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal
+      open={open}
+      onClose={() => {
+        onClose();
+        setTyped('');
+      }}
+      title="Delete this family?"
+      description="This permanently deletes the calendar, lists, messages, photos, budget and everything else for every member. This cannot be undone."
+      dismissible={!busy}
+      footer={
+        <>
+          <Button variant="secondary" onClick={onClose} disabled={busy}>Cancel</Button>
+          <Button type="submit" form="delete-family" variant="danger" icon={Trash2} loading={busy} disabled={!matches}>Delete forever</Button>
+        </>
+      }
+    >
+      <form id="delete-family" onSubmit={submit}>
+        <Field label={<>Type <span className="font-bold">{family.name}</span> to confirm</>}>
+          <Input value={typed} onChange={(e) => setTyped(e.target.value)} autoComplete="off" placeholder={family.name} />
+        </Field>
       </form>
     </Modal>
   );

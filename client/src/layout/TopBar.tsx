@@ -1,5 +1,6 @@
 import { Search, WifiOff } from 'lucide-react';
 import { useLiveStatus } from '../lib/live';
+import { useIsDesktop } from '../lib/hooks';
 import { openSearch } from '../lib/shell';
 import { IconButton } from '../ui';
 import { FamilySwitcher } from './FamilySwitcher';
@@ -17,6 +18,7 @@ function LiveIndicator() {
 
 /** Mobile top bar (<1024px): family switcher, search, notifications. */
 export function TopBar() {
+  const isDesktop = useIsDesktop();
   return (
     <header className="pt-safe sticky top-0 z-30 border-b border-border/70 bg-bg/80 backdrop-blur-xl backdrop-saturate-150 lg:hidden">
       <div className="flex h-14 items-center gap-2 px-3">
@@ -25,7 +27,7 @@ export function TopBar() {
         </div>
         <LiveIndicator />
         <IconButton icon={Search} label="Search" onClick={openSearch} />
-        <NotificationBell />
+        {!isDesktop && <NotificationBell />}
       </div>
     </header>
   );
@@ -33,6 +35,7 @@ export function TopBar() {
 
 /** Desktop header above page content: search field + notifications. */
 export function DesktopHeader() {
+  const isDesktop = useIsDesktop();
   const mac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform);
   return (
     <header className="sticky top-0 z-20 hidden h-16 items-center gap-3 border-b border-border/60 bg-bg/80 px-10 backdrop-blur-xl lg:flex">
@@ -49,7 +52,7 @@ export function DesktopHeader() {
       </button>
       <div className="flex-1" />
       <LiveIndicator />
-      <NotificationBell />
+      {isDesktop && <NotificationBell />}
     </header>
   );
 }

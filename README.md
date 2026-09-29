@@ -65,6 +65,7 @@ scratch (other families are left untouched).
 | `npm test` | Server API tests (`node --test server/test/*.test.js`) |
 | `npm run seed` | Creates/recreates the demo family in the database |
 | `npm run typecheck` | `tsc --noEmit -p client` |
+| `npm run e2e` | Playwright regression checks against a running seeded instance (`BASE=http://localhost:3000`) |
 
 ## Configuration
 
@@ -75,6 +76,7 @@ scratch (other families are left untouched).
 | `UPLOAD_DIR` | `./data/uploads` | Uploaded files (served only to family members) |
 | `CLIENT_DIST` | `client/dist` | Built web app to serve |
 | `COOKIE_SECURE` | unset | `1` to mark the session cookie `Secure` (HTTPS) |
+| `HEARTH_RATE_LIMITS` | on | `off` disables login/register/join rate limiting (test instances only) |
 | `API_PORT` | `3000` | (dev only) where Vite proxies API calls |
 
 Relative paths resolve against the repository root. Back up by copying the `data/` folder.

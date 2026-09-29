@@ -20,16 +20,21 @@
   --border: #e6e6ef;
   --border-strong: #d4d4e0;
   --fg: #1a1b26;
-  --muted: #5f6272;
-  --subtle: #8d90a0;
+  --muted: #545766;
+  --subtle: #676a7c;
   --primary: #5b5bd6;
   --primary-hover: #4d4dc4;
+  /* Filled backgrounds carrying white text/icons (buttons, checkboxes, badges): ≥4.5:1 with white. */
+  --primary-solid: #5b5bd6;
+  --primary-solid-hover: #4d4dc4;
   --primary-soft: #ededfc;
   --primary-soft-fg: #4040b0;
   --on-primary: #ffffff;
   --ring: rgb(91 91 214 / 0.45);
-  --danger: #e5484d;
-  --danger-hover: #d13b40;
+  --danger: #ce2c31;
+  --danger-hover: #b8262b;
+  --danger-solid: #ce2c31;
+  --danger-solid-hover: #b8262b;
   --danger-soft: #feeceb;
   --danger-soft-fg: #c62a2f;
   --success: #30a46c;
@@ -55,15 +60,19 @@
   --border-strong: #353a49;
   --fg: #ecedf3;
   --muted: #a3a7b7;
-  --subtle: #737889;
-  --primary: #7373e8;
-  --primary-hover: #8585ee;
+  --subtle: #8a8fa1;
+  --primary: #8b8bf2;
+  --primary-hover: #a0a0f5;
+  --primary-solid: #5b5bd6;
+  --primary-solid-hover: #6666dc;
   --primary-soft: #23244a;
   --primary-soft-fg: #b3b3ff;
   --on-primary: #ffffff;
   --ring: rgb(129 129 240 / 0.55);
   --danger: #ec5d5e;
   --danger-hover: #f07172;
+  --danger-solid: #ce2c31;
+  --danger-solid-hover: #dc3e42;
   --danger-soft: #3b1a1c;
   --danger-soft-fg: #ff9592;
   --success: #3dd68c;
@@ -94,12 +103,16 @@
   --color-subtle: var(--subtle);
   --color-primary: var(--primary);
   --color-primary-hover: var(--primary-hover);
+  --color-primary-solid: var(--primary-solid);
+  --color-primary-solid-hover: var(--primary-solid-hover);
   --color-primary-soft: var(--primary-soft);
   --color-primary-soft-fg: var(--primary-soft-fg);
   --color-on-primary: var(--on-primary);
   --color-ring: var(--ring);
   --color-danger: var(--danger);
   --color-danger-hover: var(--danger-hover);
+  --color-danger-solid: var(--danger-solid);
+  --color-danger-solid-hover: var(--danger-solid-hover);
   --color-danger-soft: var(--danger-soft);
   --color-danger-soft-fg: var(--danger-soft-fg);
   --color-success: var(--success);
@@ -176,7 +189,7 @@
   }
   .dark input[type='date']::-webkit-calendar-picker-indicator,
   .dark input[type='time']::-webkit-calendar-picker-indicator {
-    filter: invert(1);
+    opacity: 0.8; /* color-scheme: dark already renders a light icon */
   }
 }
 

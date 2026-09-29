@@ -9,6 +9,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { createApp } from '../src/app.js';
 
+/** Rate limits are effectively disabled in tests unless a test passes its own `limits`. */
+const RELAXED = { max: 1e9, windowMs: 60_000 };
+export const TEST_LIMITS = {
+  'login-ip': RELAXED, 'login-email': RELAXED, 'register-ip': RELAXED, 'join-ip': RELAXED, 'invite-ip': RELAXED,
+};
+
 export async function startServer(options = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hearth-test-'));
   const app = createApp({
@@ -16,6 +22,7 @@ export async function startServer(options = {}) {
     uploadDir: path.join(dir, 'uploads'),
     clientDist: path.join(dir, 'no-client'),
     ...options,
+    limits: { ...TEST_LIMITS, ...(options.limits ?? {}) },
   });
   const server = await new Promise((resolve) => {
     const s = app.listen(0, '127.0.0.1', () => resolve(s));
@@ -40,9 +47,11 @@ export async function startServer(options = {}) {
 
 export function createAgent(base) {
   let cookie = '';
+  let familyId = null; // like a browser tab: when set, sent as X-Family-Id
   async function request(method, url, { body, form, headers = {} } = {}) {
     const init = { method, headers: { ...headers }, redirect: 'manual' };
     if (cookie) init.headers.cookie = cookie;
+    if (familyId && !init.headers['x-family-id']) init.headers['x-family-id'] = String(familyId);
     if (form) init.body = form;
     else if (body !== undefined) {
       init.headers['content-type'] = 'application/json';
@@ -74,6 +83,11 @@ export function createAgent(base) {
     },
     get cookie() { return cookie; },
     set cookie(v) { cookie = v; },
+    /** Pin this agent to a family (sends X-Family-Id on every request), or null for the session default. */
+    get familyId() { return familyId; },
+    set familyId(v) { familyId = v; },
+    /** Same cookie (same session) but its own family pin — simulates a second browser tab. */
+    tab() { const t = createAgent(base); t.cookie = cookie; return t; },
     base,
   };
 }
@@ -110,7 +124,8 @@ export const PNG_1X1 = Buffer.from(
 /** Read the first N SSE messages from /api/stream (resolves with parsed {type,payload}). */
 export async function collectEvents(agent, { count = 1, timeoutMs = 3000, until } = {}) {
   const ctrl = new AbortController();
-  const res = await fetch(agent.base + '/api/stream', { headers: { cookie: agent.cookie }, signal: ctrl.signal });
+  const qsFamily = agent.familyId ? `?family_id=${agent.familyId}` : '';
+  const res = await fetch(agent.base + '/api/stream' + qsFamily, { headers: { cookie: agent.cookie }, signal: ctrl.signal });
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   const events = [];

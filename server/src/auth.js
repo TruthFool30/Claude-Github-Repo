@@ -60,6 +60,12 @@ export function createSession(db, userId, activeFamilyId = null) {
   return token;
 }
 
+/** true when the session token exists and hasn't expired (used to end stale SSE streams). */
+export function isSessionValid(db, token) {
+  const row = db.prepare('SELECT expires_at FROM sessions WHERE token = ?').get(token);
+  return !!row && (!row.expires_at || row.expires_at >= new Date().toISOString());
+}
+
 export function destroySession(db, token) {
   db.prepare('DELETE FROM sessions WHERE token = ?').run(token);
 }
@@ -88,7 +94,7 @@ function readToken(req) {
 
 /** Memberships of a user, newest family last. */
 export function userFamilies(db, userId) {
-  return db
+  const rows = db
     .prepare(
       `SELECT f.id, f.name, f.cover_url, f.currency, f.invite_code, f.created_at, m.role, m.nickname,
               (SELECT COUNT(*) FROM memberships mm WHERE mm.family_id = f.id) AS member_count
@@ -96,6 +102,8 @@ export function userFamilies(db, userId) {
         WHERE m.user_id = ? ORDER BY m.created_at, f.id`,
     )
     .all(userId);
+  // Only admins may see (and share) a family's invite code.
+  return rows.map((f) => ({ ...f, invite_code: f.role === 'admin' ? f.invite_code : null }));
 }
 
 export function getMembership(db, familyId, userId) {
@@ -119,14 +127,15 @@ export function makeAuth(db) {
   );
   const touch = db.prepare('UPDATE sessions SET expires_at = ? WHERE token = ?');
 
-  function requireAuth(req, res, next) {
+  /** Returns null on success (req.user etc. set) or an error message. */
+  function authenticate(req, res) {
     const token = readToken(req);
-    if (!token) return res.status(401).json({ error: 'Please sign in' });
+    if (!token) return 'Please sign in';
     const row = findSession.get(token);
     if (!row || (row.expires_at && row.expires_at < new Date().toISOString())) {
       if (row) destroySession(db, token);
       clearSessionCookie(res);
-      return res.status(401).json({ error: 'Your session has expired, please sign in again' });
+      return 'Your session has expired, please sign in again';
     }
     // Sliding expiry: extend when less than half the lifetime remains.
     const halfLife = new Date(Date.now() + (SESSION_DAYS / 2) * 864e5).toISOString();
@@ -136,6 +145,18 @@ export function makeAuth(db) {
     req.session = { token, user_id: row.user_id, active_family_id: row.active_family_id };
     req.userRow = { ...row, id: row.user_id };
     req.user = publicUser(req.userRow);
+    return null;
+  }
+
+  function requireAuth(req, res, next) {
+    const error = authenticate(req, res);
+    if (error) return res.status(401).json({ error });
+    next();
+  }
+
+  /** Like requireAuth but never rejects: req.user is simply unset when signed out. */
+  function optionalAuth(req, res, next) {
+    authenticate(req, res);
     next();
   }
 
@@ -159,8 +180,32 @@ export function makeAuth(db) {
     return family ? { family, role: membership.role } : null;
   }
 
+  /**
+   * The family a request is about: the `X-Family-Id` header (each browser tab sends its own) or,
+   * for the SSE stream, `?family_id=`. Returns null when absent, NaN when malformed.
+   */
+  function requestedFamilyId(req) {
+    const raw = req.get('x-family-id') ?? req.query?.family_id;
+    if (raw === undefined || raw === null || raw === '') return null;
+    const n = Number(raw);
+    return Number.isInteger(n) && n > 0 ? n : NaN;
+  }
+
+  /** Resolve the family for this request: explicit header/query first, else the session default. */
+  function resolveRequestFamily(req) {
+    const requested = requestedFamilyId(req);
+    if (requested === null) return resolveActiveFamily(req);
+    const membership = Number.isNaN(requested) ? null : getMembership(db, requested, req.user.id);
+    if (!membership) return { error: 'NOT_MEMBER' };
+    const family = db.prepare('SELECT * FROM families WHERE id = ?').get(requested);
+    return family ? { family, role: membership.role, explicit: true } : { error: 'NOT_MEMBER' };
+  }
+
   function requireFamily(req, res, next) {
-    const resolved = resolveActiveFamily(req);
+    const resolved = resolveRequestFamily(req);
+    if (resolved?.error) {
+      return res.status(403).json({ error: "You're not a member of that family anymore", code: 'NOT_MEMBER' });
+    }
     if (!resolved) return res.status(403).json({ error: 'Create or join a family first', code: 'NO_FAMILY' });
     req.family = resolved.family;
     req.role = resolved.role;
@@ -172,7 +217,7 @@ export function makeAuth(db) {
     next();
   }
 
-  return { requireAuth, requireFamily, requireAdmin, resolveActiveFamily };
+  return { requireAuth, optionalAuth, requireFamily, requireAdmin, resolveActiveFamily, resolveRequestFamily, requestedFamilyId };
 }
 
 export function randomInviteCode() {

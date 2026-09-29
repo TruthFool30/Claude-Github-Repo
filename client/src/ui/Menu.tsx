@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import { MoreHorizontal } from 'lucide-react';
 import { useNavigate } from 'react-router';
 import { cn } from '../lib/cn';
@@ -49,11 +49,24 @@ export function Menu({ items, trigger, label = 'More actions', align = 'end', cl
   const entries = items.filter(Boolean) as Array<MenuItem | 'divider'>;
   const actionable = entries.map((e, i) => (e !== 'divider' && !e.disabled ? i : -1)).filter((i) => i >= 0);
 
+  const triggerEl = () => anchorRef.current?.querySelector<HTMLElement>('button, a[href], [tabindex]:not([tabindex="-1"])') ?? null;
   const close = useCallback((refocus = true) => {
     setOpen(false);
     setActive(-1);
-    if (refocus) anchorRef.current?.querySelector<HTMLElement>('button, [tabindex]')?.focus();
+    if (refocus) triggerEl()?.focus({ preventScroll: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // ARIA state lives on the real trigger button (not the wrapper span).
+  const menuId = useId();
+  useEffect(() => {
+    const el = triggerEl();
+    if (!el) return;
+    el.setAttribute('aria-haspopup', 'menu');
+    el.setAttribute('aria-expanded', String(open));
+    if (open) el.setAttribute('aria-controls', menuId);
+    else el.removeAttribute('aria-controls');
+  });
 
   // Focus the active item (the popover mounts a frame after `open` flips, so retry briefly).
   useEffect(() => {
@@ -132,17 +145,23 @@ export function Menu({ items, trigger, label = 'More actions', align = 'end', cl
             openWith('last');
           }
         }}
-        aria-haspopup="menu"
-        aria-expanded={open}
       >
         {trigger ? trigger({ open }) : <IconButton icon={MoreHorizontal} label={label} size="sm" />}
       </span>
       <Popover
         open={open}
-        onClose={() => close(false)}
+        onClose={(reason) => {
+          if (reason === 'escape') return close(true);
+          close(false);
+          // Clicked somewhere non-focusable: don't strand keyboard focus on <body>.
+          requestAnimationFrame(() => {
+            if (!document.activeElement || document.activeElement === document.body) triggerEl()?.focus({ preventScroll: true });
+          });
+        }}
         anchorRef={anchorRef}
         align={align}
         role="menu"
+        id={menuId}
         className={cn('min-w-[200px] max-w-[280px] p-1.5', menuClassName)}
       >
         <div onKeyDown={onMenuKey} onClick={(e) => e.stopPropagation()}>

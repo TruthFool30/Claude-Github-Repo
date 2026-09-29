@@ -204,7 +204,7 @@ export function ImageUploader({
               </span>
             )}
           </button>
-          <span className="pointer-events-none absolute bottom-0.5 right-0.5 flex size-8 items-center justify-center rounded-full bg-primary text-white ring-[3px] ring-surface">
+          <span className="pointer-events-none absolute bottom-0.5 right-0.5 flex size-8 items-center justify-center rounded-full bg-primary-solid text-white ring-[3px] ring-surface">
             <Camera size={15} />
           </span>
         </div>

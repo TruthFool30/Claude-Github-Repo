@@ -42,7 +42,9 @@ describe('auth', () => {
 
   test('login / logout / me', async () => {
     const a = srv.agent();
-    assert.equal((await a.get('/api/auth/me')).status, 401);
+    const anon = await a.get('/api/auth/me');
+    assert.equal(anon.status, 200);
+    assert.equal(anon.body.user, null);
     const bad = await a.post('/api/auth/login', { email: 'jo@example.test', password: 'wrong' });
     assert.equal(bad.status, 401);
     const ok = await a.post('/api/auth/login', { email: 'jo@example.test', password: 'secret123' });
@@ -50,7 +52,8 @@ describe('auth', () => {
     assert.equal(ok.body.user.name, 'Jo');
     assert.equal((await a.get('/api/auth/me')).status, 200);
     assert.equal((await a.post('/api/auth/logout')).status, 200);
-    assert.equal((await a.get('/api/auth/me')).status, 401);
+    assert.equal((await a.get('/api/auth/me')).body.user, null);
+    assert.equal((await a.get('/api/family')).status, 401);
   });
 
   test('bearer token works as an alternative to the cookie', async () => {

@@ -12,6 +12,7 @@
 import { useEffect, useRef, useSyncExternalStore } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import type { LiveEvent } from './types';
+import { UNAUTHORIZED_EVENT } from './api';
 
 export type LiveStatus = 'idle' | 'connecting' | 'open' | 'reconnecting';
 type Listener = (event: LiveEvent) => void;
@@ -25,6 +26,8 @@ let everOpened = false;
 let attempts = 0;
 let retryTimer: ReturnType<typeof setTimeout> | null = null;
 let status: LiveStatus = 'idle';
+/** Family this tab's stream is bound to (?family_id=). */
+let streamFamily: number | null = null;
 
 function setStatus(next: LiveStatus) {
   if (status === next) return;
@@ -35,7 +38,7 @@ function setStatus(next: LiveStatus) {
 function open() {
   if (!wanted || source) return;
   setStatus(everOpened ? 'reconnecting' : 'connecting');
-  const es = new EventSource('/api/stream');
+  const es = new EventSource(streamFamily ? `/api/stream?family_id=${streamFamily}` : '/api/stream');
   source = es;
   es.onopen = () => {
     attempts = 0;
@@ -50,6 +53,13 @@ function open() {
     } catch {
       return;
     }
+    if (event.type === 'session.ended') {
+      // Signed out elsewhere / password changed: confirm and hand over to the auth flow.
+      es.close();
+      if (source === es) source = null;
+      void checkSession();
+      return;
+    }
     listeners.forEach((l) => {
       try {
         l(event);
@@ -60,14 +70,31 @@ function open() {
   };
   es.onerror = () => {
     if (es.readyState === EventSource.CLOSED) {
-      // Browser gave up (e.g. 401 or server down) — retry ourselves with backoff.
+      // Browser gave up (401/403 or server down). If the session is gone, stop and let the
+      // auth flow redirect; otherwise retry with backoff.
       es.close();
       if (source === es) source = null;
-      scheduleRetry();
+      void checkSession();
     } else {
       setStatus('reconnecting');
     }
   };
+}
+
+async function checkSession() {
+  if (!wanted) return;
+  try {
+    const res = await fetch('/api/auth/me', { credentials: 'same-origin' });
+    const data = res.ok ? await res.json() : null;
+    if (res.ok && !data?.user) {
+      stopLive();
+      window.dispatchEvent(new CustomEvent(UNAUTHORIZED_EVENT));
+      return;
+    }
+  } catch {
+    /* offline — keep retrying */
+  }
+  scheduleRetry();
 }
 
 function scheduleRetry() {
@@ -95,8 +122,17 @@ if (typeof document !== 'undefined') {
   });
 }
 
-/** Open the shared stream (idempotent). Called by AuthProvider after sign-in. */
-export function startLive() {
+/**
+ * Open the shared stream bound to `familyId` (idempotent). Called by AuthProvider after sign-in
+ * and whenever this tab switches family (the stream is re-opened for the new family).
+ */
+export function startLive(familyId: number | null = null) {
+  if (source && familyId !== streamFamily) {
+    source.close();
+    source = null;
+    everOpened = false; // a family switch is not a "reconnect" (queries are reset separately)
+  }
+  streamFamily = familyId;
   wanted = true;
   open();
 }

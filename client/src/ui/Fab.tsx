@@ -24,7 +24,7 @@ export function Fab({ label, icon = Plus, accent, extended, desktop, className, 
       title={label}
       style={{ backgroundColor: accent, ...style }}
       className={cn(
-        'fixed right-4 z-30 inline-flex items-center justify-center gap-2 rounded-2xl bg-primary font-semibold text-white shadow-lift',
+        'fixed right-4 z-30 inline-flex items-center justify-center gap-2 rounded-2xl bg-primary-solid font-semibold text-white shadow-lift',
         'bottom-[calc(80px+env(safe-area-inset-bottom))] lg:bottom-8 lg:right-8',
         'transition-all duration-200 hover:brightness-110 active:scale-90 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-ring',
         'shadow-[0_8px_24px_-6px_rgb(0_0_0/0.35)] animate-scale-in',

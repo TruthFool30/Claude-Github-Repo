@@ -13,6 +13,7 @@ import SettingsPage from './pages/Settings';
 import NotFound from './pages/NotFound';
 
 const UiKit = lazy(() => import('./pages/UiKit'));
+import JoinPage from './pages/Join';
 
 function Splash() {
   return (
@@ -43,8 +44,11 @@ function RequireFamily({ children }: { children: ReactNode }) {
 /** Login/Register: bounce signed-in users into the app. */
 function PublicOnly({ children, allowNoFamily }: { children: ReactNode; allowNoFamily?: boolean }) {
   const { user, families, loading } = useAuth();
+  const location = useLocation();
+  const from = (location.state as { from?: string } | null)?.from;
   if (loading) return <Splash />;
-  if (user && families.length) return <Navigate to="/home" replace />;
+  if (user && from?.startsWith('/join/')) return <Navigate to={from} replace />;
+  if (user && families.length) return <Navigate to={from || '/home'} replace />;
   if (user && !allowNoFamily) return <Navigate to="/onboarding" replace />;
   return <>{children}</>;
 }
@@ -54,6 +58,7 @@ export default function App() {
     <Routes>
       <Route path="/login" element={<PublicOnly><Login /></PublicOnly>} />
       <Route path="/register" element={<PublicOnly allowNoFamily><Register /></PublicOnly>} />
+      <Route path="/join/:code" element={<JoinPage />} />
       <Route element={<RequireAuth />}>
         <Route path="/onboarding" element={<Onboarding />} />
         <Route element={<RequireFamily><AppShell /></RequireFamily>}>

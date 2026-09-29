@@ -18,12 +18,27 @@ export class ApiError extends Error {
 }
 
 export const UNAUTHORIZED_EVENT = 'hearth:unauthorized';
+/** Fired when the server says this tab's family is no longer ours (removed / deleted). */
+export const FAMILY_LOST_EVENT = 'hearth:family-lost';
+
+/**
+ * The family this browser tab is working in. Sent as `X-Family-Id` on every request so two tabs
+ * can safely use different families. Managed by the AuthProvider (useAuth().switchFamily).
+ */
+let activeFamilyId: number | null = null;
+export function setApiFamily(id: number | null) {
+  activeFamilyId = id;
+}
+export function getApiFamily(): number | null {
+  return activeFamilyId;
+}
 
 type Method = 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
 
 async function request<T>(method: Method, path: string, body?: unknown, init: RequestInit = {}): Promise<T> {
   const url = path.startsWith('/api') ? path : `/api${path.startsWith('/') ? '' : '/'}${path}`;
   const headers = new Headers(init.headers);
+  if (activeFamilyId && !headers.has('X-Family-Id')) headers.set('X-Family-Id', String(activeFamilyId));
   let payload: BodyInit | undefined;
   if (body instanceof FormData) {
     payload = body;
@@ -47,6 +62,9 @@ async function request<T>(method: Method, path: string, body?: unknown, init: Re
     if (res.status === 401 && !url.startsWith('/api/auth/')) {
       window.dispatchEvent(new CustomEvent(UNAUTHORIZED_EVENT));
     }
+    if (res.status === 403 && data && typeof data === 'object' && (data as { code?: string }).code === 'NOT_MEMBER') {
+      window.dispatchEvent(new CustomEvent(FAMILY_LOST_EVENT));
+    }
     throw new ApiError(res.status, message, data);
   }
   return data as T;
@@ -57,7 +75,8 @@ export const api = {
   post: <T = unknown>(path: string, body?: unknown, init?: RequestInit) => request<T>('POST', path, body ?? {}, init),
   patch: <T = unknown>(path: string, body?: unknown, init?: RequestInit) => request<T>('PATCH', path, body ?? {}, init),
   put: <T = unknown>(path: string, body?: unknown, init?: RequestInit) => request<T>('PUT', path, body ?? {}, init),
-  del: <T = unknown>(path: string, init?: RequestInit) => request<T>('DELETE', path, undefined, init),
+  /** DELETE; an optional JSON body is supported (e.g. { confirm_name }). */
+  del: <T = unknown>(path: string, body?: unknown, init?: RequestInit) => request<T>('DELETE', path, body, init),
   /** POST multipart/form-data. Build a FormData with a `file` field (+ any extra fields). */
   upload: <T = unknown>(path: string, formData: FormData, init?: RequestInit) => request<T>('POST', path, formData, init),
 };
