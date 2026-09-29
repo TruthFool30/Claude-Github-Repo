@@ -275,7 +275,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const forgetFamily = useCallback(
     async (familyId: number) => {
-      expectedExit.current.add(familyId);
+      // Only expect an exit that hasn't happened yet; if the realtime event already dropped the
+      // family (and consumed the expectation), a lingering id would silence a future removal.
+      const current = qc.getQueryData<MeResponse | null>(ME_KEY);
+      if (current?.families.some((f) => f.id === familyId)) expectedExit.current.add(familyId);
+      else expectedExit.current.delete(familyId);
       dropFamilyLocally(familyId);
       await qc.invalidateQueries({ queryKey: ME_KEY });
     },

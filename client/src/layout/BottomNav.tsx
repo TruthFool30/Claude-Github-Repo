@@ -3,7 +3,7 @@ import { LayoutGrid } from 'lucide-react';
 import { cn } from '../lib/cn';
 import { setShell, useShell } from '../lib/shell';
 import { primaryModules, secondaryModules } from '../modules/registry';
-import { MoreDot, NavBadge } from './NavBadge';
+import { MoreDot, NavBadge, NavBadgeText } from './NavBadge';
 
 /** Mobile bottom tab bar: 4 primary modules + "More". */
 export function BottomNav() {
@@ -29,10 +29,11 @@ export function BottomNav() {
                   style={isActive ? { backgroundColor: `color-mix(in oklab, ${m.accent} 16%, transparent)`, color: m.accent } : undefined}
                 >
                   <m.icon size={21} strokeWidth={isActive ? 2.4 : 2} />
-                  <NavBadge mod={m} className="absolute -top-1 right-1.5 ring-2 ring-surface" />
+                  <NavBadge mod={m} srText={false} className="absolute -top-1 right-1.5 ring-2 ring-surface" />
                 </span>
                 <span className={cn('text-[11px] leading-none', isActive ? 'font-bold text-fg' : 'font-medium text-muted')}>
                   {m.shortLabel ?? m.label}
+                  <NavBadgeText mod={m} />
                 </span>
               </>
             )}
@@ -52,9 +53,9 @@ export function BottomNav() {
             )}
           >
             <LayoutGrid size={21} strokeWidth={inSecondary ? 2.4 : 2} />
-            <MoreDot mods={secondaryModules} className="absolute right-3 top-0.5" />
+            <MoreDot mods={secondaryModules} srText={false} className="absolute right-3 top-0.5" />
           </span>
-          <span className={cn('text-[11px] leading-none', inSecondary ? 'font-bold text-fg' : 'font-medium text-muted')}>More</span>
+          <span className={cn('text-[11px] leading-none', inSecondary ? 'font-bold text-fg' : 'font-medium text-muted')}>More<MoreDot mods={secondaryModules} dot={false} /></span>
         </button>
       </div>
     </nav>
