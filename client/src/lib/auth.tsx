@@ -27,7 +27,8 @@ export interface AuthState {
   /** Replace cached /auth/me data (e.g. after PATCH /auth/me). */
   setMe: (me: MeResponse) => void;
   /** Call before leaving/deleting a family yourself so no "you were removed" toast is shown. */
-  expectFamilyExit: (familyId: number) => void;
+  /** Mark an exit you are about to cause (leave/delete) so no "you were removed" toast shows. Returns an undo for when the request fails. */
+  expectFamilyExit: (familyId: number) => () => void;
   /**
    * After you left/deleted a family: cancels in-flight queries, moves this tab to another family
    * right away (no burst of requests for the old one) and refreshes the session.
@@ -116,9 +117,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
    */
   const dropFamilyLocally = useCallback(
     (familyId: number) => {
-      void qc.cancelQueries({ predicate: notAuthQuery });
       const current = qc.getQueryData<MeResponse | null>(ME_KEY);
+      // Already dropped (e.g. the realtime `family.removed` beat the HTTP response): do nothing,
+      // in particular don't cancel the refetches the first drop started for the next family.
       if (!current || !current.families.some((f) => f.id === familyId)) return;
+      void qc.cancelQueries({ predicate: notAuthQuery });
       const families = current.families.filter((f) => f.id !== familyId);
       const next = families[0]?.id ?? null;
       setApiFamily(next);
@@ -265,6 +268,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const expectFamilyExit = useCallback((familyId: number) => {
     expectedExit.current.add(familyId);
+    return () => {
+      expectedExit.current.delete(familyId);
+    };
   }, []);
 
   const forgetFamily = useCallback(

@@ -497,6 +497,9 @@ at an already running API.
   It is called once per rendered nav item, so back it with a shared TanStack query (e.g.
   `useQuery({ queryKey: ['messages', 'unread'], ... }).data?.total`) kept fresh by `useLive`.
   Messages uses it for unread counts; Lists may use it for overdue tasks assigned to me.
+  The hook must be side-effect free (no toasts, no writes): the sidebar, bottom bar, More sheet
+  and the mobile "More" dot may all call it at once. The badge is `aria-hidden` with visually
+  hidden ", N new" text so the link reads "Messages, 3 new".
 - Modules are built in parallel and must not import each other's code. Cross-module features go
   through the HTTP API only and must degrade gracefully (hide the feature / friendly message) when
   the other module's endpoint is missing or returns an error:

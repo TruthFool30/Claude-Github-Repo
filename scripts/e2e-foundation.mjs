@@ -174,6 +174,10 @@ await check('per-tab active family', async () => {
     await tabB.getByRole('dialog').getByRole('textbox').fill(name);
     await tabB.getByRole('button', { name: 'Delete forever' }).click();
     await tabB.waitForURL('**/home');
+    // the app shell must actually render for the next family (not a stuck splash), with one toast
+    await tabB.locator('aside').getByText('Rivera Family').first().waitFor({ timeout: 8000 });
+    await tabB.waitForTimeout(800);
+    assert.equal(await tabB.locator('[role=status]').filter({ hasText: /deleted|removed/ }).count(), 1, 'exactly one toast after delete');
   } finally {
     // make sure the extra family never leaks into later runs, even when a step above failed
     await page.request.delete(`${BASE}/api/family`, {
@@ -248,6 +252,40 @@ await check('429 shown on login', async () => {
   await page.getByText('Too many attempts').waitFor();
   await ctx.close();
   await rc.dispose();
+});
+
+// 7b. Leaving the active family through the UI lands on the next family with exactly one toast.
+await check('leave family via UI -> next family, one toast', async () => {
+  const { ctx, page } = await newPage();
+  await login(page, 'sam@hearth.test');
+  const name = `Sam Side ${Date.now()}`;
+  const side = await (await page.request.post(`${BASE}/api/families`, { data: { name } })).json();
+  const admin = await request.newContext();
+  await admin.post(`${BASE}/api/auth/login`, { data: { email: 'alex@hearth.test', password: 'hearth123' } });
+  try {
+    await page.goto(`${BASE}/home`);
+    await page.getByRole('button', { name: new RegExp(name) }).first().click();
+    await page.getByRole('menuitem', { name: /Rivera Family/ }).click();
+    await page.goto(`${BASE}/family`);
+    await page.waitForSelector('main h2');
+    await page.getByRole('button', { name: /^Leave Rivera Family$/ }).click();
+    await page.getByRole('dialog').getByRole('button', { name: 'Leave family' }).click();
+    await page.waitForURL('**/home');
+    await page.locator('aside').getByText(name).first().waitFor({ timeout: 8000 });
+    await page.waitForTimeout(800);
+    const toasts = page.locator('[role=status]').filter({ hasText: /Rivera Family/ });
+    assert.equal(await toasts.count(), 1, 'exactly one toast after leaving');
+    assert.match(await toasts.first().innerText(), /You left Rivera Family/);
+  } finally {
+    // restore demo state: Sam rejoins Rivera as a member; remove the side family
+    await page.request.post(`${BASE}/api/families/join`, { data: { invite_code: 'HRTH-2026' } }).catch(() => {});
+    const fam = await (await admin.get(`${BASE}/api/family`)).json();
+    const sam = fam.members.find((m) => m.email === 'sam@hearth.test');
+    if (sam) await admin.patch(`${BASE}/api/family/members/${sam.id}`, { data: { role: 'member' }, headers: { 'X-Family-Id': String(fam.id) } });
+    await page.request.delete(`${BASE}/api/family`, { headers: { 'X-Family-Id': String(side.id) }, data: { confirm_name: name } }).catch(() => {});
+    await admin.dispose();
+    await ctx.close();
+  }
 });
 
 // 8. Being removed from the active family: live toast, cache cleared, moved on.

@@ -3,7 +3,7 @@ import { LayoutGrid } from 'lucide-react';
 import { cn } from '../lib/cn';
 import { setShell, useShell } from '../lib/shell';
 import { primaryModules, secondaryModules } from '../modules/registry';
-import { NavBadge } from './NavBadge';
+import { MoreDot, NavBadge } from './NavBadge';
 
 /** Mobile bottom tab bar: 4 primary modules + "More". */
 export function BottomNav() {
@@ -47,11 +47,12 @@ export function BottomNav() {
         >
           <span
             className={cn(
-              'flex h-8 w-14 items-center justify-center rounded-full transition-all duration-200 group-active:scale-90',
+              'relative flex h-8 w-14 items-center justify-center rounded-full transition-all duration-200 group-active:scale-90',
               inSecondary || moreOpen ? 'bg-primary-soft text-primary' : 'text-muted',
             )}
           >
             <LayoutGrid size={21} strokeWidth={inSecondary ? 2.4 : 2} />
+            <MoreDot mods={secondaryModules} className="absolute right-3 top-0.5" />
           </span>
           <span className={cn('text-[11px] leading-none', inSecondary ? 'font-bold text-fg' : 'font-medium text-muted')}>More</span>
         </button>

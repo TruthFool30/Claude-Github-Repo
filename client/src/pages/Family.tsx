@@ -31,7 +31,7 @@ async function copy(text: string, what: string) {
 }
 
 export default function FamilyPage() {
-  const { family, user, isAdmin, refresh, forgetFamily } = useAuth();
+  const { family, user, isAdmin, refresh, forgetFamily, expectFamilyExit } = useAuth();
   const confirm = useConfirm();
   const navigate = useNavigate();
   const [editOpen, setEditOpen] = useState(false);
@@ -105,12 +105,15 @@ export default function FamilyPage() {
       danger: true,
     });
     if (!ok) return;
+    // Mark the exit before the request: the realtime `family.removed` can arrive before the response.
+    const undoExit = expectFamilyExit(family.id);
     try {
       await api.del(`/family/members/${user.id}`);
       await forgetFamily(family.id);
       toast.success(last ? `${family.name} was deleted` : `You left ${family.name}`);
       navigate('/home');
     } catch (e) {
+      undoExit();
       toast.error(errorMessage(e));
     }
   };
@@ -413,7 +416,7 @@ function AddMemberModal({ open, onClose, usedColors }: { open: boolean; onClose:
 function DeleteFamilyModal({
   open, onClose, family, onDeleted,
 }: { open: boolean; onClose: () => void; family: FamilyT; onDeleted: () => void }) {
-  const { forgetFamily } = useAuth();
+  const { forgetFamily, expectFamilyExit } = useAuth();
   const [typed, setTyped] = useState('');
   const [busy, setBusy] = useState(false);
   const matches = typed.trim().toLowerCase() === family.name.trim().toLowerCase();
@@ -422,6 +425,7 @@ function DeleteFamilyModal({
     e.preventDefault();
     if (!matches) return;
     setBusy(true);
+    const undoExit = expectFamilyExit(family.id);
     try {
       await api.del('/family', { confirm_name: typed });
       await forgetFamily(family.id);
@@ -429,6 +433,7 @@ function DeleteFamilyModal({
       onClose();
       onDeleted();
     } catch (err) {
+      undoExit();
       toast.error(errorMessage(err));
     } finally {
       setBusy(false);
