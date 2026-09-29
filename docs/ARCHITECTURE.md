@@ -229,3 +229,222 @@ password `hearth123`. Each module exports an optional `seed(ctx, { familyId, use
 realistic demo content (events this week, a grocery list, a family chat, recipes, a meal plan,
 budget transactions for the last 2 months, places, contacts…). Seeding is idempotent-ish: it
 recreates the demo family from scratch.
+
+---
+
+## Module author guide (foundation — as built)
+
+Everything below describes the foundation exactly as implemented. You own only
+`server/src/modules/<name>.js`, `server/test/<name>.test.js` and `client/src/modules/<name>/`.
+Each of those already exists as a working stub — replace the stub contents. No `npm install` is
+needed (every package in the stack table is installed; `playwright@1.56.1` is a root devDependency).
+
+### Server
+
+```js
+// server/src/modules/lists.js
+import { Router } from 'express';
+import { ISO_NOW } from '../db.js';                          // "(strftime('%Y-%m-%dT%H:%M:%fZ','now'))"
+import { cleanStr, httpError, toId, isDate, isColor } from '../util.js';
+
+export const name = 'lists';
+export const migrations = [
+  `CREATE TABLE IF NOT EXISTS lists (
+     id INTEGER PRIMARY KEY,
+     family_id INTEGER NOT NULL REFERENCES families(id) ON DELETE CASCADE,
+     name TEXT NOT NULL,
+     created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+     created_at TEXT NOT NULL DEFAULT ${ISO_NOW})`,
+  `CREATE TABLE IF NOT EXISTS list_items (
+     id INTEGER PRIMARY KEY,
+     list_id INTEGER NOT NULL REFERENCES lists(id) ON DELETE CASCADE,
+     text TEXT NOT NULL, done INTEGER NOT NULL DEFAULT 0)`,
+];
+
+export function router(ctx) {
+  const r = Router();
+  r.get('/', (req, res) => {
+    res.json(ctx.db.prepare('SELECT * FROM lists WHERE family_id = ? ORDER BY id').all(req.family.id));
+  });
+  r.post('/', (req, res) => {
+    const title = cleanStr(req.body?.name, { field: 'Name', required: true, max: 120 }); // throws 400
+    const { lastInsertRowid } = ctx.db.prepare('INSERT INTO lists (family_id, name, created_by) VALUES (?, ?, ?)')
+      .run(req.family.id, title, req.user.id);
+    const row = ctx.db.prepare('SELECT * FROM lists WHERE id = ?').get(lastInsertRowid);
+    ctx.broadcast(req.family.id, 'lists.created', row);
+    ctx.logActivity({ familyId: req.family.id, userId: req.user.id, module: 'lists', verb: 'created',
+                      entityId: row.id, summary: `created the list ${title}`, link: `/lists/${row.id}` });
+    res.status(201).json(row);
+  });
+  r.get('/:id', (req, res) => {
+    const row = ctx.db.prepare('SELECT * FROM lists WHERE id = ? AND family_id = ?').get(toId(req.params.id), req.family.id);
+    if (!row) throw httpError(404, 'List not found');   // Express 5: sync or async throws become JSON errors
+    res.json(row);
+  });
+  return r;
+}
+```
+
+- **Request context** (set by `requireAuth` + `requireFamily` before your router):
+  `req.user = { id, name, email, color, avatar_url, birthday, phone, created_at }` (email is `null`
+  for managed members), `req.family` = the full `families` row (`id, name, invite_code, cover_url,
+  currency, created_by, created_at`), `req.role` = `'admin' | 'member' | 'child'`.
+- **`ctx`** — `{ db, broadcast, sendToUsers, logActivity, notify, upload, publicUser, storeFile,
+  removeFile, tx, httpError, uploadDir, hub, auth }`:
+  - `broadcast(familyId, type, payload)` — SSE to every member currently viewing that family.
+  - `sendToUsers(userIds, type, payload, familyId?)` — SSE to specific users only.
+  - `logActivity({ familyId, userId, module, verb, entityId?, summary, link?, createdAt? })` — returns the
+    row (with `user`) and broadcasts `'activity'`. `createdAt` (ISO) lets seeds backdate entries.
+    The summary is rendered after the actor's name ("Alex **added 3 items to Groceries**").
+  - `notify({ familyId, userIds, module, title, body?, link?, excludeUserId? })` — skips non-members
+    and `excludeUserId` (pass `req.user.id` so people aren't notified about their own actions).
+  - `upload` — multer: `r.post('/', ctx.upload.single('file'), handler)` → `req.file.url`
+    (`/uploads/<familyId>/<random>.<ext>`), plus `req.file.size/mimetype/originalname`. 25 MB limit,
+    any file type (validate `mimetype` yourself; oversize → 413 JSON). `upload.array('files', 20)` works too.
+  - `storeFile(familyId, buffer, ext)` → URL (for seeds/server-generated files, e.g. SVG placeholder photos).
+  - `removeFile(url)` — delete an uploaded file when its row is deleted.
+  - `tx(db, () => { ... })` — BEGIN/COMMIT/ROLLBACK wrapper. `publicUser(row)` — strip secrets.
+- **Errors**: `throw httpError(status, 'Message')` (or `ctx.httpError`) anywhere in a handler, or
+  `res.status(4xx).json({ error })`. Unknown errors → 500 `{ error: 'Something went wrong on our side' }`.
+- **Timestamps**: core tables store ISO-8601 UTC (`2026-09-29T07:41:00.123Z`). Use `ISO_NOW` as the
+  column default, or `new Date().toISOString()`.
+- **Table rules**: every table must either have a `family_id` column **or** a foreign key with
+  `ON DELETE CASCADE` to a table that has one. The seed/purge logic relies on this to wipe a family
+  cleanly (it deletes by `family_id`, then removes rows whose FK parent vanished).
+- **Hooks** (all optional, errors are caught and logged, never break the page):
+  - `seed(ctx, { familyId, users, userList })` — `users` = `{ alex, sam, mia, leo }` full users rows
+    (use `.id`, `.name`, `.color`); `userList` = the same four in that order. May be async.
+  - `search(ctx, familyId, q, req)` → `[{ title, subtitle?, link }]` (≤ 8 used; `module` is added for you;
+    `q` is ≥ 2 chars). Use `LIKE '%' || ? || '%'` and scope by `familyId`.
+  - `dashboard(ctx, req)` → small JSON object; `GET /api/dashboard` returns `{ [module]: value }`.
+- **Core SSE event types** (besides your `'<module>.*'` events): `hello` (on connect), `activity`,
+  `notification`, `notification.read`, `family.updated`, `family.member.joined`,
+  `family.member.left`, `family.removed`.
+- **Core API response notes**: `GET /api/search` → `{ q, results: [{ module, title, subtitle, link, avatar? }] }`;
+  `GET /api/family` → family fields + `role` + `members[]` (`{ id, name, email, color, avatar_url,
+  birthday, phone, role, nickname, joined_at, managed }`); also `GET /api/family/members`.
+  `GET /api/activity?before=&limit=&module=` supports a `module` filter.
+
+#### Server tests
+
+```js
+// server/test/lists.test.js
+import { test, before, after } from 'node:test';
+import assert from 'node:assert/strict';
+import { startServer, familyFixture, registerUser, PNG_1X1, collectEvents } from './helpers.js';
+
+let srv;
+before(async () => { srv = await startServer(); });        // temp DB + uploads, random port
+after(() => srv.close());
+
+test('lists are family-scoped', async () => {
+  const a = await familyFixture(srv, 'A');                  // { admin, member, family } — admin/member have .agent and .user
+  const b = await familyFixture(srv, 'B');
+  const created = await a.admin.agent.post('/api/lists', { name: 'Groceries' });
+  assert.equal(created.status, 201);
+  assert.equal((await b.admin.agent.get(`/api/lists/${created.body.id}`)).status, 404);
+});
+```
+
+Agent methods: `get/post/patch/put/del(url, body?)` → `{ status, body, headers }`;
+`upload(url, { file: PNG_1X1, filename, type, field = 'file', fields })`. `collectEvents(agent, { count | until, timeoutMs })`
+resolves once the SSE stream is connected and returns `{ events: Promise<event[]> }`.
+`srv.ctx` / `srv.db` give direct access (e.g. to call your `seed`). Run one file:
+`node --disable-warning=ExperimentalWarning --test server/test/lists.test.js`.
+
+### Client
+
+Import paths from inside `client/src/modules/<name>/`:
+
+```ts
+import { api, qs, errorMessage, ApiError } from '../../lib/api';
+import { useAuth, useMember } from '../../lib/auth';
+import { useLive } from '../../lib/live';
+import { fmtDate, fmtTime, fmtDateTime, fmtDay, fmtRelative, fmtMoney, initials, firstName, plural, toDate, toDateKey, age, fmtBytes } from '../../lib/format';
+import type { User, Member, Family, Activity, Notification, LiveEvent } from '../../lib/types';
+import { useDebounce, useIsDesktop, useMediaQuery, useDocumentTitle } from '../../lib/hooks';
+import { cn } from '../../lib/cn';
+import { Button, Card, Modal, toast, useConfirm /* … */ } from '../../ui';
+import type { ModuleDef } from '../types';
+```
+
+- **Routing**: your page is mounted at `${path}/*`, so nested routes are relative:
+  `<Routes><Route index element={<Overview />} /><Route path=":id" element={<Detail />} /></Routes>`
+  (import from `react-router`). Link with absolute paths (`/lists/12`).
+- **Data**: `useQuery({ queryKey: ['lists'], queryFn: () => api.get<List[]>('/lists') })`; after mutations
+  `queryClient.invalidateQueries({ queryKey: ['lists'] })`. `useLive('lists')` keeps every `['lists', …]`
+  query fresh when anyone changes data (optional handler: `useLive('lists', (e) => …)`; pass
+  `{ invalidate: false }` to handle events yourself). Queries are cleared automatically on family switch.
+- **Dates**: API dates `YYYY-MM-DD` are local calendar days — parse with `toDate()`, format a `Date` back with `toDateKey()`.
+- **Layout**: pages render inside a padded, max-width `<main>` (`max-w-6xl`). Start each page with
+  `<PageHeader title subtitle icon={mod.icon} accent={mod.accent} actions={…} />` (it also sets the tab title).
+  For full-height layouts (chat, map) use `className="h-[calc(100dvh-var(--shell-chrome))]"`.
+  On mobile, the bottom nav is 64px + safe area; `<Fab>` already sits above it (hidden ≥1024px unless `desktop`).
+- **Styling**: token classes work in both themes — `bg-bg`, `bg-surface`, `bg-surface-2/-3`, `text-fg`,
+  `text-muted`, `text-subtle`, `border-border`, `border-border-strong`, `bg-primary`, `text-primary`,
+  `bg-primary-soft text-primary-soft-fg`, `bg-danger|success|warning|info` and their `-soft` / `-soft-fg`
+  pairs, `shadow-card|lift|pop`, `ring-ring`, animations `animate-fade-in|scale-in|pop-in`. Tint with a
+  module/member color via inline style, e.g.
+  `style={{ backgroundColor: \`color-mix(in oklab, ${accent} 14%, transparent)\`, color: accent }}`.
+- **Living style guide**: sign in and open **`/ui-kit`** to see every shared component in both themes.
+
+#### `ui/` components (props summary)
+
+| Component | Key props |
+|---|---|
+| `Button` | `variant` primary\|secondary\|soft\|outline\|ghost\|danger, `size` sm\|md\|lg, `loading`, `icon`/`iconRight` (lucide component or element), `block`; `buttonClass(variant,size)` to style a `<Link>` |
+| `IconButton` | `icon`, `label` (required aria-label), `variant` ghost\|secondary\|primary\|danger\|soft, `size`, `badge` (true or number), `loading` |
+| `Input` | native props + `icon`, `trailing`, `invalid`, `size` |
+| `Textarea` | native props + `autoGrow` |
+| `Select` | native props + `options=[{value,label}]`, `placeholder` (or `<option>` children) |
+| `Field` | `label`, `hint`, `error`, `required`, `aside` — wraps one control and wires id/aria automatically |
+| `Checkbox` | `checked`, `onChange(bool)`, `label`, `description`, `color`, `shape` square\|circle, `size` |
+| `Switch` | `checked`, `onChange(bool)`, `label`, `description` |
+| `Modal` | `open`, `onClose`, `title`, `description`, `footer`, `size` sm\|md\|lg\|xl, `icon`, `dismissible`, `hideClose`. Bottom sheet < 640px (swipe down to close). For forms: `<form id="x">` in body + `<Button type="submit" form="x">` in footer |
+| `useConfirm()` | `const confirm = useConfirm(); if (await confirm({ title, message, confirmLabel, danger })) …` (`ConfirmDialog` for controlled use) |
+| `toast` | `toast.success/error/info/warning(msg, { description, action: {label,onClick}, duration })` |
+| `Card` / `CardHeader` | `padding` none\|sm\|md\|lg, `interactive` · `title, subtitle, icon, accent, action` |
+| `Avatar` / `AvatarStack` | `user` ({name,color,avatar_url}), `size` xs\|sm\|md\|lg\|xl\|2xl, `ring`, `status` · `users`, `max`, `size` |
+| `MemberPicker` | `multiple` + `value:number[]` / single `value:number\|null`, `onChange`, `members?`, `filter?`, `showAll`, `allowEmpty`, `size` |
+| `ColorPicker` / `PALETTE` | `value`, `onChange`, `colors`, `size` |
+| `EmptyState` | `icon`, `title`, `description`, `action`, `accent`, `compact` |
+| `Spinner`, `PageSpinner` | `size` |
+| `Skeleton`, `SkeletonText`, `SkeletonList`, `SkeletonCard` | size via `className`; `lines` / `rows` |
+| `Tabs` | `tabs=[{id,label,icon?,count?}]`, `value`, `onChange`, `accent` |
+| `SegmentedControl` | `options=[{value,label,icon?}]`, `value`, `onChange`, `size`, `block` |
+| `Badge` | `tone` neutral\|primary\|success\|warning\|danger\|info or `color` (hex), `dot`, `size` |
+| `Menu` | `items=[{label, icon, onSelect \| href, danger, disabled, hint} \| 'divider' \| false]`, `trigger?={({open}) => node}`, `label`, `align` |
+| `Popover` | `open`, `onClose`, `anchorRef`, `align`, `className` |
+| `PageHeader` | `title`, `subtitle`, `icon`, `accent`, `actions`, `back` (path or true), `children` (tabs row) |
+| `Fab` | `label`, `onClick`, `icon`, `accent`, `extended`, `desktop` |
+| `ImageUploader` | `onSelect(file)` (already resized ≤2000px JPEG; return a promise for a spinner), `value`, `onRemove`, `multiple`, `shape` rect\|circle, `aspect`, `label`, `hint`, `maxSize`, `quality`, or `children` as a custom trigger. Helpers: `resizeImage(file, opts)`, `fileForm(file, fields)` → FormData for `api.upload` |
+| `Lightbox` | `images` (strings or `{src, alt, caption}`), `index` (number\|null), `onClose`, `onIndexChange`, `actions?(img, i)`, `download` |
+
+### Running an isolated instance (for Playwright / manual checks)
+
+```bash
+npm run build                                           # once, after client changes
+PORT=4011 DB_PATH=/tmp/h4011/hearth.db UPLOAD_DIR=/tmp/h4011/up npm run seed
+PORT=4011 DB_PATH=/tmp/h4011/hearth.db UPLOAD_DIR=/tmp/h4011/up npm start   # http://localhost:4011
+```
+
+Use a unique port + temp paths per agent. Seeding a running instance is fine (WAL mode). Stop the
+server with its PID when done (avoid `pkill -f` patterns that also match your own shell).
+
+```js
+// /tmp/.../shot.mjs — run with `node shot.mjs` from anywhere
+import { chromium } from '/home/user/Claude-Github-Repo/node_modules/playwright/index.mjs';
+const browser = await chromium.launch({ executablePath: '/opt/pw-browsers/chromium' });
+const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+await ctx.addInitScript(() => localStorage.setItem('hearth-theme', 'dark'));   // 'light' | 'dark' | 'system'
+const page = await ctx.newPage();
+// Fast login: the API sets the session cookie on the browser context.
+await page.request.post('http://localhost:4011/api/auth/login', { data: { email: 'alex@hearth.test', password: 'hearth123' } });
+// (or via the UI: fill input[name=email] / input[name=password], click button[type=submit], waitForURL('**/home'))
+await page.goto('http://localhost:4011/lists');
+await page.screenshot({ path: '/tmp/lists.png' });
+await browser.close();
+```
+
+Dev mode alternative: `API_PORT=4011 VITE_PORT=5180 npm run dev -w client` points a Vite dev server
+at an already running API.

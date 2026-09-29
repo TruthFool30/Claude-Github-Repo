@@ -1,0 +1,26 @@
+{
+  "name": "hearth",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Hearth - a self-hosted family organizer",
+  "type": "module",
+  "workspaces": [
+    "server",
+    "client"
+  ],
+  "engines": {
+    "node": ">=22.5"
+  },
+  "scripts": {
+    "dev": "concurrently -k -n server,client -c blue,magenta \"npm run dev -w server\" \"npm run dev -w client\"",
+    "build": "npm run build -w client",
+    "start": "npm run start -w server",
+    "test": "npm test -w server",
+    "seed": "npm run seed -w server",
+    "typecheck": "tsc --noEmit -p client"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "playwright": "1.56.1"
+  }
+}

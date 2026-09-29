@@ -1,0 +1,112 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
+
+/**
+ * SQL expression producing an ISO-8601 UTC timestamp (e.g. 2026-09-29T07:41:00.123Z).
+ * Use it in module migrations: `created_at TEXT NOT NULL DEFAULT ${ISO_NOW}`.
+ */
+export const ISO_NOW = "(strftime('%Y-%m-%dT%H:%M:%fZ','now'))";
+
+export const coreMigrations = [
+  `CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY,
+    email TEXT UNIQUE NOT NULL COLLATE NOCASE,
+    password_hash TEXT NOT NULL,
+    name TEXT NOT NULL,
+    color TEXT NOT NULL,
+    avatar_url TEXT,
+    birthday TEXT,
+    phone TEXT,
+    created_at TEXT NOT NULL DEFAULT ${ISO_NOW}
+  )`,
+  `CREATE TABLE IF NOT EXISTS families (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    invite_code TEXT UNIQUE NOT NULL,
+    cover_url TEXT,
+    currency TEXT NOT NULL DEFAULT 'USD',
+    created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    created_at TEXT DEFAULT ${ISO_NOW}
+  )`,
+  `CREATE TABLE IF NOT EXISTS memberships (
+    family_id INTEGER NOT NULL REFERENCES families(id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    role TEXT NOT NULL DEFAULT 'member' CHECK (role IN ('admin','member','child')),
+    nickname TEXT,
+    created_at TEXT DEFAULT ${ISO_NOW},
+    PRIMARY KEY (family_id, user_id)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_memberships_user ON memberships(user_id)`,
+  `CREATE TABLE IF NOT EXISTS sessions (
+    token TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    active_family_id INTEGER REFERENCES families(id) ON DELETE SET NULL,
+    created_at TEXT DEFAULT ${ISO_NOW},
+    expires_at TEXT
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)`,
+  `CREATE TABLE IF NOT EXISTS activity (
+    id INTEGER PRIMARY KEY,
+    family_id INTEGER NOT NULL REFERENCES families(id) ON DELETE CASCADE,
+    user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    module TEXT NOT NULL,
+    verb TEXT NOT NULL,
+    entity_id INTEGER,
+    summary TEXT NOT NULL,
+    link TEXT,
+    created_at TEXT DEFAULT ${ISO_NOW}
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_activity_family ON activity(family_id, id DESC)`,
+  `CREATE TABLE IF NOT EXISTS notifications (
+    id INTEGER PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    family_id INTEGER NOT NULL REFERENCES families(id) ON DELETE CASCADE,
+    module TEXT,
+    title TEXT NOT NULL,
+    body TEXT,
+    link TEXT,
+    read_at TEXT,
+    created_at TEXT DEFAULT ${ISO_NOW}
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, family_id, id DESC)`,
+];
+
+/**
+ * Open (or create) the SQLite database, enable WAL + foreign keys and run the core
+ * migrations followed by every module's `migrations` array (in module order).
+ */
+export function openDb(dbPath, modules = []) {
+  if (dbPath !== ':memory:') fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+  const db = new DatabaseSync(dbPath);
+  db.exec('PRAGMA journal_mode = WAL');
+  db.exec('PRAGMA foreign_keys = ON');
+  db.exec('PRAGMA busy_timeout = 5000');
+  for (const sql of coreMigrations) db.exec(sql);
+  for (const mod of modules) {
+    for (const [i, sql] of (mod.migrations || []).entries()) {
+      try {
+        db.exec(sql);
+      } catch (err) {
+        // Allow idempotent "ALTER TABLE ... ADD COLUMN" migrations to be re-run.
+        if (/duplicate column name/i.test(err.message)) continue;
+        err.message = `Migration ${i} of module "${mod.name}" failed: ${err.message}`;
+        throw err;
+      }
+    }
+  }
+  return db;
+}
+
+/** Run `fn` inside a transaction (BEGIN/COMMIT, ROLLBACK on throw). Returns fn's result. */
+export function tx(db, fn) {
+  db.exec('BEGIN');
+  try {
+    const result = fn();
+    db.exec('COMMIT');
+    return result;
+  } catch (err) {
+    db.exec('ROLLBACK');
+    throw err;
+  }
+}

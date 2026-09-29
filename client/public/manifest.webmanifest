@@ -1,0 +1,18 @@
+{
+  "name": "Hearth — Family Organizer",
+  "short_name": "Hearth",
+  "description": "Your family's calendar, lists, messages, photos, meals and budget in one private place.",
+  "start_url": "/home",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#F7F7FB",
+  "theme_color": "#5B5BD6",
+  "categories": ["lifestyle", "productivity"],
+  "icons": [
+    { "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
