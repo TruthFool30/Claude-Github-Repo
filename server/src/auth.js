@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { dateIn, isValidTz } from './time.js';
 
 export const COOKIE_NAME = 'hearth_session';
 const SESSION_DAYS = 30;
@@ -126,6 +127,7 @@ export function makeAuth(db) {
        FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ?`,
   );
   const touch = db.prepare('UPDATE sessions SET expires_at = ? WHERE token = ?');
+  const setTz = db.prepare('UPDATE users SET timezone = ? WHERE id = ?');
 
   /** Returns null on success (req.user etc. set) or an error message. */
   function authenticate(req, res) {
@@ -145,6 +147,15 @@ export function makeAuth(db) {
     req.session = { token, user_id: row.user_id, active_family_id: row.active_family_id };
     req.userRow = { ...row, id: row.user_id };
     req.user = publicUser(req.userRow);
+    // Time zone: trust the tab's X-Timezone when valid (and remember it), else the stored one.
+    const headerTz = req.get('X-Timezone');
+    if (headerTz && isValidTz(headerTz)) {
+      req.tz = headerTz;
+      if (row.timezone !== headerTz) setTz.run(headerTz, row.user_id);
+    } else {
+      req.tz = isValidTz(row.timezone) ? row.timezone : undefined;
+    }
+    req.today = dateIn(req.tz);
     return null;
   }
 

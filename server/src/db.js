@@ -70,6 +70,8 @@ export const coreMigrations = [
     created_at TEXT DEFAULT ${ISO_NOW}
   )`,
   `CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, family_id, id DESC)`,
+  // Remembered IANA time zone (from the client's X-Timezone header) for background jobs.
+  `ALTER TABLE users ADD COLUMN timezone TEXT`,
 ];
 
 /**
@@ -82,7 +84,14 @@ export function openDb(dbPath, modules = []) {
   db.exec('PRAGMA journal_mode = WAL');
   db.exec('PRAGMA foreign_keys = ON');
   db.exec('PRAGMA busy_timeout = 5000');
-  for (const sql of coreMigrations) db.exec(sql);
+  for (const sql of coreMigrations) {
+    try {
+      db.exec(sql);
+    } catch (err) {
+      if (/duplicate column name/i.test(err.message)) continue; // idempotent ADD COLUMN
+      throw err;
+    }
+  }
   for (const mod of modules) {
     for (const [i, sql] of (mod.migrations || []).entries()) {
       try {

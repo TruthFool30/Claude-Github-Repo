@@ -45,12 +45,22 @@ export function getApiFamily(): number | null {
   return activeFamilyId;
 }
 
+/** This device's IANA time zone, sent as `X-Timezone` so the server knows the family's "today". */
+const LOCAL_TZ = (() => {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || '';
+  } catch {
+    return '';
+  }
+})();
+
 type Method = 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
 
 async function request<T>(method: Method, path: string, body?: unknown, init: RequestInit = {}): Promise<T> {
   const url = path.startsWith('/api') ? path : `/api${path.startsWith('/') ? '' : '/'}${path}`;
   const headers = new Headers(init.headers);
   if (activeFamilyId && !headers.has('X-Family-Id')) headers.set('X-Family-Id', String(activeFamilyId));
+  if (LOCAL_TZ && !headers.has('X-Timezone')) headers.set('X-Timezone', LOCAL_TZ);
   let payload: BodyInit | undefined;
   if (body instanceof FormData) {
     payload = body;

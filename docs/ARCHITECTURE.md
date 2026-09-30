@@ -511,3 +511,17 @@ at an already running API.
     (Item has `id, list_id, list_name, text, due_date, assignee_id`), `meals: { today: [{ slot, title, recipe_id? }] }`.
   - Wall reads `GET /api/activity` (core) for other modules' entries; each module's `logActivity`
     `link` must point to a route inside that module.
+
+### Time zones — the family's "today" (added during module review)
+
+Servers usually run in UTC, so never compute "today", "overdue" or "due today" with the server's
+local date. The client sends its IANA zone as `X-Timezone` on every API call (`lib/api.ts`); the
+server validates it and remembers it per user (`users.timezone`). Use `ctx.time`:
+
+- `ctx.time.today(req)` → `'YYYY-MM-DD'` for the requesting user (also `req.today`, `req.tz`).
+- `ctx.time.tz(req)` → the requesting user's zone.
+- Background jobs (reminders, recurring bills, due notifications): `ctx.time.todayForFamily(familyId)`
+  / `ctx.time.familyTz(familyId)` (most common zone among members) or `ctx.time.todayForUser(id)`.
+- `ctx.time.dateIn(tz, date?)`, `ctx.time.offsetMinutes(tz, date?)`, `ctx.time.isValidTz(tz)`.
+- The core `/api/dashboard` runs module `dashboard(ctx, req)` hooks with the same `req`, so
+  `ctx.time.today(req)` is correct there too.

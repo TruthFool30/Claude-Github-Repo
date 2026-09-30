@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { makeTime } from './time.js';
 import path from 'node:path';
 import express from 'express';
 import cookieParser from 'cookie-parser';
@@ -92,6 +93,7 @@ export function createContext({ db, uploadDir, hub = createHub(), limits = {} })
     publicUser,
     tx,
     httpError,
+    time: makeTime(db),
   };
   return ctx;
 }
