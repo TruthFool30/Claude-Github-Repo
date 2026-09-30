@@ -536,7 +536,7 @@ also renders on desktop.
 
 ### Upload safety (added during module review)
 
-- `/uploads/...` serves only `.jpg .jpeg .png .gif .webp .avif .pdf` inline (with `nosniff` and a
+- `/uploads/...` serves only `.jpg .jpeg .png .gif .webp .avif .pdf .svg` inline (with `nosniff` and a
   sandbox CSP). Every other extension is sent as `application/octet-stream` +
   `Content-Disposition: attachment`, so a disguised HTML/SVG file can never render.
 - For image uploads, call `const info = ctx.verifyImage(req.file)` right after multer: it checks the

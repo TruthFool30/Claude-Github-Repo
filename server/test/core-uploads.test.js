@@ -77,7 +77,10 @@ describe('uploads', () => {
     assert.equal(got.headers.get('content-type'), 'application/octet-stream');
     assert.match(got.headers.get('content-disposition') || '', /attachment/);
     const svg = await a.admin.agent.upload('/api/files', { file: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><script>1</script></svg>'), filename: 'x.svg', type: 'image/jpeg' });
-    assert.equal((await a.admin.agent.get(svg.body.url)).headers.get('content-type'), 'application/octet-stream');
+    const svgRes = await a.admin.agent.get(svg.body.url);
+    assert.equal(svgRes.headers.get('content-type'), 'image/svg+xml');
+    assert.match(svgRes.headers.get('content-security-policy'), /sandbox/);
+    assert.match(svgRes.headers.get('content-security-policy'), /default-src 'none'/);
     const png = await a.admin.agent.get((await a.admin.agent.upload('/api/files', { file: PNG_1X1, filename: 'p.png' })).body.url);
     assert.equal(png.headers.get('content-type'), 'image/png');
     // avatar: HTML disguised as PNG is rejected; a real PNG named .gif is stored as .png

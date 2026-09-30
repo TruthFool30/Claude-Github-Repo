@@ -11,6 +11,8 @@ const SAFE_EXT = /^\.[a-z0-9]{1,8}$/;
 const INLINE_TYPES = {
   '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.gif': 'image/gif',
   '.webp': 'image/webp', '.avif': 'image/avif', '.pdf': 'application/pdf',
+  // SVG renders inline too: the sandbox CSP (default-src 'none'; sandbox) stops any script in it.
+  '.svg': 'image/svg+xml',
 };
 function extFor(originalname = '', mimetype = '') {
   const ext = path.extname(originalname).toLowerCase();
