@@ -115,6 +115,7 @@ export function familiesRouter(ctx) {
       membership = { role: 'member' };
       logActivity({ familyId: family.id, userId: req.user.id, module: 'family', verb: 'joined', summary: 'joined the family', link: '/family' });
       hub.broadcast(family.id, 'family.member.joined', { user: req.user });
+      ctx.memberEvent?.('joined', { familyId: family.id, userId: req.user.id, reason: 'joined' });
     }
     db.prepare('UPDATE sessions SET active_family_id = ? WHERE token = ?').run(family.id, req.session.token);
     hub.rebindSession(req.session.token, family.id);
@@ -237,6 +238,7 @@ export function familyRouter(ctx) {
     });
     logActivity({ familyId: req.family.id, userId: req.user.id, module: 'family', verb: 'added', entityId: userId, summary: `added ${name} to the family`, link: '/family' });
     hub.broadcast(req.family.id, 'family.member.joined', { user_id: userId });
+    ctx.memberEvent?.('joined', { familyId: req.family.id, userId, reason: 'added' });
     const member = listMembers(db, req.family.id).find((m) => m.id === userId);
     res.status(201).json(member);
   });
@@ -307,6 +309,7 @@ export function familyRouter(ctx) {
       link: '/family',
     });
     hub.broadcast(req.family.id, 'family.member.left', { user_id: userId });
+    ctx.memberEvent?.('left', { familyId: req.family.id, userId, reason: self ? 'left' : 'removed' });
     // Managed accounts that no longer belong anywhere are deleted (best effort).
     if (isManagedEmail(target.email)) {
       const others = db.prepare('SELECT COUNT(*) AS n FROM memberships WHERE user_id = ?').get(userId).n;

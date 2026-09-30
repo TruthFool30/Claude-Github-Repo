@@ -120,6 +120,18 @@ export function createApp({
   const db = openDb(dbPath, modules);
   const hub = createHub({ isSessionValid: (token) => isSessionValid(db, token) });
   const ctx = createContext({ db, uploadDir, hub, limits });
+  // Membership lifecycle hooks: modules may export onMemberJoined / onMemberLeft(ctx, { familyId, userId, reason }).
+  ctx.memberEvent = (kind, info) => {
+    const hook = kind === 'joined' ? 'onMemberJoined' : 'onMemberLeft';
+    for (const mod of modules) {
+      if (typeof mod[hook] !== 'function') continue;
+      try {
+        mod[hook](ctx, info);
+      } catch (err) {
+        console.error(`[${mod.name}] ${hook} failed:`, err);
+      }
+    }
+  };
   const { requireAuth, requireFamily } = ctx.auth;
 
   const app = express();

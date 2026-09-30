@@ -551,3 +551,11 @@ also renders on desktop.
 live pop-up toast for matching notifications while the component is mounted (the bell still
 receives them). Use it for e.g. comments on the photo/post/chat the user is viewing; the page may
 also mark such notifications read via `POST /api/notifications/read {ids}`.
+
+### Membership lifecycle hooks
+
+Modules may export `onMemberJoined(ctx, { familyId, userId, reason })` (reason `'joined'` via invite
+code or `'added'` by an admin) and `onMemberLeft(ctx, { familyId, userId, reason })` (`'left'` or
+`'removed'`). They run synchronously right after the membership row changes (errors are logged, not
+thrown). Use them e.g. to record when someone left a conversation, or to delete a departed member's
+location data. Not called when a whole family is deleted (its rows cascade).

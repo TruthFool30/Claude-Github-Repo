@@ -1,5 +1,6 @@
 import { test, before, after, describe } from 'node:test';
 import assert from 'node:assert/strict';
+import { Router } from 'express';
 import { startServer, registerUser, familyFixture } from './helpers.js';
 
 let srv;
@@ -116,4 +117,25 @@ describe('families', () => {
     const s = (await a.admin.agent.get('/api/search?q=Member')).body;
     assert.ok(s.results.every((r) => famA.members.some((m) => m.id === r.avatar?.id)));
   });
+});
+
+test('modules receive onMemberJoined / onMemberLeft lifecycle hooks', async () => {
+  const events = [];
+  const mod = {
+    name: 'hooks',
+    migrations: [],
+    router: () => Router(),
+    onMemberJoined: (ctx, info) => events.push(['joined', info.userId, info.reason]),
+    onMemberLeft: (ctx, info) => events.push(['left', info.userId, info.reason]),
+  };
+  const hsrv = await startServer({ modules: [mod] });
+  try {
+    const { admin, family } = await familyFixture(hsrv);
+    const newbie = await registerUser(hsrv, { name: 'Newbie' });
+    await newbie.agent.post('/api/families/join', { invite_code: family.invite_code });
+    await admin.agent.del(`/api/family/members/${newbie.user.id}`);
+    assert.deepEqual(events.filter((e) => e[1] === newbie.user.id), [['joined', newbie.user.id, 'joined'], ['left', newbie.user.id, 'removed']]);
+  } finally {
+    await hsrv.close();
+  }
 });
