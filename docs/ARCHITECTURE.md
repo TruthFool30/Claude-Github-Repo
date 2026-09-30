@@ -544,3 +544,10 @@ also renders on desktop.
   extension (updating `req.file.url`), and throws 400 otherwise (the upload is auto-deleted).
   Use `info.width/info.height` — never trust client-sent dimensions or MIME types.
 - `ctx.sniffImage(buffer)` does the same check on an in-memory buffer.
+
+### Suppressing a toast for what's already on screen
+
+`useSuppressNotificationToast((n) => n.link === currentLink)` from `lib/notifyFilter.ts` skips the
+live pop-up toast for matching notifications while the component is mounted (the bell still
+receives them). Use it for e.g. comments on the photo/post/chat the user is viewing; the page may
+also mark such notifications read via `POST /api/notifications/read {ids}`.

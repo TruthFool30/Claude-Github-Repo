@@ -1,4 +1,5 @@
 import { useRef, useState } from 'react';
+import { isToastSuppressed } from '../lib/notifyFilter';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Bell, BellOff, CheckCheck } from 'lucide-react';
 import { useNavigate } from 'react-router';
@@ -29,6 +30,7 @@ export function useNotificationToasts() {
     (e) => {
       const n = e.payload;
       if (e.type !== 'notification' || !n || n.family_id !== familyId) return;
+      if (isToastSuppressed(n)) return;
       toast.info(n.title, {
         description: n.body ?? undefined,
         action: n.link ? { label: 'View', onClick: () => navigate(n.link!) } : undefined,
