@@ -172,7 +172,7 @@ export function createApp({
     }));
     app.get('/{*splat}', (req, res) => {
       res.setHeader('Cache-Control', 'no-cache');
-      res.sendFile(indexHtml);
+      res.sendFile('index.html', { root: clientDist }); // root: works even under a dot-folder
     });
   }
 

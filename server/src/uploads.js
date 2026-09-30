@@ -101,7 +101,9 @@ export function makeUploadServer(db, uploadDir, requireAuth) {
       'Content-Security-Policy': "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; sandbox",
       'Cache-Control': 'private, max-age=31536000, immutable',
     });
-    res.sendFile(abs, (err) => {
+    // Relative path + root: `send` only applies its dotfile check below `root`, so a data dir under
+    // a dot-folder (e.g. a git worktree in .claude/) still works.
+    res.sendFile(path.relative(root, abs), { root }, (err) => {
       if (err && !res.headersSent) res.status(404).json({ error: 'Not found' });
     });
   }
