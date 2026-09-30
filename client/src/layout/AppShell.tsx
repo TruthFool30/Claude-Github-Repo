@@ -1,6 +1,7 @@
 import { Suspense, useEffect } from 'react';
 import { Outlet, useLocation } from 'react-router';
-import { openSearch, setShell } from '../lib/shell';
+import { openSearch, setShell, useShell } from '../lib/shell';
+import { cn } from '../lib/cn';
 import { PageSpinner } from '../ui';
 import { BottomNav } from './BottomNav';
 import { MoreSheet } from './MoreSheet';
@@ -16,6 +17,7 @@ import { DesktopHeader, TopBar } from './TopBar';
  */
 export function AppShell() {
   const { pathname } = useLocation();
+  const { hideBottomNav } = useShell();
   useNotificationToasts();
 
   useEffect(() => {
@@ -42,7 +44,12 @@ export function AppShell() {
         <DesktopHeader />
         <main
           id="main"
-          className="mx-auto w-full max-w-6xl flex-1 px-4 pb-[calc(96px+env(safe-area-inset-bottom))] pt-5 [--shell-chrome:calc(56px+64px+env(safe-area-inset-top)+env(safe-area-inset-bottom)+20px+32px)] sm:px-6 lg:px-10 lg:pb-12 lg:pt-8 lg:[--shell-chrome:calc(64px+32px+48px)]"
+          className={cn(
+            'mx-auto w-full max-w-6xl flex-1 px-4 pt-5 sm:px-6 lg:px-10 lg:pb-12 lg:pt-8 lg:[--shell-chrome:calc(64px+32px+48px)]',
+            hideBottomNav
+              ? 'pb-[calc(16px+env(safe-area-inset-bottom))] [--shell-chrome:calc(56px+env(safe-area-inset-top)+env(safe-area-inset-bottom)+20px+16px)]'
+              : 'pb-[calc(96px+env(safe-area-inset-bottom))] [--shell-chrome:calc(56px+64px+env(safe-area-inset-top)+env(safe-area-inset-bottom)+20px+32px)]',
+          )}
         >
           <Suspense fallback={<PageSpinner />}>
             <Outlet />

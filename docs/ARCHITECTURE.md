@@ -525,3 +525,11 @@ server validates it and remembers it per user (`users.timezone`). Use `ctx.time`
 - `ctx.time.dateIn(tz, date?)`, `ctx.time.offsetMinutes(tz, date?)`, `ctx.time.isValidTz(tz)`.
 - The core `/api/dashboard` runs module `dashboard(ctx, req)` hooks with the same `req`, so
   `ctx.time.today(req)` is correct there too.
+
+### Hiding the mobile bottom bar
+
+`import { useHideBottomNav } from '../../lib/shell'` — call `useHideBottomNav(active)` in a page
+that should be full-screen on phones (e.g. an open chat): the bottom tab bar disappears and
+`--shell-chrome` / bottom padding shrink accordingly while `active` is true; restored on unmount.
+Only affects < 1024px (the bar is mobile-only). Pass `active` based on a media query if the page
+also renders on desktop.

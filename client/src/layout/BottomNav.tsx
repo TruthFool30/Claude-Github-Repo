@@ -7,10 +7,11 @@ import { MoreDot, NavBadge, NavBadgeText } from './NavBadge';
 
 /** Mobile bottom tab bar: 4 primary modules + "More". */
 export function BottomNav() {
-  const { moreOpen } = useShell();
+  const { moreOpen, hideBottomNav } = useShell();
   const { pathname } = useLocation();
   const inSecondary =
     secondaryModules.some((m) => pathname.startsWith(m.path)) || pathname.startsWith('/family') || pathname.startsWith('/settings');
+  if (hideBottomNav) return null;
   return (
     <nav
       aria-label="Main"
