@@ -559,3 +559,9 @@ code or `'added'` by an admin) and `onMemberLeft(ctx, { familyId, userId, reason
 `'removed'`). They run synchronously right after the membership row changes (errors are logged, not
 thrown). Use them e.g. to record when someone left a conversation, or to delete a departed member's
 location data. Not called when a whole family is deleted (its rows cascade).
+
+### Toast placement
+
+`useToastPlacement('top', active?)` from `lib/shell` moves toasts to the top-centre while mounted
+(e.g. cook mode, where the main buttons are at the bottom). The toaster container carries
+`data-toaster="default|top"`; never restyle it via its utility classes.

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } fro
 import { createPortal } from 'react-dom';
 import { CheckCircle2, Info, X, XCircle, AlertTriangle } from 'lucide-react';
 import { cn } from '../lib/cn';
+import { useShell } from '../lib/shell';
 
 export type ToastTone = 'success' | 'error' | 'info' | 'warning';
 export interface ToastOptions {
@@ -124,10 +125,17 @@ export function Toaster() {
     () => items,
     () => items,
   );
+  const { toastPlacement } = useShell();
   return createPortal(
     <div
       aria-live="polite"
-      className="pointer-events-none fixed inset-x-0 bottom-[calc(80px+env(safe-area-inset-bottom))] z-[70] flex flex-col items-center gap-2 px-4 lg:bottom-6 lg:right-6 lg:left-auto lg:items-end lg:px-0"
+      data-toaster={toastPlacement}
+      className={cn(
+        'pointer-events-none fixed inset-x-0 z-[70] flex flex-col items-center gap-2 px-4',
+        toastPlacement === 'top'
+          ? 'top-[calc(72px+env(safe-area-inset-top))]'
+          : 'bottom-[calc(80px+env(safe-area-inset-bottom))] lg:bottom-6 lg:right-6 lg:left-auto lg:items-end lg:px-0',
+      )}
     >
       {list.map((t) => (
         <ToastCard key={t.id} item={t} />
