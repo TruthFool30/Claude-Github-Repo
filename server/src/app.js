@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import { makeTime } from './time.js';
+import { sniffImageBuffer } from './imagesniff.js';
 import path from 'node:path';
 import express from 'express';
 import cookieParser from 'cookie-parser';
@@ -8,7 +9,7 @@ import { openDb, tx } from './db.js';
 import { createHub } from './realtime.js';
 import { makeLogActivity } from './activity.js';
 import { makeNotify } from './notifications.js';
-import { imageOnly, makeRemoveFile, makeStoreFile, makeUpload, makeUploadServer } from './uploads.js';
+import { imageOnly, makeRemoveFile, makeStoreFile, makeUpload, makeUploadServer, verifyImageUpload } from './uploads.js';
 import { TOO_MANY, createRateLimiter, httpError } from './util.js';
 import { authRouter } from './core/auth.js';
 import { familiesRouter, familyRouter, invitePreviewHandler } from './core/families.js';
@@ -94,6 +95,10 @@ export function createContext({ db, uploadDir, hub = createHub(), limits = {} })
     tx,
     httpError,
     time: makeTime(db),
+    /** verifyImage(req.file) → { mime, ext, width, height }; throws 400 unless the bytes are a real image. */
+    verifyImage: verifyImageUpload,
+    /** sniffImage(buffer) → { mime, ext, width, height } | null. */
+    sniffImage: sniffImageBuffer,
   };
   return ctx;
 }

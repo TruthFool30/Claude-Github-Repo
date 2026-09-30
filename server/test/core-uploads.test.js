@@ -66,4 +66,25 @@ describe('uploads', () => {
     const url = srv.ctx.storeFile(family.id, PNG_1X1, 'png');
     assert.equal((await admin.agent.get(url)).status, 200);
   });
+
+  test('non-image files are never served inline, and image uploads are verified by their bytes', async () => {
+    const a = await familyFixture(srv, 'Sniff');
+    const html = Buffer.from('<html><script>alert(1)</script></html>');
+    const up = await a.admin.agent.upload('/api/files', { file: html, filename: 'evil.html', type: 'image/png' });
+    assert.equal(up.status, 201);
+    const got = await a.admin.agent.get(up.body.url);
+    assert.equal(got.status, 200);
+    assert.equal(got.headers.get('content-type'), 'application/octet-stream');
+    assert.match(got.headers.get('content-disposition') || '', /attachment/);
+    const svg = await a.admin.agent.upload('/api/files', { file: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><script>1</script></svg>'), filename: 'x.svg', type: 'image/jpeg' });
+    assert.equal((await a.admin.agent.get(svg.body.url)).headers.get('content-type'), 'application/octet-stream');
+    const png = await a.admin.agent.get((await a.admin.agent.upload('/api/files', { file: PNG_1X1, filename: 'p.png' })).body.url);
+    assert.equal(png.headers.get('content-type'), 'image/png');
+    // avatar: HTML disguised as PNG is rejected; a real PNG named .gif is stored as .png
+    const fake = await a.admin.agent.upload('/api/auth/me/avatar', { file: html, filename: 'a.png', type: 'image/png' });
+    assert.equal(fake.status, 400);
+    const renamed = await a.admin.agent.upload('/api/auth/me/avatar', { file: PNG_1X1, filename: 'a.gif', type: 'image/gif' });
+    assert.equal(renamed.status, 200);
+    assert.match(renamed.body.user.avatar_url, /\.png$/);
+  });
 });

@@ -195,6 +195,7 @@ export function familyRouter(ctx) {
 
   r.post('/cover', requireAdmin, coverUpload.single('file'), (req, res) => {
     if (!req.file) throw httpError(400, 'Please choose an image');
+    ctx.verifyImage(req.file);
     const old = req.family.cover_url;
     db.prepare('UPDATE families SET cover_url = ? WHERE id = ?').run(req.file.url, req.family.id);
     if (old) removeFile(old);

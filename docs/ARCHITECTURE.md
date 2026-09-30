@@ -533,3 +533,14 @@ that should be full-screen on phones (e.g. an open chat): the bottom tab bar dis
 `--shell-chrome` / bottom padding shrink accordingly while `active` is true; restored on unmount.
 Only affects < 1024px (the bar is mobile-only). Pass `active` based on a media query if the page
 also renders on desktop.
+
+### Upload safety (added during module review)
+
+- `/uploads/...` serves only `.jpg .jpeg .png .gif .webp .avif .pdf` inline (with `nosniff` and a
+  sandbox CSP). Every other extension is sent as `application/octet-stream` +
+  `Content-Disposition: attachment`, so a disguised HTML/SVG file can never render.
+- For image uploads, call `const info = ctx.verifyImage(req.file)` right after multer: it checks the
+  real bytes (JPEG/PNG/GIF/WebP/AVIF, 1–30000 px per side), renames the file to the detected
+  extension (updating `req.file.url`), and throws 400 otherwise (the upload is auto-deleted).
+  Use `info.width/info.height` — never trust client-sent dimensions or MIME types.
+- `ctx.sniffImage(buffer)` does the same check on an in-memory buffer.

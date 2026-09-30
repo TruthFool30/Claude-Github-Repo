@@ -120,6 +120,7 @@ export function authRouter(ctx) {
 
   r.post('/me/avatar', auth.requireAuth, avatarUpload.single('file'), (req, res) => {
     if (!req.file) throw httpError(400, 'Please choose an image');
+    ctx.verifyImage(req.file);
     const old = req.userRow.avatar_url;
     db.prepare('UPDATE users SET avatar_url = ? WHERE id = ?').run(req.file.url, req.user.id);
     if (old) removeFile(old);

@@ -2,10 +2,16 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import multer from 'multer';
+import { sniffImageFile } from './imagesniff.js';
 
 export const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 
 const SAFE_EXT = /^\.[a-z0-9]{1,8}$/;
+/** Extensions served inline by /uploads (with nosniff + sandbox CSP); anything else downloads. */
+const INLINE_TYPES = {
+  '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.gif': 'image/gif',
+  '.webp': 'image/webp', '.avif': 'image/avif', '.pdf': 'application/pdf',
+};
 function extFor(originalname = '', mimetype = '') {
   const ext = path.extname(originalname).toLowerCase();
   if (SAFE_EXT.test(ext)) return ext;
@@ -96,14 +102,19 @@ export function makeUploadServer(db, uploadDir, requireAuth) {
     if (!/^[A-Za-z0-9._-]+$/.test(file) || file.startsWith('.')) return res.status(404).json({ error: 'Not found' });
     const abs = path.join(root, dir, file);
     if (!abs.startsWith(root + path.sep)) return res.status(404).json({ error: 'Not found' });
+    // Only real image types (and PDF) are ever rendered inline. Everything else — including
+    // SVG/HTML that slipped in under a misleading name — is sent as an opaque download.
+    const inlineType = INLINE_TYPES[path.extname(file).toLowerCase()];
     res.set({
       'X-Content-Type-Options': 'nosniff',
       'Content-Security-Policy': "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; sandbox",
       'Cache-Control': 'private, max-age=31536000, immutable',
+      'Content-Type': inlineType || 'application/octet-stream',
     });
+    if (!inlineType) res.set('Content-Disposition', 'attachment');
     // Relative path + root: `send` only applies its dotfile check below `root`, so a data dir under
     // a dot-folder (e.g. a git worktree in .claude/) still works.
-    res.sendFile(path.relative(root, abs), { root }, (err) => {
+    res.sendFile(path.relative(root, abs), { root, headers: { 'Content-Type': inlineType || 'application/octet-stream' } }, (err) => {
       if (err && !res.headersSent) res.status(404).json({ error: 'Not found' });
     });
   }
@@ -120,4 +131,26 @@ export function makeUploadServer(db, uploadDir, requireAuth) {
       send(res, String(fid), req.params.file);
     }],
   ];
+}
+
+/**
+ * Verify an uploaded file (multer `req.file`) is a real JPEG/PNG/GIF/WebP/AVIF by its bytes, with
+ * sane dimensions (1..30000 px). Renames it to the extension of the detected type, updating
+ * file.filename / file.path / file.url, and returns { mime, ext, width, height }.
+ * Throws a 400 otherwise (the app then deletes the upload automatically).
+ */
+export function verifyImageUpload(file, message = 'That file is not a supported image (JPEG, PNG, GIF, WebP or AVIF)') {
+  if (!file?.path) throw Object.assign(new Error('Please choose an image'), { status: 400 });
+  const info = sniffImageFile(file.path);
+  if (!info) throw Object.assign(new Error(message), { status: 400 });
+  if (path.extname(file.filename).toLowerCase() !== info.ext) {
+    const filename = path.basename(file.filename, path.extname(file.filename)) + info.ext;
+    const target = path.join(path.dirname(file.path), filename);
+    fs.renameSync(file.path, target);
+    file.url = file.url.slice(0, file.url.length - file.filename.length) + filename;
+    file.filename = filename;
+    file.path = target;
+  }
+  file.mimetype = info.mime;
+  return info;
 }
