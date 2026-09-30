@@ -91,3 +91,16 @@ describe('uploads', () => {
     assert.match(renamed.body.user.avatar_url, /\.png$/);
   });
 });
+
+test('sniffImageBuffer rejects oversized (decompression-bomb) dimensions', async () => {
+  const { sniffImageBuffer } = await import('../src/imagesniff.js');
+  const png = Buffer.from(PNG_1X1);
+  const bomb = Buffer.from(png);
+  bomb.writeUInt32BE(30000, 16);
+  bomb.writeUInt32BE(30000, 20);
+  assert.equal(sniffImageBuffer(bomb), null, '900 MP rejected');
+  const ok = Buffer.from(png);
+  ok.writeUInt32BE(8000, 16);
+  ok.writeUInt32BE(6000, 20);
+  assert.equal(sniffImageBuffer(ok).width, 8000, '48 MP accepted');
+});

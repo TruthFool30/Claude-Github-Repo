@@ -540,7 +540,7 @@ also renders on desktop.
   sandbox CSP). Every other extension is sent as `application/octet-stream` +
   `Content-Disposition: attachment`, so a disguised HTML/SVG file can never render.
 - For image uploads, call `const info = ctx.verifyImage(req.file)` right after multer: it checks the
-  real bytes (JPEG/PNG/GIF/WebP/AVIF, 1–30000 px per side), renames the file to the detected
+  real bytes (JPEG/PNG/GIF/WebP/AVIF, 1–30000 px per side, ≤ 80 MP total), renames the file to the detected
   extension (updating `req.file.url`), and throws 400 otherwise (the upload is auto-deleted).
   Use `info.width/info.height` — never trust client-sent dimensions or MIME types.
 - `ctx.sniffImage(buffer)` does the same check on an in-memory buffer.

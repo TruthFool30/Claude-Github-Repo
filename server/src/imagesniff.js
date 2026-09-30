@@ -4,6 +4,8 @@ import fs from 'node:fs';
 
 export const IMAGE_EXT = { 'image/jpeg': '.jpg', 'image/png': '.png', 'image/gif': '.gif', 'image/webp': '.webp', 'image/avif': '.avif' };
 export const MAX_IMAGE_SIDE = 30000;
+/** Largest accepted image in total pixels (80 MP) — bigger images are decompression-bomb risks. */
+export const MAX_IMAGE_PIXELS = 80_000_000;
 
 function jpegSize(b) {
   let i = 2;
@@ -57,6 +59,7 @@ export function sniffImageBuffer(b) {
   if (!mime || !size) return null;
   const { width, height } = size;
   if (!(width >= 1 && height >= 1 && width <= MAX_IMAGE_SIDE && height <= MAX_IMAGE_SIDE)) return null;
+  if (width * height > MAX_IMAGE_PIXELS) return null;
   return { mime, ext: IMAGE_EXT[mime], width, height };
 }
 
