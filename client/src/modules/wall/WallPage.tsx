@@ -1,18 +1,18 @@
-// Placeholder page created by the foundation — the wall feature author replaces it.
-import { Sparkles } from 'lucide-react';
-import { EmptyState, PageHeader } from '../../ui';
-import mod from './index';
+import { lazy } from 'react';
+import { Route, Routes } from 'react-router';
+import { useWallLive } from './api';
+import HomePage from './HomePage';
 
+const PostDetail = lazy(() => import('./PostDetail'));
+
+/** Home module: the dashboard + family wall at /home and single posts at /home/post/:id. */
 export default function WallPage() {
+  useWallLive();
   return (
-    <div>
-      <PageHeader title={mod.label} subtitle={mod.description} icon={mod.icon} accent={mod.accent} />
-      <EmptyState
-        icon={mod.icon}
-        accent={mod.accent}
-        title="Coming soon"
-        description={<>We're putting the finishing touches on {mod.label.toLowerCase()}. <Sparkles size={14} className="inline -mt-0.5" /></>}
-      />
-    </div>
+    <Routes>
+      <Route index element={<HomePage />} />
+      <Route path="post/:id" element={<PostDetail />} />
+      <Route path="*" element={<HomePage />} />
+    </Routes>
   );
 }
