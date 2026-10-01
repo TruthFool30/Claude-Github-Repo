@@ -62,6 +62,12 @@ export async function seed(ctx, { familyId, users }) {
     return Number(insertTx.run(familyId, kind, cents, category ? cat[category] : null, description, date, paidBy.id, notes, receipt, paidBy.id, at, at).lastInsertRowid);
   };
   const day = (month, d) => `${month}-${String(Math.min(d, daysInMonth(month))).padStart(2, '0')}`;
+  // N days before today (so recent demo items exist whatever day of the month you seed on).
+  const daysAgo = (n) => {
+    const t = new Date(`${today}T12:00:00Z`);
+    t.setUTCDate(t.getUTCDate() - n);
+    return t.toISOString().slice(0, 10);
+  };
 
   db.exec('BEGIN');
   try {
@@ -179,8 +185,8 @@ export async function seed(ctx, { familyId, users }) {
       const url = ctx.storeFile(familyId, Buffer.from(svg), 'svg');
       add(date, 'expense', totalCents, category, desc, who, { receipt: url });
     };
-    attach(day(thisMonth, 7), 'COSTCO WHOLESALE', [['Kirkland eggs 24ct', '6.99'], ['Organic milk x3', '14.49'], ['Chicken thighs', '18.72'], ['Berries 2lb', '8.99'], ['Paper towels', '22.99'], ['Coffee beans', '17.99']], 90_17, 'Groceries', 'Costco — weekly stock-up', alex);
-    attach(day(thisMonth, 16), 'TARGET', [['Mia — rain jacket', '34.99'], ['Leo — sneakers', '39.99'], ['Lunch boxes x2', '19.98']], 94_96, 'Shopping', 'Target — fall clothes', sam);
+    attach(daysAgo(2), 'COSTCO WHOLESALE', [['Kirkland eggs 24ct', '6.99'], ['Organic milk x3', '14.49'], ['Chicken thighs', '18.72'], ['Berries 2lb', '8.99'], ['Paper towels', '22.99'], ['Coffee beans', '17.99']], 90_17, 'Groceries', 'Costco — weekly stock-up', alex);
+    attach(daysAgo(9), 'TARGET', [['Mia — rain jacket', '34.99'], ['Leo — sneakers', '39.99'], ['Lunch boxes x2', '19.98']], 94_96, 'Shopping', 'Target — fall clothes', sam);
 
     // ---- savings goals ---------------------------------------------------------------------
     const insertGoal = db.prepare(

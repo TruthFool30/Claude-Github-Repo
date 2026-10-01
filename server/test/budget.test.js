@@ -510,7 +510,9 @@ describe('seed + dashboard', () => {
     const count = (sql, ...a) => db.prepare(sql).get(...a).n;
     const prev = addMonths(month, -1);
     assert.ok(count("SELECT COUNT(*) AS n FROM budget_transactions WHERE family_id = ? AND date LIKE ? || '%'", familyId, prev) >= 25);
-    assert.ok(count("SELECT COUNT(*) AS n FROM budget_transactions WHERE family_id = ? AND date LIKE ? || '%'", familyId, month) >= 15);
+    // The seed never invents future-dated rows, so early in a month the current month is still sparse.
+    const dayOfMonth = Number(srv.ctx.time.todayForFamily(familyId).slice(8, 10));
+    assert.ok(count("SELECT COUNT(*) AS n FROM budget_transactions WHERE family_id = ? AND date LIKE ? || '%'", familyId, month) >= Math.min(15, dayOfMonth));
     assert.ok(count('SELECT COUNT(*) AS n FROM budget_recurring WHERE family_id = ?', familyId) >= 8);
     assert.ok(count('SELECT COUNT(*) AS n FROM budget_goals WHERE family_id = ?', familyId) >= 4);
     assert.equal(count('SELECT COUNT(*) AS n FROM budget_allowances WHERE family_id = ?', familyId), 2);
@@ -524,11 +526,12 @@ describe('seed + dashboard', () => {
     const s = (await alex.get(`/api/budget/summary?month=${month}`)).body;
     assert.ok(s.totals.income > 0 && s.totals.spent > 0);
     assert.ok(s.trend.every((t) => t.spent > 0), 'six months of history');
-    assert.ok(s.categories.some((c) => c.monthly_limit && c.total > c.monthly_limit), 'something is over budget');
+    // Dining is seeded over budget, which only shows once enough of the month has passed.
+    if (dayOfMonth >= 20) assert.ok(s.categories.some((c) => c.monthly_limit && c.total > c.monthly_limit), 'something is over budget');
     const dash = (await alex.get('/api/dashboard')).body.budget;
     assert.equal(dash.month, month);
     assert.ok(dash.spent > 0);
-    assert.ok(Array.isArray(dash.over_budget) && dash.over_budget.length >= 1);
+    assert.ok(Array.isArray(dash.over_budget) && (dayOfMonth < 20 || dash.over_budget.length >= 1));
     assert.ok(Array.isArray(dash.goals));
     // No duplicate auto-bill transactions after reads
     const before = count('SELECT COUNT(*) AS n FROM budget_transactions WHERE family_id = ?', familyId);
