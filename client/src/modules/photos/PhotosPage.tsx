@@ -1,18 +1,47 @@
-// Placeholder page created by the foundation — the photos feature author replaces it.
-import { Sparkles } from 'lucide-react';
-import { EmptyState, PageHeader } from '../../ui';
-import mod from './index';
+import { useEffect } from 'react';
+import { Navigate, Route, Routes, useNavigate } from 'react-router';
+import { useQueryClient } from '@tanstack/react-query';
+import { useLive } from '../../lib/live';
+import { plural } from '../../lib/format';
+import { toast } from '../../ui';
+import { bindUploads, keys } from './data';
+import { UploadTray } from './common';
+import { Library } from './Library';
+import { AlbumPage } from './AlbumPage';
+import type { Album } from './types';
 
 export default function PhotosPage() {
+  const qc = useQueryClient();
+  const navigate = useNavigate();
+  useLive('photos');
+
+  useEffect(() => {
+    bindUploads(qc, ({ count, failed, albumId }) => {
+      if (count) {
+        const album = albumId
+          ? qc.getQueryData<Album>(keys.album(albumId)) ?? qc.getQueryData<Album[]>(keys.albums)?.find((a) => a.id === albumId)
+          : null;
+        toast.success(`${plural(count, 'photo')} added${album ? ` to ${album.title}` : ''}`, {
+          description: failed ? `${plural(failed, 'photo')} couldn't be uploaded` : undefined,
+          action: albumId && !window.location.pathname.endsWith(`/albums/${albumId}`)
+            ? { label: 'View', onClick: () => navigate(`/photos/albums/${albumId}`) }
+            : undefined,
+        });
+      } else if (failed) {
+        toast.error(`${plural(failed, 'photo')} couldn't be uploaded`);
+      }
+    });
+  }, [qc, navigate]);
+
   return (
-    <div>
-      <PageHeader title={mod.label} subtitle={mod.description} icon={mod.icon} accent={mod.accent} />
-      <EmptyState
-        icon={mod.icon}
-        accent={mod.accent}
-        title="Coming soon"
-        description={<>We're putting the finishing touches on {mod.label.toLowerCase()}. <Sparkles size={14} className="inline -mt-0.5" /></>}
-      />
-    </div>
+    <>
+      <Routes>
+        <Route index element={<Library view="albums" />} />
+        <Route path="all" element={<Library view="all" />} />
+        <Route path="albums/:id" element={<AlbumPage />} />
+        <Route path="*" element={<Navigate to="/photos" replace />} />
+      </Routes>
+      <UploadTray />
+    </>
   );
 }
