@@ -1,0 +1,13 @@
+node_modules
+**/node_modules
+client/dist
+data
+.git
+.claude
+*.log
+*.db
+*.db-*
+test-results
+playwright-report
+screenshots
+.env

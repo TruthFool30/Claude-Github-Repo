@@ -41,6 +41,22 @@ Put it behind any reverse proxy with HTTPS (set `COOKIE_SECURE=1` so the session
 marked `Secure`). SSE needs response buffering disabled on the proxy for `/api/stream`
 (Hearth already sends `X-Accel-Buffering: no` for nginx).
 
+## Docker
+
+```bash
+docker compose up -d                 # builds the image and serves http://localhost:3000
+# optional: load the demo Rivera family into the volume
+docker compose run --rm hearth node --disable-warning=ExperimentalWarning server/src/seed.js
+```
+
+Everything Hearth stores (the SQLite database and uploaded files) lives in the `hearth-data`
+volume mounted at `/app/data`, so it survives rebuilds and restarts — back that volume up.
+The container runs as the unprivileged `node` user and has a health check on `/api/health`.
+Behind an HTTPS reverse proxy set `COOKIE_SECURE=1`, and `TRUST_PROXY` (e.g. `1`) if the proxy is
+another container or host, in `docker-compose.yml`.
+
+Without Compose: `docker build -t hearth . && docker run -d -p 3000:3000 -v hearth-data:/app/data hearth`.
+
 ## Demo logins
 
 After `npm run seed` (password for all: **`hearth123`**):

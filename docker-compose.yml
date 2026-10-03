@@ -1,0 +1,21 @@
+# Hearth with Docker Compose:
+#   docker compose up -d                      # start on http://localhost:3000
+#   docker compose run --rm hearth node --disable-warning=ExperimentalWarning server/src/seed.js   # optional demo family
+services:
+  hearth:
+    build: .
+    image: hearth:latest
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      # Set COOKIE_SECURE=1 when Hearth is served over HTTPS (e.g. behind a reverse proxy).
+      COOKIE_SECURE: "0"
+      # Behind a reverse proxy in another container/host, trust it so rate limits see real client IPs
+      # (e.g. "1" for one proxy hop, or its subnet). Default trusts only loopback.
+      # TRUST_PROXY: "1"
+    volumes:
+      - hearth-data:/app/data
+
+volumes:
+  hearth-data:
