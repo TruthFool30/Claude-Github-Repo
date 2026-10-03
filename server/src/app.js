@@ -4,6 +4,7 @@ import { sniffImageBuffer } from './imagesniff.js';
 import path from 'node:path';
 import express from 'express';
 import cookieParser from 'cookie-parser';
+import compression from 'compression';
 import { isSessionValid, makeAuth, publicUser } from './auth.js';
 import { openDb, tx } from './db.js';
 import { createHub } from './realtime.js';
@@ -138,6 +139,15 @@ export function createApp({
   app.disable('x-powered-by');
   // Which proxies may set X-Forwarded-For (req.ip is used for rate limiting). See TRUST_PROXY.
   app.set('trust proxy', trustProxy);
+  // gzip/br for API JSON and static assets. The SSE stream is never compressed (it must stay
+  // unbuffered so events arrive immediately).
+  app.use(compression({
+    threshold: 1024,
+    filter: (req, res) => {
+      if (req.path === '/api/stream' || String(res.getHeader('Content-Type') ?? '').startsWith('text/event-stream')) return false;
+      return compression.filter(req, res);
+    },
+  }));
   app.use(express.json({ limit: '2mb' }));
   app.use(express.urlencoded({ extended: false }));
   app.use(cookieParser());

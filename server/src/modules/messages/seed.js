@@ -200,7 +200,7 @@ export async function seed(ctx, { familyId, users }) {
   react(hqm.nov8, '👍', sam);
   setRead(hq, alex, hqm.$last);
   setRead(hq, sam, hqm.$last);
-  ctx.logActivity({ familyId, userId: alex.id, module: 'messages', verb: 'created', entityId: hq, summary: 'started the group chat “Parents HQ”', link: `/messages/${hq}`, createdAt: at(21, 20, 0) });
+  ctx.logActivity({ familyId, userId: alex.id, module: 'messages', verb: 'created', entityId: hq, summary: 'started the group chat “Parents HQ”', link: `/messages/${hq}`, createdAt: at(21, 20, 0), audience: [alex.id, sam.id] });
 
   // ---------------- Group: Lake trip ----------------
   const lake = newConv('group', { name: 'Lake trip', emoji: '⛺', color: '#12A594', members: [alex, sam, mia, leo], createdBy: alex, createdAt: at(4, 19, 0) });
@@ -217,5 +217,5 @@ export async function seed(ctx, { familyId, users }) {
   react(lk.tent, '🙏', alex);
   react(lk.hammock, '😂', mia, sam);
   for (const u of [alex, sam, mia, leo]) setRead(lake, u, lk.$last);
-  ctx.logActivity({ familyId, userId: alex.id, module: 'messages', verb: 'created', entityId: lake, summary: 'started the group chat “Lake trip”', link: `/messages/${lake}`, createdAt: at(4, 19, 0) });
+  ctx.logActivity({ familyId, userId: alex.id, module: 'messages', verb: 'created', entityId: lake, summary: 'started the group chat “Lake trip”', link: `/messages/${lake}`, createdAt: at(4, 19, 0), audience: [alex.id, sam.id, mia.id, leo.id] });
 }

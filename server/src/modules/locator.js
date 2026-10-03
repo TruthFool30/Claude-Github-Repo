@@ -620,7 +620,7 @@ export function search(ctx, familyId, q) {
   return ctx.db
     .prepare(
       `SELECT id, name, address, radius FROM locator_places
-        WHERE family_id = ? AND (name LIKE '%' || ? || '%' OR address LIKE '%' || ? || '%')
+        WHERE family_id = ? AND (search_match(name, ?) OR search_match(address, ?))
         ORDER BY name COLLATE NOCASE LIMIT 8`,
     )
     .all(familyId, q, q)

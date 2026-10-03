@@ -20,7 +20,7 @@
 //   GET    /meta                            -> { reactions, moods, max_photos }
 import { Router } from 'express';
 import { ISO_NOW } from '../db.js';
-import { hydrateActivity } from '../activity.js';
+import { hydrateActivity, activityVisibleSql } from '../activity.js';
 import { cleanStr, httpError, toId } from '../util.js';
 import { MAX_COMMENT_CHARS, MAX_PHOTOS, MAX_POST_CHARS, MOODS, REACTIONS } from './wall/constants.js';
 import { seedWall } from './wall/seed.js';
@@ -295,8 +295,8 @@ export function router(ctx) {
     let acts = [];
     if (filter === 'all' || filter === 'activity') {
       acts = db
-        .prepare(`SELECT * FROM activity WHERE family_id = ? AND module <> 'wall'${before(0)} ORDER BY created_at DESC, id DESC LIMIT ?`)
-        .all(fid, ...cursorParams, limit + 1);
+        .prepare(`SELECT * FROM activity WHERE family_id = ? AND module <> 'wall' AND ${activityVisibleSql('activity')}${before(0)} ORDER BY created_at DESC, id DESC LIMIT ?`)
+        .all(fid, req.user.id, ...cursorParams, limit + 1);
     }
     const merged = [
       ...posts.map((p) => ({ src: 1, row: p })),
@@ -529,18 +529,18 @@ export function seed(ctx, opts) {
 
 /** Global search: post text and comments. */
 export function search(ctx, familyId, q) {
-  const like = `%${String(q).replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+  const like = String(q);
   const posts = ctx.db
     .prepare(
       `SELECT p.id, p.body, p.created_at, u.name AS author FROM wall_posts p LEFT JOIN users u ON u.id = p.user_id
-        WHERE p.family_id = ? AND p.body LIKE ? ESCAPE '\\' ORDER BY p.created_at DESC LIMIT 6`,
+        WHERE p.family_id = ? AND search_match(p.body, ?) ORDER BY p.created_at DESC LIMIT 6`,
     )
     .all(familyId, like);
   const comments = ctx.db
     .prepare(
       `SELECT c.id, c.post_id, c.body, u.name AS author FROM wall_comments c JOIN wall_posts p ON p.id = c.post_id
          LEFT JOIN users u ON u.id = c.user_id
-        WHERE p.family_id = ? AND c.body LIKE ? ESCAPE '\\' ORDER BY c.created_at DESC LIMIT 4`,
+        WHERE p.family_id = ? AND search_match(c.body, ?) ORDER BY c.created_at DESC LIMIT 4`,
     )
     .all(familyId, like);
   const day = (iso) => new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });

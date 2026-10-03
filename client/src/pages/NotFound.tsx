@@ -8,6 +8,7 @@ export default function NotFound() {
   return (
     <EmptyState
       icon={Compass}
+      as="h1"
       title="We couldn't find that page"
       description="The link may be broken, or the page may have moved. Let's get you back home."
       action={

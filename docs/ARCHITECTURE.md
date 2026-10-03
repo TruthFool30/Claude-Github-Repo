@@ -308,6 +308,13 @@ export function router(ctx) {
   - `logActivity({ familyId, userId, module, verb, entityId?, summary, link?, createdAt? })` — returns the
     row (with `user`) and broadcasts `'activity'`. `createdAt` (ISO) lets seeds backdate entries.
     The summary is rendered after the actor's name ("Alex **added 3 items to Groceries**").
+    Optional `audience: number[]` (user ids) makes the entry private to those members: it is stored
+    in `activity.audience` (JSON; `NULL` = whole family), filtered out of `GET /api/activity` and the
+    Wall feed for everyone else, and the live `'activity'` event goes only to them (`sendToUsers`).
+    Use it for anything that names a private thing (e.g. a group chat's name → its participants).
+    Modules that read the `activity` table directly must filter with `activityVisibleSql(alias)`
+    from `../activity.js` (binds the viewer's user id), and send follow-up `activity.updated` /
+    `activity.removed` events with `emitActivityEvent(ctx.hub, row, type, payload)`.
   - `notify({ familyId, userIds, module, title, body?, link?, excludeUserId? })` — skips non-members
     and `excludeUserId` (pass `req.user.id` so people aren't notified about their own actions). Live
     delivery only reaches the recipients' streams that are viewing that family.
@@ -334,7 +341,9 @@ export function router(ctx) {
   - `seed(ctx, { familyId, users, userList })` — `users` = `{ alex, sam, mia, leo }` full users rows
     (use `.id`, `.name`, `.color`); `userList` = the same four in that order. May be async.
   - `search(ctx, familyId, q, req)` → `[{ title, subtitle?, link }]` (≤ 8 used; `module` is added for you;
-    `q` is ≥ 2 chars). Use `LIKE '%' || ? || '%'` and scope by `familyId`.
+    `q` is ≥ 2 chars). Match with the `search_match(column, ?)` SQL function (case-insensitive
+    contains that also ignores punctuation/spaces, so "wifi" finds "Wi-Fi"; JS twin `searchMatch`
+    in `../db.js`) and scope by `familyId`.
   - `dashboard(ctx, req)` → small JSON object; `GET /api/dashboard` returns `{ [module]: value }`.
 - **Core SSE event types** (besides your `'<module>.*'` events): `hello` (on connect), `activity`,
   `notification`, `notification.read`, `family.updated`, `family.member.joined`,
@@ -565,3 +574,12 @@ location data. Not called when a whole family is deleted (its rows cascade).
 `useToastPlacement('top', active?)` from `lib/shell` moves toasts to the top-centre while mounted
 (e.g. cook mode, where the main buttons are at the bottom). The toaster container carries
 `data-toaster="default|top"`; never restyle it via its utility classes.
+
+### Compression and private activity (added during integration)
+
+- Responses (API JSON, the built client, other text assets ≥ 1 KB) are compressed with br/gzip by
+  the `compression` middleware in `app.js`. `/api/stream` (`text/event-stream`) is explicitly
+  excluded so SSE stays unbuffered.
+- Activity can be private to some members via `logActivity({ ..., audience: [userIds] })` (see
+  `ctx` above). Messages uses it for "started the group chat …" (audience = the group's current
+  participants, kept in sync when people are added/removed; the entry is deleted with the group).

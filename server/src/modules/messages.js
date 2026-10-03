@@ -24,7 +24,8 @@
 //   POST   /messages/:id/reactions             {emoji} toggles my reaction
 //   GET    /unread                             {total, muted_total, conversations}
 import { Router } from 'express';
-import { ISO_NOW } from '../db.js';
+import { ISO_NOW, searchMatch } from '../db.js';
+import { activityAudience, emitActivityEvent } from '../activity.js';
 import { cleanStr, httpError, isColor, toId } from '../util.js';
 import {
   IMAGE_TYPES, MAX_ATTACHMENTS, MAX_BODY, PAGE_SIZE, directKey, ensureFamilyConversation, familyMembers,
@@ -151,6 +152,28 @@ export function router(ctx) {
     }
   };
   const reload = (id) => db.prepare('SELECT * FROM msg_conversations WHERE id = ?').get(id);
+
+  /**
+   * Group-chat activity ("started the group chat …") is private to the group: its audience tracks
+   * the current participants, and the entry disappears with the conversation.
+   */
+  function syncGroupActivity(convId, familyId) {
+    const rows = db.prepare("SELECT * FROM activity WHERE family_id = ? AND module = 'messages' AND entity_id = ? AND verb = 'created'").all(familyId, convId);
+    if (!rows.length) return;
+    const conv = reload(convId);
+    for (const row of rows) {
+      if (!conv) {
+        db.prepare('DELETE FROM activity WHERE id = ?').run(row.id);
+        emitActivityEvent(ctx.hub, row, 'activity.removed', { id: row.id, ids: [row.id] });
+        continue;
+      }
+      const ids = participantIds(db, convId, familyId);
+      const before = activityAudience(row) ?? [];
+      db.prepare('UPDATE activity SET audience = ? WHERE id = ?').run(JSON.stringify(ids), row.id);
+      const gone = before.filter((id) => !ids.includes(id));
+      if (gone.length) ctx.sendToUsers(gone, 'activity.removed', { id: row.id, ids: [row.id] }, familyId);
+    }
+  }
   const memberOf = (familyId) => new Map(familyMembers(db, familyId).map((m) => [m.id, m]));
   const canManage = (req, conv) => req.role === 'admin' || conv.created_by === req.user.id;
 
@@ -230,6 +253,7 @@ export function router(ctx) {
       ctx.logActivity({
         familyId, userId: req.user.id, module: 'messages', verb: 'created', entityId: conv.id,
         summary: `started the group chat “${title}”`, link: `/messages/${conv.id}`,
+        audience: participantIds(db, conv.id, familyId),
       });
       return res.status(201).json(shapeConversation(db, reload(conv.id), req.user.id));
     }
@@ -284,6 +308,7 @@ export function router(ctx) {
       .all(conv.id);
     db.prepare('DELETE FROM msg_conversations WHERE id = ?').run(conv.id);
     for (const f of files) ctx.removeFile(f.url);
+    syncGroupActivity(conv.id, conv.family_id);
     ctx.sendToUsers(ids, 'messages.conversation.removed', { conversation_id: conv.id, reason: 'deleted', by: req.user.id }, conv.family_id);
     res.json({ ok: true });
   });
@@ -312,6 +337,7 @@ export function router(ctx) {
         closeGap.run(lastId, conv.id, uid);
       }
     });
+    syncGroupActivity(conv.id, conv.family_id);
     const names = ids.map((id) => members.get(id).name.split(/\s+/)[0]);
     systemMessage(conv, req.user.id, `added ${joinNames(names)}`);
     emitConversation(reload(conv.id), 'messages.conversation.updated');
@@ -342,8 +368,10 @@ export function router(ctx) {
       const files = db.prepare('SELECT a.url FROM msg_attachments a JOIN msg_messages m ON m.id = a.message_id WHERE m.conversation_id = ?').all(conv.id);
       db.prepare('DELETE FROM msg_conversations WHERE id = ?').run(conv.id);
       for (const f of files) ctx.removeFile(f.url);
+      syncGroupActivity(conv.id, conv.family_id);
       return res.json({ ok: true, deleted: true });
     }
+    syncGroupActivity(conv.id, conv.family_id);
     systemMessage(conv, req.user.id, self ? 'left the group' : `removed ${targetUser?.name?.split(/\s+/)[0] ?? 'someone'}`);
     emitConversation(reload(conv.id), 'messages.conversation.updated');
     res.json({ ok: true, deleted: false });
@@ -571,7 +599,7 @@ export function search(ctx, familyId, q, req) {
   };
   const out = [];
   for (const c of convs) {
-    if (c.kind === 'group' && c.name.toLowerCase().includes(q.toLowerCase())) {
+    if (c.kind === 'group' && searchMatch(c.name, q)) {
       out.push({ title: `${c.emoji ? `${c.emoji} ` : ''}${c.name}`, subtitle: 'Group chat', link: `/messages/${c.id}` });
     }
   }
@@ -582,7 +610,7 @@ export function search(ctx, familyId, q, req) {
          FROM msg_messages m LEFT JOIN users u ON u.id = m.user_id
         WHERE m.family_id = ? AND m.kind = 'text' AND m.deleted_at IS NULL AND ${NOT_HIDDEN}
           AND m.conversation_id IN (${convs.map(() => '?').join(',')})
-          AND m.body LIKE '%' || ? || '%'
+          AND search_match(m.body, ?)
         ORDER BY m.id DESC LIMIT 8`,
     )
     .all(familyId, userId, ...convs.map((c) => c.id), q);

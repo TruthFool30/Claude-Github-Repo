@@ -768,9 +768,9 @@ export function search(ctx, familyId, q) {
   return ctx.db
     .prepare(
       `SELECT r.id, r.title, r.prep_minutes + r.cook_minutes AS mins, r.tags FROM meal_recipes r
-        WHERE r.family_id = ? AND (r.title LIKE '%' || ? || '%' OR r.tags LIKE '%' || ? || '%'
-              OR EXISTS (SELECT 1 FROM meal_recipe_ingredients i WHERE i.recipe_id = r.id AND i.name LIKE '%' || ? || '%'))
-        ORDER BY (r.title LIKE ? || '%') DESC, (r.title LIKE '%' || ? || '%') DESC, r.title COLLATE NOCASE LIMIT 8`,
+        WHERE r.family_id = ? AND (search_match(r.title, ?) OR search_match(r.tags, ?)
+              OR EXISTS (SELECT 1 FROM meal_recipe_ingredients i WHERE i.recipe_id = r.id AND search_match(i.name, ?)))
+        ORDER BY (r.title LIKE ? || '%') DESC, (search_match(r.title, ?)) DESC, r.title COLLATE NOCASE LIMIT 8`,
     )
     .all(familyId, q, q, q, q, q)
     .map((r) => {

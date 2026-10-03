@@ -1305,10 +1305,10 @@ export function search(ctx, familyId, q) {
   const rows = ctx.db
     .prepare(
       `SELECT id FROM calendar_events WHERE family_id = ?
-         AND (title LIKE '%' || ? || '%' ESCAPE '\\' OR location LIKE '%' || ? || '%' ESCAPE '\\' OR notes LIKE '%' || ? || '%' ESCAPE '\\')
+         AND (search_match(title, ?) OR search_match(location, ?) OR search_match(notes, ?))
        ORDER BY updated_at DESC LIMIT 20`,
     )
-    .all(familyId, ...Array(3).fill(String(q).replace(/[\\%_]/g, (c) => `\\${c}`)))
+    .all(familyId, ...Array(3).fill(String(q)))
     .map((r) => r.id);
   const events = loadEvents(ctx.db, familyId, { ids: rows });
   const now = Date.now();
@@ -1452,13 +1452,18 @@ export function seed(ctx, { familyId, users }) {
     upsertException(db, soccer, generated(soccerEv, monday - 4).key, null);
   });
 
+  // Deep links to the seeded events (same format as live "added you" notifications).
+  const linkTo = (title) => {
+    const row = db.prepare('SELECT id FROM calendar_events WHERE family_id = ? AND title = ? ORDER BY id LIMIT 1').get(familyId, title);
+    return row ? linkFor(getEvent(db, familyId, row.id), null) : '/calendar';
+  };
   ctx.notify({
     familyId, userIds: [mia.id], module: 'calendar', title: 'Alex added you to Dentist — Mia',
-    body: describeWhen({ all_day: false, start: at(monday + 3, 15, 30) }, tz, true), link: '/calendar',
+    body: describeWhen({ all_day: false, start: at(monday + 3, 15, 30) }, tz, true), link: linkTo('Dentist — Mia'),
   });
   ctx.notify({
     familyId, userIds: [alex.id, mia.id, leo.id], module: 'calendar', title: 'Alex added you to Lake Tahoe trip',
-    body: describeWhen({ all_day: true, start: dayKey(monday + 18) }, tz, false), link: '/calendar',
+    body: describeWhen({ all_day: true, start: dayKey(monday + 18) }, tz, false), link: linkTo('Lake Tahoe trip'),
   });
 }
 

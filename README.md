@@ -19,7 +19,7 @@ dark mode. A single Node process serves the API and the web app; data lives in o
 
 ## Quick start
 
-Requirements: **Node 22.5+** (uses the built-in `node:sqlite`). No native dependencies.
+Requirements: **Node 22.13+** (uses the built-in `node:sqlite`, incl. custom SQL functions). No native dependencies.
 
 ```bash
 npm install

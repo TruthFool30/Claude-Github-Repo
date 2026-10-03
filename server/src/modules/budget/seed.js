@@ -166,6 +166,16 @@ export async function seed(ctx, { familyId, users }) {
       add(day(m, 9 + Math.floor(rand() * 6)), 'income', between(850, 1650), 'Side income', pick(['Logo design — Riverbend Bakery', 'Website refresh — Oak Dental', 'Brochure for Parks & Rec', 'Illustrations — Little Owl Books']), sam);
     }
 
+    // "This month runs over budget" must hold whatever day of the month the demo is seeded on
+    // (early in a month most of the dining dates above are still in the future and skipped).
+    {
+      const spent = db.prepare(
+        "SELECT COALESCE(SUM(amount_cents), 0) AS c FROM budget_transactions WHERE family_id = ? AND category_id = ? AND kind = 'expense' AND date >= ? AND date <= ?",
+      ).get(familyId, cat.Dining, `${thisMonth}-01`, today).c;
+      const limit = LIMITS.Dining * 100;
+      if (spent <= limit) add(today, 'expense', limit - spent + 38_40, 'Dining', 'Anniversary dinner — Bella Vista', alex, { notes: 'Worth it 🥂' });
+    }
+
     // A few memorable one-offs in the last two months.
     const prev = addMonths(thisMonth, -1);
     add(day(prev, 11), 'expense', 45_00, 'Health', 'Dentist copay — Mia', sam, { notes: 'Cleaning + sealants. Next visit in March.' });

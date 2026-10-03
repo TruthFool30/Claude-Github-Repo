@@ -816,12 +816,12 @@ export function search(ctx, familyId, q) {
   const { db } = ctx;
   const albums = db.prepare(
     `SELECT a.id, a.title, a.description, (SELECT COUNT(*) FROM photos p WHERE p.album_id = a.id) AS n
-     FROM photo_albums a WHERE a.family_id = ? AND (a.title LIKE '%' || ? || '%' OR a.description LIKE '%' || ? || '%')
+     FROM photo_albums a WHERE a.family_id = ? AND (search_match(a.title, ?) OR search_match(a.description, ?))
      ORDER BY a.id DESC LIMIT 5`,
   ).all(familyId, q, q);
   const photos = db.prepare(
     `SELECT p.id, p.caption, p.album_id, a.title AS album_title FROM photos p LEFT JOIN photo_albums a ON a.id = p.album_id
-     WHERE p.family_id = ? AND p.caption LIKE '%' || ? || '%' ORDER BY p.taken_at DESC LIMIT 5`,
+     WHERE p.family_id = ? AND search_match(p.caption, ?) ORDER BY p.taken_at DESC LIMIT 5`,
   ).all(familyId, q);
   return [
     ...albums.map((a) => ({ title: a.title, subtitle: `Album · ${plural(a.n, 'photo')}`, link: `/photos/albums/${a.id}` })),

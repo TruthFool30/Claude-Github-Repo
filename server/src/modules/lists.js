@@ -86,8 +86,6 @@ const todayFor = (ctx, req) => (isDate(req.query?.today) ? req.query.today : ctx
 
 const nowIso = () => new Date().toISOString();
 
-/** SQL LIKE pattern with %, _ and \ escaped (use with ESCAPE '\'). */
-const likeArg = (q) => `%${String(q).replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
 
 const segmenter = typeof Intl.Segmenter === 'function' ? new Intl.Segmenter(undefined, { granularity: 'grapheme' }) : null;
 function cleanIcon(value) {
@@ -902,11 +900,11 @@ export function router(ctx) {
 // Hooks
 
 export function search(ctx, familyId, q) {
-  const pattern = likeArg(q);
+  const pattern = String(q);
   const lists = ctx.db
     .prepare(
       `SELECT l.*, (SELECT COUNT(*) FROM list_items i WHERE i.list_id = l.id AND i.done = 0 AND i.deleted_at IS NULL) AS open_count
-         FROM lists l WHERE l.family_id = ? AND l.name LIKE ? ESCAPE '\\' ORDER BY l.position LIMIT 4`,
+         FROM lists l WHERE l.family_id = ? AND search_match(l.name, ?) ORDER BY l.position LIMIT 4`,
     )
     .all(familyId, pattern)
     .map((l) => ({
@@ -917,7 +915,7 @@ export function search(ctx, familyId, q) {
   const items = ctx.db
     .prepare(
       `SELECT i.id, i.text, i.done, i.list_id, l.name AS list_name FROM list_items i JOIN lists l ON l.id = i.list_id
-        WHERE i.family_id = ? AND i.deleted_at IS NULL AND (i.text LIKE ? ESCAPE '\\' OR i.notes LIKE ? ESCAPE '\\')
+        WHERE i.family_id = ? AND i.deleted_at IS NULL AND (search_match(i.text, ?) OR search_match(i.notes, ?))
         ORDER BY i.done, i.updated_at DESC LIMIT 8`,
     )
     .all(familyId, pattern, pattern)

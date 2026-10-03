@@ -3,14 +3,14 @@ import { Link, useNavigate } from 'react-router';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Check, ClipboardCopy, Info, ListChecks, ShoppingCart } from 'lucide-react';
 import { api, errorMessage } from '../../lib/api';
-import { plural } from '../../lib/format';
-import { Badge, Button, Checkbox, EmptyState, Field, Modal, Select, SkeletonList, toast } from '../../ui';
+import { fmtDate, plural, toDateKey } from '../../lib/format';
+import { Badge, Button, Checkbox, EmptyState, Field, Modal, SegmentedControl, Select, SkeletonList, toast } from '../../ui';
 // Lists' aisle data + classifier (read-only shared helpers) and our conservative name matcher.
 import aisles from '../../../../shared/lists/aisles.json';
 import { createClassifier } from '../../../../shared/lists/classify.js';
 import { sameGrocery } from '../../../../shared/meals/match.js';
 import { keys, type IngredientsResponse, type ShoppingItem } from './api';
-import { ACCENT_SOLID, weekLabel } from './utils';
+import { ACCENT_SOLID, weekDays, weekLabel } from './utils';
 
 interface ShoppingList {
   id: number;
@@ -26,6 +26,10 @@ interface ListItem {
 
 const aisleOf = createClassifier(aisles).guessCategory;
 
+type RangeMode = 'today' | 'week' | 'custom';
+const dayShort = (key: string) => fmtDate(key, 'EEE d');
+const dayLong = (key: string) => fmtDate(key, 'EEE, MMM d');
+
 /**
  * "Add the week's ingredients to a shopping list". Talks to the Lists module over HTTP only
  * (GET /api/lists?type=shopping, GET /api/lists/:id, POST /api/lists/:id/items/bulk) and degrades
@@ -35,10 +39,32 @@ const aisleOf = createClassifier(aisles).guessCategory;
 export function ShoppingDialog({ open, onClose, start }: { open: boolean; onClose: () => void; start: string }) {
   const navigate = useNavigate();
   const qc = useQueryClient();
+  // Which days to shop for. Defaults to today onward (same local "today" as the planner), so
+  // meals already eaten earlier in the week aren't bought again.
+  const days = useMemo(() => weekDays(start), [start]);
+  const today = toDateKey();
+  const canFromToday = days.includes(today) && today !== start;
+  const [mode, setMode] = useState<RangeMode>(canFromToday ? 'today' : 'week');
+  const [from, setFrom] = useState(canFromToday ? today : start);
+  const [to, setTo] = useState(days[6]);
+  useEffect(() => {
+    if (!open) return;
+    setMode(canFromToday ? 'today' : 'week');
+    setFrom(canFromToday ? today : start);
+    setTo(days[6]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, start]);
+  const rangeStart = mode === 'week' ? start : mode === 'today' ? today : from;
+  const rangeEnd = mode === 'custom' ? (to < from ? from : to) : days[6];
+  const rangeDays = Math.max(1, days.indexOf(rangeEnd) - days.indexOf(rangeStart) + 1);
+  const rangeLabel =
+    rangeDays === 7 ? weekLabel(start) : rangeDays === 1 ? dayLong(rangeStart) : `${dayShort(rangeStart)} – ${dayLong(rangeEnd)}`;
+  const rangeKey = `${rangeStart}:${rangeDays}`;
   const ingredientsQ = useQuery({
-    queryKey: keys.ingredients(start),
-    queryFn: () => api.get<IngredientsResponse>(`/meals/plan/ingredients?start=${start}&days=7`),
+    queryKey: [...keys.ingredients(start), rangeStart, rangeDays],
+    queryFn: () => api.get<IngredientsResponse>(`/meals/plan/ingredients?start=${rangeStart}&days=${rangeDays}`),
     enabled: open,
+    placeholderData: (prev) => prev,
   });
   const listsQ = useQuery({
     // Not under the 'meals' key: lists belong to another module.
@@ -85,21 +111,29 @@ export function ShoppingDialog({ open, onClose, start }: { open: boolean; onClos
     if (open) {
       setUnchecked(new Set());
       setAdded(new Set());
+      autoUnticked.current = new Set();
+      seeded.current = '';
     }
-  }, [open, start]);
+  }, [open, start, rangeKey]);
   useEffect(() => {
     const lists = listsQ.data;
     if (lists?.length && !lists.some((l) => l.id === listId)) setListId(lists[0].id);
   }, [listsQ.data, listId]);
   // Whenever the chosen list's items arrive, untick what's already on it.
+  // Only the automatic unticks of the previously chosen list are undone when switching lists;
+  // what the person unticked by hand stays unticked.
   const seeded = useRef<string>('');
+  const autoUnticked = useRef<Set<string>>(new Set());
   useEffect(() => {
     if (!listItemsQ.isSuccess) return;
-    const sig = `${listId}:${listItemsQ.dataUpdatedAt}`;
+    const sig = `${listId}:${listItemsQ.dataUpdatedAt}:${rangeKey}:${ingredientsQ.dataUpdatedAt}`;
     if (seeded.current === sig) return;
     seeded.current = sig;
-    setUnchecked((prev) => new Set([...prev, ...onList.keys()]));
-  }, [listItemsQ.isSuccess, listItemsQ.dataUpdatedAt, listId, onList]);
+    const auto = new Set(onList.keys());
+    const stale = autoUnticked.current;
+    autoUnticked.current = auto;
+    setUnchecked((prev) => new Set([...[...prev].filter((k) => !stale.has(k) || auto.has(k)), ...auto]));
+  }, [listItemsQ.isSuccess, listItemsQ.dataUpdatedAt, listId, onList, rangeKey, ingredientsQ.dataUpdatedAt]);
 
   const chosen = items.filter((i) => !unchecked.has(i.key) && !added.has(i.key));
   const groups = useMemo(() => {
@@ -128,7 +162,7 @@ export function ShoppingDialog({ open, onClose, start }: { open: boolean; onClos
       .filter(Boolean)
       .join('\n\n');
     try {
-      await navigator.clipboard.writeText(`Shopping for ${weekLabel(start)}\n\n${text}`);
+      await navigator.clipboard.writeText(`Shopping for ${rangeLabel}\n\n${text}`);
       toast.success('Shopping list copied', { description: 'Paste it anywhere you like.' });
     } catch {
       toast.error('Could not copy — your browser blocked the clipboard');
@@ -171,7 +205,7 @@ export function ShoppingDialog({ open, onClose, start }: { open: boolean; onClos
         </span>
       }
       title="Shop for the week"
-      description={data ? `${plural(data.meal_count, 'recipe')} planned for ${weekLabel(start)}` : weekLabel(start)}
+      description={data ? `${plural(data.meal_count, 'recipe')} planned for ${rangeLabel}` : rangeLabel}
       footer={
         <>
           <Button variant="secondary" icon={ClipboardCopy} onClick={copyText} disabled={!items.length}>
@@ -192,6 +226,39 @@ export function ShoppingDialog({ open, onClose, start }: { open: boolean; onClos
         </>
       }
     >
+      <div className="mb-4 flex flex-col gap-2">
+        <SegmentedControl
+          aria-label="Days to shop for"
+          size="sm"
+          block
+          value={mode}
+          onChange={(v) => setMode(v as RangeMode)}
+          options={[
+            ...(canFromToday ? [{ value: 'today', label: 'From today' }] : []),
+            { value: 'week', label: 'Whole week' },
+            { value: 'custom', label: 'Pick days' },
+          ]}
+        />
+        {mode === 'custom' && (
+          <div className="grid grid-cols-2 gap-2">
+            <Field label="From">
+              <Select value={from} onChange={(e) => setFrom(e.target.value)} options={days.map((d) => ({ value: d, label: dayLong(d) }))} />
+            </Field>
+            <Field label="To">
+              <Select
+                value={to < from ? from : to}
+                onChange={(e) => setTo(e.target.value)}
+                options={days.filter((d) => d >= from).map((d) => ({ value: d, label: dayLong(d) }))}
+              />
+            </Field>
+          </div>
+        )}
+        {mode !== 'custom' && (
+          <p className="text-xs text-muted">
+            {mode === 'today' ? `Meals from today (${dayShort(today)}) to ${dayShort(days[6])}.` : `All 7 days, ${weekLabel(start)}.`}
+          </p>
+        )}
+      </div>
       {ingredientsQ.isLoading ? (
         <SkeletonList rows={5} />
       ) : ingredientsQ.isError ? (
@@ -202,7 +269,11 @@ export function ShoppingDialog({ open, onClose, start }: { open: boolean; onClos
           icon={ShoppingCart}
           accent="#F76B15"
           title="No ingredients to add"
-          description={data?.free_text.length ? 'This week only has meals without recipes. Add recipes to the plan to build a shopping list.' : 'Plan some recipes for this week first.'}
+          description={
+            data?.free_text.length
+              ? 'These days only have meals without recipes. Add recipes to the plan to build a shopping list.'
+              : rangeDays === 7 ? 'Plan some recipes for this week first.' : 'No recipes planned for these days.'
+          }
         />
       ) : (
         <div className="flex flex-col gap-4">

@@ -359,8 +359,10 @@ await step('screenshots', async () => {
       await page.locator('[data-event-id]').first().waitFor();
       await page.waitForTimeout(300);
       await page.screenshot({ path: `${SHOTS}/month-next-${tag}.png` });
-      await page.goto(`${BASE}/calendar?view=agenda`);
-      await pill(page, 'Dentist').first().click();
+      // The seeded dentist visit is on this week's Thursday, which the forward-looking agenda no
+      // longer lists from Friday on — open it through its deep link instead.
+      const dentist = (await (await page.request.get(`${BASE}/api/search?q=Dentist`)).json()).results.find((r) => r.module === 'calendar');
+      await page.goto(`${BASE}${dentist.link}`);
       await dialog(page).getByText('Bright Smile', { exact: false }).waitFor();
       await page.waitForTimeout(350);
       await page.screenshot({ path: `${SHOTS}/detail-${tag}.png` });

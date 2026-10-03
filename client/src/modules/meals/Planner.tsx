@@ -24,6 +24,10 @@ export function Planner() {
   const qc = useQueryClient();
   const confirm = useConfirm();
   const planQ = usePlan(start);
+  // Last week's plan (for "Copy last week": offered only when there is something to copy).
+  const prevStart = shiftDays(start, -7);
+  const prevQ = usePlan(prevStart);
+  const lastWeekCount = prevQ.data?.start === prevStart ? prevQ.data.entries.length : null;
   const [dialog, setDialog] = useState<PlanDialogState | null>(null);
   const [shopOpen, setShopOpen] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
@@ -129,6 +133,7 @@ export function Planner() {
   };
 
   const planned = entries.length;
+  const canCopyLast = isGrownUp && lastWeekCount !== null && lastWeekCount > 0;
   const dinners = new Set(entries.filter((e) => e.slot === 'dinner').map((e) => e.date)).size;
   const rel = relativeWeek(start);
 
@@ -153,7 +158,7 @@ export function Planner() {
               <span className="max-sm:hidden">Today</span>
             </Button>
           )}
-          {isGrownUp && (
+          {canCopyLast && planned > 0 && (
             <Button variant="secondary" icon={Copy} loading={busy === 'copy'} onClick={() => copyFrom(false)} className="max-sm:hidden">
               Copy last week
             </Button>
@@ -167,8 +172,8 @@ export function Planner() {
               trigger={() => <IconButton icon={MoreHorizontal} label="Week actions" variant="ghost" className="size-11" />}
               items={[
                 { label: 'Add ingredients to shopping list', icon: ShoppingCart, onSelect: () => setShopOpen(true), disabled: !planned },
-                { label: 'Copy last week', icon: Copy, onSelect: () => copyFrom(false) },
-                { label: 'Replace with last week', icon: Replace, onSelect: () => copyFrom(true) },
+                { label: 'Copy last week', icon: Copy, onSelect: () => copyFrom(false), disabled: !canCopyLast, hint: lastWeekCount === 0 ? 'Nothing planned' : undefined },
+                { label: 'Replace with last week', icon: Replace, onSelect: () => copyFrom(true), disabled: !canCopyLast },
                 'divider',
                 { label: 'Clear this week', icon: Eraser, danger: true, disabled: !planned, onSelect: clearWeek },
               ]}
@@ -178,10 +183,12 @@ export function Planner() {
       </div>
 
       {/* Mobile quick actions */}
-      <div className={cn('mb-4 grid grid-cols-2 gap-2 sm:hidden', !loading && planned === 0 && 'hidden')}>
-        <Button variant="secondary" icon={Copy} loading={busy === 'copy'} disabled={!isGrownUp} onClick={() => copyFrom(false)}>
-          Copy last week
-        </Button>
+      <div className={cn('mb-4 grid gap-2 sm:hidden', canCopyLast ? 'grid-cols-2' : 'grid-cols-1', !loading && planned === 0 && 'hidden')}>
+        {canCopyLast && (
+          <Button variant="secondary" icon={Copy} loading={busy === 'copy'} onClick={() => copyFrom(false)}>
+            Copy last week
+          </Button>
+        )}
         <Button icon={ShoppingCart} onClick={() => setShopOpen(true)} disabled={!planned} style={{ backgroundColor: ACCENT_SOLID }} className="text-white">
           Shopping list
         </Button>
@@ -189,7 +196,7 @@ export function Planner() {
 
       {!loading && planned === 0 && (
         <EmptyWeek
-          canCopy={isGrownUp}
+          canCopy={canCopyLast}
           copying={busy === 'copy'}
           onCopy={() => copyFrom(false)}
           onPlan={(recipeId) => setDialog({ date: days.includes(today) ? today : days[0], slot: 'dinner', recipeId })}
@@ -388,23 +395,29 @@ function GridChip({ entry, cook, onOpen, onDragStart, onDragEnd }: {
 
 function WeekList({ days, today, loading, byCell, memberById, onAdd, onOpen }: ViewProps) {
   const [selected, setSelected] = useState(days.includes(today) ? today : days[0]);
-  const scrolledFor = useRef<string | null>(null);
+  // This week opens on today without scrolling the page (the header and week controls stay in
+  // view): the days already behind us are folded into one "Earlier this week" row.
+  const past = days.includes(today) ? days.filter((d) => d < today) : [];
+  const [showPast, setShowPast] = useState(false);
   const clickLock = useRef(0);
   const jump = (date: string, smooth = true) => {
     setSelected(date);
     clickLock.current = Date.now();
-    document.getElementById(`meals-day-${date}`)?.scrollIntoView({ behavior: smooth ? 'smooth' : 'instant', block: 'start' });
+    const go = () => document.getElementById(`meals-day-${date}`)?.scrollIntoView({ behavior: smooth ? 'smooth' : 'instant', block: 'start' });
+    if (past.includes(date) && !showPast) {
+      setShowPast(true);
+      requestAnimationFrame(() => requestAnimationFrame(go));
+    } else go();
   };
 
-  // Open on today (not Monday) once the week has rendered.
+  // A new week: start on today (this week) or Monday, with earlier days folded again.
   useEffect(() => {
-    if (loading || scrolledFor.current === days[0]) return;
-    scrolledFor.current = days[0];
-    const target = days.includes(today) ? today : days[0];
-    setSelected(target);
-    if (target !== days[0]) requestAnimationFrame(() => jump(target, false));
+    setSelected(days.includes(today) ? today : days[0]);
+    setShowPast(false);
+    clickLock.current = Date.now();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loading, days[0], today]);
+  }, [days[0], today]);
+  const visibleDays = showPast ? days : days.filter((d) => !past.includes(d));
 
   // Keep the strip in sync with the day you're looking at while scrolling.
   useEffect(() => {
@@ -419,12 +432,13 @@ function WeekList({ days, today, loading, byCell, memberById, onAdd, onOpen }: V
     );
     cards.forEach((c) => io.observe(c));
     return () => io.disconnect();
-  }, [days]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [days[0], showPast]);
 
   return (
     <div>
       <div
-        className="sticky top-[calc(56px+env(safe-area-inset-top))] z-20 -mx-4 mb-4 flex gap-1.5 overflow-x-auto bg-bg/90 px-4 py-2 backdrop-blur-md scrollbar-none sm:mx-0 sm:px-0"
+        className="sticky top-[calc(56px+env(safe-area-inset-top))] z-20 -mx-4 mb-4 flex gap-1.5 overflow-x-auto bg-bg px-4 py-2 shadow-[0_1px_0_var(--border)] scrollbar-none sm:mx-0 sm:px-0"
         role="tablist"
         aria-label="Jump to day"
       >
@@ -463,7 +477,22 @@ function WeekList({ days, today, loading, byCell, memberById, onAdd, onOpen }: V
       </div>
 
       <div className="flex flex-col gap-3">
-        {days.map((date) => {
+        {past.length > 0 && !showPast && (
+          <button
+            type="button"
+            onClick={() => setShowPast(true)}
+            className="flex min-h-11 items-center justify-between gap-3 rounded-2xl border border-dashed border-border-strong bg-surface px-4 py-2.5 text-left text-[13px] font-semibold text-muted transition hover:bg-surface-2 hover:text-fg"
+          >
+            <span>
+              Earlier this week · {past.length === 1 ? fmtDate(toDate(past[0])!, 'EEEE') : `${fmtDate(toDate(past[0])!, 'EEE')} – ${fmtDate(toDate(past[past.length - 1])!, 'EEE')}`}
+              <span className="ml-1 font-normal text-subtle">
+                ({plural(past.reduce((n, date) => n + SLOTS.reduce((m, sl) => m + (byCell.get(`${date}|${sl.id}`)?.length ?? 0), 0), 0), 'meal')})
+              </span>
+            </span>
+            <span className="text-primary">Show</span>
+          </button>
+        )}
+        {visibleDays.map((date) => {
           const d = toDate(date)!;
           const isToday = date === today;
           return (
@@ -553,7 +582,7 @@ function EmptyWeek({ canCopy, copying, onCopy, onPlan }: { canCopy: boolean; cop
         </span>
         <div className="min-w-0 flex-1">
           <h3 className="text-[17px] font-bold tracking-tight text-fg">A fresh week to plan</h3>
-          <p className="mt-0.5 text-sm text-muted">Start from last week's menu, or pick a family favorite for tonight.</p>
+          <p className="mt-0.5 text-sm text-muted">{canCopy ? "Start from last week's menu, or pick a family favorite for tonight." : 'Pick a family favorite for tonight, or plan the week day by day.'}</p>
         </div>
         <div className="flex flex-wrap gap-2">
           {canCopy && <Button variant="secondary" icon={Copy} loading={copying} onClick={onCopy}>Copy last week</Button>}

@@ -202,7 +202,8 @@ export function useWallLive() {
         if (e.payload.module !== 'wall') placeActivity(qc, e.payload);
       } else if (e.type === 'activity.removed' || e.type === 'activity.updated') {
         // Another module retracted or rewrote an entry (e.g. a document became private).
-        const key = `a${e.payload.id}`;
+        const p = e.payload as Activity & { ids?: number[] };
+        const keys = new Set((Array.isArray(p.ids) ? p.ids : [p.id]).map((id) => `a${id}`));
         const removed = e.type === 'activity.removed';
         qc.setQueriesData<Feeds>({ queryKey: wallKeys.feeds }, (data) =>
           data
@@ -211,7 +212,7 @@ export function useWallLive() {
                 pages: data.pages.map((pg) => ({
                   ...pg,
                   items: pg.items.flatMap((it) =>
-                    it.key !== key || it.type !== 'activity' ? [it] : removed ? [] : [{ ...it, activity: { ...it.activity, ...e.payload } }],
+                    !keys.has(it.key) || it.type !== 'activity' ? [it] : removed ? [] : [{ ...it, activity: { ...it.activity, ...e.payload } }],
                   ),
                 })),
               }

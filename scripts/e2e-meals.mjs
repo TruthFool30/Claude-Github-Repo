@@ -179,8 +179,9 @@ await check('empty week invites you to copy; copy → undo → copy → clear �
   await shot(page, 'desktop-light-empty-week');
   await sam.page.goto(`${BASE}/meals?week=${DST}`);
   await sam.page.getByText('A fresh week to plan').waitFor();
-  assert.ok((await page.getByRole('button', { name: 'Copy last week' }).count()) >= 2, 'empty week card offers Copy last week');
-  await page.getByRole('button', { name: 'Copy last week' }).last().click();
+  // Offered once (in the empty-week card, not again in the toolbar).
+  assert.equal(await page.getByRole('button', { name: 'Copy last week' }).count(), 1, 'empty week card offers Copy last week once');
+  await page.getByRole('button', { name: 'Copy last week' }).click();
   await page.getByText(/Copied 3 meals from last week/).waitFor();
   await sam.page.getByRole('button', { name: new RegExp(pastaTitle) }).waitFor({ timeout: 5000 });
   await page.getByRole('button', { name: 'Undo' }).click();
@@ -301,6 +302,38 @@ await check('shopping list shows a friendly error when the bulk add fails', asyn
   await page.keyboard.press('Escape');
   await page.unroute('**/api/lists?type=shopping');
   await page.unroute('**/api/lists/7/items/bulk');
+});
+
+await check('shopping dialog defaults to today onward on the current week; whole week / pick days change the count', async () => {
+  const todayKey = key(new Date());
+  const days = Math.round((new Date(`${addDays(thisMonday, 6)}T12:00:00`) - new Date(`${todayKey}T12:00:00`)) / 864e5) + 1;
+  const fromToday = (await api(page, 'GET', `/api/meals/plan/ingredients?start=${todayKey}&days=${days}`)).body;
+  const week = (await api(page, 'GET', `/api/meals/plan/ingredients?start=${thisMonday}&days=7`)).body;
+  await page.goto(`${BASE}/meals`);
+  const shop = page.getByRole('button', { name: 'Shopping list' }).first();
+  await shop.waitFor();
+  if (!(await shop.isEnabled())) return; // nothing planned this week on this instance
+  await shop.click();
+  const dialog = page.getByRole('dialog');
+  const recipes = (n) => new RegExp(`^${n} recipes? planned for`);
+  if (todayKey !== thisMonday) {
+    assert.equal(await dialog.getByRole('radio', { name: 'From today' }).getAttribute('aria-checked'), 'true', 'From today is the default');
+    await dialog.getByText(recipes(fromToday.meal_count)).waitFor();
+    if (fromToday.items.length) await dialog.getByText(new RegExp(`of ${fromToday.items.length} selected`)).waitFor();
+  } else {
+    assert.equal(await dialog.getByRole('radio', { name: 'From today' }).count(), 0, 'no From today on Monday');
+  }
+  await dialog.getByRole('radio', { name: 'Whole week' }).click();
+  await dialog.getByText(recipes(week.meal_count)).waitFor();
+  if (week.items.length) await dialog.getByText(new RegExp(`of ${week.items.length} selected`)).waitFor();
+  await dialog.getByRole('radio', { name: 'Pick days' }).click();
+  await dialog.getByLabel('From', { exact: true }).selectOption(thisMonday);
+  await dialog.getByLabel('To', { exact: true }).selectOption(thisMonday);
+  const monday = (await api(page, 'GET', `/api/meals/plan/ingredients?start=${thisMonday}&days=1`)).body;
+  await dialog.getByText(recipes(monday.meal_count)).waitFor();
+  await shot(page, 'desktop-light-shopping-range');
+  await page.keyboard.press('Escape');
+  await dialog.waitFor({ state: 'detached' });
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -448,8 +481,15 @@ await check('mobile planner opens on today and marks it apart from the selected 
   assert.equal(await todayTab.getAttribute('aria-selected'), 'true');
   const todayKey = key(new Date());
   if (todayKey !== thisMonday) {
+    // Today's card is on screen without the page auto-scrolling past the header / week controls
+    // (earlier days are folded into one row).
     const y = await p.locator(`#meals-day-${todayKey}`).evaluate((el) => el.getBoundingClientRect().top);
-    assert.ok(y < 400, `today's card is in view (top ${y})`);
+    assert.ok(y < 844 - 200, `today's card is in view (top ${y})`);
+    assert.equal(await p.evaluate(() => window.scrollY), 0, 'page not auto-scrolled');
+    assert.ok(await p.getByRole('button', { name: 'Previous week' }).isVisible(), 'week controls visible');
+    await p.getByRole('button', { name: /^Earlier this week/ }).waitFor();
+    const strip = await p.getByRole('tablist', { name: 'Jump to day' }).evaluate((el) => getComputedStyle(el).backgroundColor);
+    assert.doesNotMatch(strip, /rgba\(.*,\s*0(\.\d+)?\)$/, `sticky day strip is opaque (${strip})`);
     await p.getByRole('tab', { name: new RegExp(`^${weekday(thisMonday)}`) }).click();
     await p.waitForTimeout(500);
     assert.equal(await todayTab.getAttribute('aria-selected'), 'false');

@@ -1210,7 +1210,7 @@ export function search(ctx, familyId, q) {
   const txs = ctx.db
     .prepare(
       `${TX_SELECT} WHERE t.family_id = ? AND t.deleted_at IS NULL
-       AND (t.description LIKE '%' || ? || '%' OR t.notes LIKE '%' || ? || '%') ORDER BY t.date DESC LIMIT 5`,
+       AND (search_match(t.description, ?) OR search_match(t.notes, ?)) ORDER BY t.date DESC LIMIT 5`,
     )
     .all(familyId, q, q)
     .map((row) => ({
@@ -1219,11 +1219,11 @@ export function search(ctx, familyId, q) {
       link: `/budget/transactions?month=${monthOf(row.date)}&tx=${row.id}`,
     }));
   const goals = ctx.db
-    .prepare("SELECT * FROM budget_goals WHERE family_id = ? AND name LIKE '%' || ? || '%' LIMIT 3")
+    .prepare("SELECT * FROM budget_goals WHERE family_id = ? AND search_match(name, ?) LIMIT 3")
     .all(familyId, q)
     .map((g) => ({ title: `${g.emoji ? `${g.emoji} ` : ''}${g.name}`, subtitle: `Savings goal · ${money(g.target_cents, family?.currency)}`, link: `/budget/goals?goal=${g.id}` }));
   const bills = ctx.db
-    .prepare("SELECT * FROM budget_recurring WHERE family_id = ? AND active = 1 AND description LIKE '%' || ? || '%' LIMIT 3")
+    .prepare("SELECT * FROM budget_recurring WHERE family_id = ? AND active = 1 AND search_match(description, ?) LIMIT 3")
     .all(familyId, q)
     .map((b) => ({ title: b.description, subtitle: `Monthly bill · ${money(b.amount_cents, family?.currency)} on day ${b.day_of_month}`, link: '/budget/bills' }));
   return [...txs, ...goals, ...bills].slice(0, 8);

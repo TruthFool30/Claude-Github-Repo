@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { hydrateActivity } from '../activity.js';
+import { hydrateActivity, activityVisibleSql } from '../activity.js';
 import { listMembers } from './families.js';
 
 /** /api/activity (requireAuth + requireFamily) */
@@ -9,8 +9,8 @@ export function activityRouter(ctx) {
   r.get('/', (req, res) => {
     const limit = Math.min(Math.max(Number(req.query.limit) || 30, 1), 100);
     const before = Number(req.query.before) || null;
-    const params = [req.family.id];
-    let where = 'family_id = ?';
+    const params = [req.family.id, req.user.id];
+    let where = `family_id = ? AND ${activityVisibleSql('activity')}`;
     if (before) { where += ' AND id < ?'; params.push(before); }
     if (req.query.module) { where += ' AND module = ?'; params.push(String(req.query.module)); }
     const rows = db.prepare(`SELECT * FROM activity WHERE ${where} ORDER BY id DESC LIMIT ?`).all(...params, limit);

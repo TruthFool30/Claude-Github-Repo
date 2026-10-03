@@ -69,9 +69,34 @@ try {
   await A.getByText('Monthly limits').waitFor();
   await A.getByText('Last 6 months').waitFor();
   assert.ok(await A.locator('.recharts-bar-rectangle').count() >= 10, 'trend bars rendered');
-  assert.ok(await A.locator('.recharts-pie-sector').count() >= 3, 'donut rendered');
-  assert.ok(await A.getByRole('alert').filter({ hasText: /over (its|budget)/ }).count() >= 1, 'over-budget banner');
   await noHorizontalScroll(A, 'overview (1280)');
+  // Donut + over-budget banner need a month with real spending. Early in a month the current one
+  // can legitimately be sparse, so use whichever of this / last month the summary API says has it.
+  {
+    const ym = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+    const now = new Date();
+    const thisMonth = ym(now);
+    const lastMonth = ym(new Date(now.getFullYear(), now.getMonth() - 1, 1));
+    const rich = async (month) => {
+      const s = await (await A.request.get(`${BASE}/api/budget/summary?month=${month}`)).json();
+      const spent = s.categories.filter((c) => c.kind === 'expense' && c.total > 0);
+      const over = spent.filter((c) => c.monthly_limit && c.total > c.monthly_limit);
+      return spent.length >= 3 && over.length >= 1;
+    };
+    const month = (await rich(thisMonth)) ? thisMonth : lastMonth;
+    assert.ok(month === thisMonth || (await rich(lastMonth)), 'seed has a month with ≥3 spending categories and one over its limit');
+    if (month !== thisMonth) {
+      await A.goto(`${BASE}/budget?month=${month}`);
+      await A.getByText('Where the money went').waitFor();
+    }
+    await A.locator('.recharts-pie-sector').nth(2).waitFor();
+    assert.ok(await A.locator('.recharts-pie-sector').count() >= 3, `donut rendered (${month})`);
+    await A.getByRole('alert').filter({ hasText: /over (its|budget)/ }).first().waitFor();
+    if (month !== thisMonth) {
+      await A.goto(`${BASE}/budget`);
+      await A.getByText('Where the money went').waitFor();
+    }
+  }
   ok('overview shows totals, donut, limits and 6-month trend');
 
   // Month navigation

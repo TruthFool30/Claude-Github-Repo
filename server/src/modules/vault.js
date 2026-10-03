@@ -932,7 +932,7 @@ export function search(ctx, familyId, term, req) {
     `SELECT c.id, c.name, c.role, c.organization, c.phones,
             (SELECT 1 FROM vault_contact_favorites v WHERE v.contact_id = c.id AND v.user_id = ?) AS fav
        FROM vault_contacts c
-      WHERE c.family_id = ? AND (c.name LIKE '%' || ? || '%' OR IFNULL(c.organization,'') LIKE '%' || ? || '%' OR IFNULL(c.role,'') LIKE '%' || ? || '%' OR c.phones LIKE '%' || ? || '%')
+      WHERE c.family_id = ? AND (search_match(c.name, ?) OR search_match(IFNULL(c.organization,''), ?) OR search_match(IFNULL(c.role,''), ?) OR search_match(c.phones, ?))
       ORDER BY c.emergency DESC, fav DESC, c.name COLLATE NOCASE LIMIT 5`,
   ).all(me, familyId, like, like, like, like).map((c) => {
     const phone = parseJson(c.phones, [])[0]?.number;
@@ -941,19 +941,19 @@ export function search(ctx, familyId, term, req) {
   const docs = ctx.db.prepare(
     `SELECT d.id, d.name, d.ext, d.is_private, d.adults_only, f.name AS folder_name FROM vault_documents d LEFT JOIN vault_folders f ON f.id = d.folder_id
       WHERE d.family_id = ? AND (d.owner_id = ? OR (d.is_private = 0 AND (d.adults_only = 0 OR ?)))
-        AND (d.name LIKE '%' || ? || '%' OR d.original_name LIKE '%' || ? || '%')
+        AND (search_match(d.name, ?) OR search_match(d.original_name, ?))
       ORDER BY d.created_at DESC LIMIT 4`,
   ).all(familyId, me, adult, like, like).map((d) => ({
     title: d.name,
     subtitle: [d.ext ? d.ext.toUpperCase() : 'File', d.folder_name, d.is_private ? 'Private' : d.adults_only ? 'Adults only' : null].filter(Boolean).join(' · '),
     link: `/vault/docs/d/${d.id}`,
   }));
-  const folders = ctx.db.prepare(`SELECT id, name FROM vault_folders WHERE family_id = ? AND name LIKE '%' || ? || '%' LIMIT 2`)
+  const folders = ctx.db.prepare(`SELECT id, name FROM vault_folders WHERE family_id = ? AND search_match(name, ?) LIMIT 2`)
     .all(familyId, like).map((f) => ({ title: f.name, subtitle: 'Documents folder', link: `/vault/docs/f/${f.id}` }));
   // Info cards match on their title only — secret values are never searchable.
   const notes = ctx.db.prepare(
     `SELECT id, title, is_private, adults_only FROM vault_notes
-      WHERE family_id = ? AND (owner_id = ? OR (is_private = 0 AND (adults_only = 0 OR ?))) AND title LIKE '%' || ? || '%' LIMIT 3`,
+      WHERE family_id = ? AND (owner_id = ? OR (is_private = 0 AND (adults_only = 0 OR ?))) AND search_match(title, ?) LIMIT 3`,
   ).all(familyId, me, adult, like).map((n) => ({
     title: n.title, subtitle: n.is_private ? 'Private info card' : n.adults_only ? 'Info card · adults only' : 'Info card', link: `/vault/notes/${n.id}`,
   }));

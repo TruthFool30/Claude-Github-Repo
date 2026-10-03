@@ -72,7 +72,22 @@ export const coreMigrations = [
   `CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, family_id, id DESC)`,
   // Remembered IANA time zone (from the client's X-Timezone header) for background jobs.
   `ALTER TABLE users ADD COLUMN timezone TEXT`,
+  // Optional activity audience: JSON array of user ids; NULL = visible to the whole family.
+  `ALTER TABLE activity ADD COLUMN audience TEXT`,
 ];
+
+const NON_ALNUM = /[^\p{L}\p{N}]+/gu;
+/** JS side of the `search_match(haystack, needle)` SQL function (returns 1/0). */
+export function searchMatch(hay, needle) {
+  if (hay == null || needle == null) return 0;
+  const h = String(hay).toLowerCase();
+  const n = String(needle).toLowerCase().trim();
+  if (!n) return 0;
+  if (h.includes(n)) return 1;
+  const nn = n.replace(NON_ALNUM, '');
+  if (nn.length < 2) return 0;
+  return h.replace(NON_ALNUM, '').includes(nn) ? 1 : 0;
+}
 
 /**
  * Open (or create) the SQLite database, enable WAL + foreign keys and run the core
@@ -84,6 +99,9 @@ export function openDb(dbPath, modules = []) {
   db.exec('PRAGMA journal_mode = WAL');
   db.exec('PRAGMA foreign_keys = ON');
   db.exec('PRAGMA busy_timeout = 5000');
+  // search_match(haystack, needle): case-insensitive "contains", also ignoring punctuation and
+  // spaces, so "wifi" finds "Wi-Fi" and "wi fi". Use it in module `search` hooks.
+  db.function('search_match', { deterministic: true }, searchMatch);
   for (const sql of coreMigrations) {
     try {
       db.exec(sql);

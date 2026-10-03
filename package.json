@@ -9,7 +9,7 @@
     "client"
   ],
   "engines": {
-    "node": ">=22.5"
+    "node": ">=22.13"
   },
   "scripts": {
     "dev": "concurrently -k -n server,client -c blue,magenta \"npm run dev -w server\" \"npm run dev -w client\"",

@@ -1,11 +1,10 @@
 // Home / wall browser smoke test + screenshots.
-//   BASE=http://localhost:4201 DB_PATH=/tmp/wall-build/hearth.db SHOTS=/tmp/wall-shots node scripts/e2e-wall.mjs
+//   BASE=http://localhost:4201 SHOTS=/tmp/wall-shots node scripts/e2e-wall.mjs
 // Needs a freshly seeded instance (npm run seed) with HEARTH_RATE_LIMITS=off.
 import fs from 'node:fs';
 import path from 'node:path';
 import assert from 'node:assert/strict';
 import { chromium } from 'playwright';
-import { DatabaseSync } from 'node:sqlite';
 
 const BASE = process.env.BASE || 'http://localhost:4201';
 const SHOTS = process.env.SHOTS || '/tmp/wall-shots';
@@ -116,47 +115,55 @@ function mockDashboard() {
 
 console.log(`Wall e2e against ${BASE} → screenshots in ${SHOTS}`);
 
-// Other modules' activity (they may be stubs, or not seeded): insert a few backdated entries straight
-// into the instance's database so the mixed feed / Updates filter can be exercised.
-{
-  const dbPath = process.env.DB_PATH;
-  assert.ok(dbPath && fs.existsSync(dbPath), 'Set DB_PATH to the running instance\'s database file');
-  const db = new DatabaseSync(dbPath);
-  db.exec('PRAGMA busy_timeout = 5000');
-  const fam = db.prepare("SELECT id FROM families WHERE invite_code = 'HRTH-2026'").get().id;
-  const uid = (email) => db.prepare('SELECT id FROM users WHERE email = ?').get(email).id;
-  const ago = (min) => new Date(Date.now() - min * 60_000).toISOString();
-  const ins = db.prepare('INSERT INTO activity (family_id, user_id, module, verb, summary, link, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)');
-  for (const [email, module, verb, summary, link, min] of [
-    ['sam@hearth.test', 'lists', 'added', 'added 4 items to Groceries', '/lists', 40],
-    ['mia@hearth.test', 'lists', 'completed', 'checked off "Feed the cat"', '/lists', 75],
-    ['alex@hearth.test', 'calendar', 'created', 'added Dentist — Leo on Thursday', '/calendar', 300],
-    ['sam@hearth.test', 'photos', 'uploaded', 'added 6 photos to Eagle Lake', '/photos', 4440],
-    ['alex@hearth.test', 'meals', 'planned', 'planned Chicken tacos for Tuesday dinner', '/meals', 5500],
-  ]) ins.run(fam, uid(email), module, verb, summary, link, ago(min));
-  db.close();
-}
-
 // ---------- desktop: Alex (light) + Sam (second browser, live) ----------
 const alex = await open('alex@hearth.test');
 const sam = await open('sam@hearth.test', { theme: 'dark' });
 const A = alex.page;
 const S = sam.page;
 
+// Real cross-module activity through the other modules' APIs (the seed already holds plenty;
+// these are fresh entries with known text for the feed / Updates filter checks).
+const apiJson = async (page, method, url, data) => {
+  const res = await page.request.fetch(`${BASE}${url}`, { method, data });
+  assert.ok(res.ok(), `${method} ${url} → ${res.status()} ${await res.text()}`);
+  return res.json();
+};
+{
+  const lists = await apiJson(S, 'GET', '/api/lists');
+  const groceries = lists.find((l) => l.name === 'Groceries');
+  const todo = lists.find((l) => l.type !== 'shopping');
+  assert.ok(groceries && todo, 'seeded Groceries and a to-do list exist');
+  await apiJson(S, 'POST', `/api/lists/${groceries.id}/items/bulk`, { items: ['Oat milk', 'Bananas', 'Rice', 'Coffee beans'].map((text) => ({ text })) });
+  await apiJson(A, 'POST', `/api/lists/${todo.id}/items/bulk`, { items: [{ text: 'Feed the cat' }] });
+}
+const dash = await apiJson(A, 'GET', '/api/dashboard');
+
 await gotoHome(A);
 await A.getByRole('heading', { name: /Good (morning|afternoon|evening|night), Alex/ }).waitFor();
 assert.ok(await A.getByText(/Pinned by/).first().isVisible(), 'pinned post shown');
 await A.getByText('Grandma & Grandpa land Friday', { exact: false }).first().waitFor();
-// fallbacks for modules without a dashboard
-await A.getByText('Plan your week together').waitFor();
-await A.getByRole('region', { name: 'Birthdays' }).waitFor();
-// activity from other modules (seeded by the wall seed) is rendered with module labels
+// Real module data in the glance cards (no "get started" fallbacks: every module has a dashboard).
+{
+  const region = (name) => A.locator('aside[aria-label="At a glance"]').getByRole('region', { name });
+  await region('Today').waitFor();
+  if (dash.calendar?.today?.length) await region('Today').getByText(dash.calendar.today[0].title, { exact: false }).first().waitFor();
+  const task = dash.lists?.overdue?.[0] ?? dash.lists?.due?.[0];
+  if (task) await region('Tasks due').getByText(task.text, { exact: false }).first().waitFor();
+  if (dash.meals?.today?.length) await region('On the menu').getByText(dash.meals.today[0].title, { exact: false }).first().waitFor();
+  await region('Birthdays').getByText(/^Next: /).waitFor();
+  assert.ok(dash.calendar && dash.lists && dash.meals, 'calendar, lists and meals dashboards are present');
+  assert.ok(dash.calendar.today.length + dash.calendar.upcoming.length > 0, 'seeded calendar events');
+  for (const fallback of ['Plan your week together', 'Share the to-dos', 'Plan the week of meals', 'Never miss a birthday']) {
+    assert.equal(await A.getByText(fallback).count(), 0, `no "${fallback}" fallback with real modules`);
+  }
+}
+// activity from other modules is rendered with module labels
 await A.getByText('added 4 items to Groceries').first().waitFor();
 assert.equal(await A.getByRole('button', { name: 'New post', exact: true }).count(), 1, 'one "New post" entry point (no FAB on Home)');
 await noHorizontalOverflow(A, 'desktop home');
 await shot(A, 'desktop-light-home');
 await shot(A, 'desktop-light-home-full', { fullPage: true });
-log('home renders greeting, pinned post, fallbacks, activity');
+log('home renders greeting, pinned post, real glance cards, cross-module activity');
 
 // full dashboard state via a mocked /api/dashboard
 await A.route('**/api/dashboard', (r) => r.fulfill({ json: mockDashboard() }));
@@ -276,7 +283,13 @@ await A.getByRole('menuitem', { name: 'Pin to top' }).click();
 await A.locator('article').first().getByText('Pizza night was a hit!').waitFor({ timeout: 8000 });
 log('pinning moves the post to the top');
 
-// lightbox
+// lightbox (with every module's seeded activity the 3-day-old hike post may be on a later page)
+for (let i = 0; i < 15 && !(await A.locator('article', { hasText: 'Eagle Lake loop' }).count()); i++) {
+  await A.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+  const more = A.getByRole('button', { name: /load more|show more|older/i });
+  if (await more.count()) await more.first().click().catch(() => {});
+  await A.waitForTimeout(500);
+}
 await A.locator('article', { hasText: 'Eagle Lake loop' }).getByRole('button', { name: /Open photo 1 of 6/ }).click();
 await A.waitForTimeout(400);
 await shot(A, 'desktop-light-lightbox');
@@ -287,14 +300,18 @@ await A.getByRole('radio', { name: 'Photos' }).click();
 await A.waitForTimeout(600);
 assert.equal(await A.locator('article:not(:has(img))').count(), 0, 'photo filter only shows photo posts');
 await A.getByRole('radio', { name: 'Updates' }).click();
-await A.getByText('checked off "Feed the cat"').waitFor();
+await A.getByText(/added .Feed the cat. to /).first().waitFor();
 assert.equal(await A.locator('article').count(), 0);
 await shot(A, 'desktop-light-filter-updates');
 await A.getByRole('radio', { name: 'All' }).click();
 log('feed filters: photos / updates');
 
 // infinite scroll reaches the end
-await A.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+// (every module's seeded activity makes the feed several pages long: keep scrolling)
+for (let i = 0; i < 40 && !(await A.getByText("You're all caught up").count()); i++) {
+  await A.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+  await A.waitForTimeout(400);
+}
 await A.getByText("You're all caught up").waitFor({ timeout: 10_000 });
 log('infinite scroll loads to the end');
 

@@ -12,11 +12,13 @@ export interface EmptyStateProps {
   accent?: string;
   /** Smaller variant for use inside cards. */
   compact?: boolean;
+  /** Heading level for the title (default h3; use 'h1' when the empty state is the whole page). */
+  as?: 'h1' | 'h2' | 'h3';
   className?: string;
 }
 
 /** Friendly empty state with an illustration-like icon badge. */
-export function EmptyState({ icon, title, description, action, accent, compact, className }: EmptyStateProps) {
+export function EmptyState({ icon, title, description, action, accent, compact, as: Heading = 'h3', className }: EmptyStateProps) {
   const color = accent ?? 'var(--primary)';
   const size = compact ? 56 : 88;
   return (
@@ -43,7 +45,7 @@ export function EmptyState({ icon, title, description, action, accent, compact, 
           <span className="absolute bottom-4 left-0 size-1.5 rounded-full opacity-50" style={{ backgroundColor: color }} />
         </div>
       )}
-      <h3 className={cn('font-bold tracking-tight text-fg', compact ? 'text-base' : 'text-xl')}>{title}</h3>
+      <Heading className={cn('font-bold tracking-tight text-fg', compact ? 'text-base' : 'text-xl')}>{title}</Heading>
       {description && <p className={cn('mt-1.5 max-w-sm text-muted', compact ? 'text-[13px]' : 'text-[15px] leading-relaxed')}>{description}</p>}
       {action && <div className="mt-6">{action}</div>}
     </div>

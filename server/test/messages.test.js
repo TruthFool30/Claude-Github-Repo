@@ -98,9 +98,11 @@ describe('conversations', () => {
     // Kid got a notification about being added.
     const notes = await kid.agent.get('/api/notifications');
     assert.ok(notes.body.items.some((n) => n.module === 'messages' && /added you/.test(n.title)));
-    // Activity entry.
-    const act = await admin.agent.get('/api/activity?module=messages');
+    // Activity entry — visible to the group's participants only (the admin isn't in it).
+    const act = await kid.agent.get('/api/activity?module=messages');
     assert.ok(act.body.some((a) => a.summary.includes('Weekend') && a.link === `/messages/${g.body.id}`));
+    const adminAct = await admin.agent.get('/api/activity?module=messages');
+    assert.ok(!adminAct.body.some((a) => a.summary.includes('Weekend')));
 
     // Rename by any participant.
     const ren = await kid.agent.patch(`/api/messages/conversations/${g.body.id}`, { name: 'Camping' });
@@ -567,6 +569,13 @@ describe('seed, dashboard', () => {
     mia.familyId = familyId;
     const miaList = (await mia.get('/api/messages/conversations')).body;
     assert.ok(!miaList.some((c) => c.name === 'Parents HQ'));
+    // …and the seeded "started the group chat “Parents HQ”" activity never reaches her feeds.
+    const miaActs = (await mia.get('/api/activity?limit=100')).body.map((a) => a.summary);
+    assert.ok(!miaActs.some((s) => s.includes('Parents HQ')), 'Parents HQ not in Mia\'s activity');
+    assert.ok(miaActs.some((s) => s.includes('Lake trip')), 'Lake trip (Mia is in it) is visible');
+    const miaWall = (await mia.get('/api/wall/feed?filter=activity&limit=50')).body.items.map((i) => i.activity.summary);
+    assert.ok(!miaWall.some((s) => s.includes('Parents HQ')));
+    assert.ok((await alex.get('/api/activity?limit=100')).body.some((a) => a.summary.includes('Parents HQ')));
     // Search subtitle for a DM says "Direct message".
     const dmHit = (await alex.get('/api/search?q=dry%20cleaning')).body.results.find((r) => r.module === 'messages');
     assert.match(dmHit.subtitle, /^Sam · Direct message · /);
