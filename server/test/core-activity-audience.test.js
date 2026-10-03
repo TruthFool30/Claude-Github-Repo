@@ -59,3 +59,20 @@ test('ctx.logActivity audience: family-wide entries are unaffected, restricted o
   assert.ok((await wallSummaries(admin.agent)).includes('private thing'));
   assert.throws(() => srv.ctx.logActivity({ familyId: family.id, module: 'x', verb: 'y', summary: 'z', audience: 5 }));
 });
+
+test('renaming a group rewrites its feed entry, so members added later never see the old name', async () => {
+  const { admin, member, kid } = await trio('Rename');
+  const created = await admin.agent.post('/api/messages/conversations', { kind: 'group', name: "Mia's surprise party", member_ids: [member.user.id] });
+  assert.equal(created.status, 201);
+  const id = created.body.id;
+  const renamed = await admin.agent.patch(`/api/messages/conversations/${id}`, { name: 'Party planning' });
+  assert.equal(renamed.status, 200);
+  const memberFeed = await feedSummaries(member.agent);
+  assert.ok(memberFeed.includes('started the group chat “Party planning”'));
+  assert.ok(!memberFeed.some((s) => s.includes('surprise')), 'old name gone for existing members');
+  const add = await admin.agent.post(`/api/messages/conversations/${id}/members`, { user_ids: [kid.user.id] });
+  assert.ok(add.status < 300, `add member: ${add.status} ${JSON.stringify(add.body)}`);
+  const kidFeed = await feedSummaries(kid.agent);
+  assert.ok(kidFeed.includes('started the group chat “Party planning”'));
+  assert.ok(!kidFeed.some((s) => s.includes('surprise')), 'late joiner never sees the old name');
+});

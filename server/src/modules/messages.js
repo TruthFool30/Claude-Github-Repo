@@ -169,7 +169,12 @@ export function router(ctx) {
       }
       const ids = participantIds(db, convId, familyId);
       const before = activityAudience(row) ?? [];
-      db.prepare('UPDATE activity SET audience = ? WHERE id = ?').run(JSON.stringify(ids), row.id);
+      // Keep the summary on the group's current name, so a renamed chat never shows its old name.
+      const summary = `started the group chat “${conv.name}”`;
+      db.prepare('UPDATE activity SET audience = ?, summary = ? WHERE id = ?').run(JSON.stringify(ids), summary, row.id);
+      if (summary !== row.summary) {
+        emitActivityEvent(ctx.hub, { ...row, audience: JSON.stringify(ids) }, 'activity.updated', { id: row.id, summary });
+      }
       const gone = before.filter((id) => !ids.includes(id));
       if (gone.length) ctx.sendToUsers(gone, 'activity.removed', { id: row.id, ids: [row.id] }, familyId);
     }
@@ -293,7 +298,10 @@ export function router(ctx) {
     if (!sets.length) throw httpError(400, 'Nothing to update');
     db.prepare(`UPDATE msg_conversations SET ${sets.join(', ')} WHERE id = ?`).run(...vals, conv.id);
     const next = reload(conv.id);
-    if (renamed) systemMessage(next, req.user.id, `renamed the group to “${renamed}”`);
+    if (renamed) {
+      systemMessage(next, req.user.id, `renamed the group to “${renamed}”`);
+      syncGroupActivity(conv.id, req.family.id);
+    }
     emitConversation(next, 'messages.conversation.updated');
     res.json(shapeConversation(db, next, req.user.id));
   });
