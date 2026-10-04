@@ -629,6 +629,7 @@ function DocPreview({ doc, loading, missing, onClose, onEdit }: { doc: VaultDoc 
             <dt className="text-subtle">File</dt>
             <dd className="truncate font-medium text-fg" title={d.original_name}>{d.original_name}</dd>
           </dl>
+          {d.unreadable && <p role="status" className="flex items-center gap-2 rounded-xl bg-warning-soft px-3 py-2 font-medium text-warning-soft-fg"><TriangleAlert size={16} aria-hidden /> Notes can't be decrypted</p>}
           {d.notes && <p className="whitespace-pre-line rounded-xl bg-surface-2/70 p-3 leading-relaxed text-fg">{d.notes}</p>}
           <div className="rounded-2xl border border-border p-3">
             {d.is_owner ? (
@@ -817,7 +818,8 @@ function EditDocModal({ doc, folders, onClose }: { doc: VaultDoc | null; folders
     if (!name.trim()) return setError('Give the document a name');
     setSaving(true);
     try {
-      const body: Record<string, unknown> = { name, folder_id: folderId || null, expires_on: expires || null, notes };
+      const body: Record<string, unknown> = { name, folder_id: folderId || null, expires_on: expires || null };
+      if (!doc.unreadable) body.notes = notes;
       if (doc.is_owner) body.visibility = visibility;
       const saved = await api.patch<VaultDoc>(`/vault/documents/${doc.id}`, body);
       qc.setQueryData<VaultDoc[]>(keys.documents, (old) => old?.map((d) => (d.id === saved.id ? saved : d)));
@@ -853,8 +855,8 @@ function EditDocModal({ doc, folders, onClose }: { doc: VaultDoc | null; folders
         <Field label="Expires on" hint="Passports, insurance, warranties… you'll get a reminder 30 days before.">
           <Input type="date" value={expires} onChange={(e) => setExpires(e.target.value)} trailing={expires ? <IconButton size="sm" icon={X} label="Clear expiry date" onClick={() => setExpires('')} /> : undefined} />
         </Field>
-        <Field label="Notes">
-          <Textarea rows={2} autoGrow value={notes} onChange={(e) => setNotes(e.target.value)} maxLength={1000} placeholder="Where the original is kept, policy details…" />
+        <Field label="Notes" hint={doc?.unreadable ? "These notes can't be decrypted — restore the encryption key to edit them." : undefined}>
+          <Textarea rows={2} autoGrow value={notes} onChange={(e) => setNotes(e.target.value)} maxLength={1000} disabled={doc?.unreadable} placeholder={doc?.unreadable ? "Can't be decrypted" : 'Where the original is kept, policy details…'} />
         </Field>
         {doc?.is_owner && (
           <div className="rounded-2xl border border-border p-3">

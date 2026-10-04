@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { hashPassword } from './auth.js';
-import { createContext } from './app.js';
+import { KEY_ERROR, createContext, defaultKeyFile, openBox } from './app.js';
 import { config } from './config.js';
 import { openDb } from './db.js';
 import { purge } from './purge.js';
@@ -80,6 +80,12 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   fs.mkdirSync(config.uploadDir, { recursive: true });
   const db = openDb(config.dbPath, defaultModules);
   const ctx = createContext({ db, uploadDir: config.uploadDir });
+  try {
+    ctx.box = openBox(db, defaultKeyFile(config.dbPath)); // same key as the server (vault data is sealed)
+  } catch (err) {
+    console.error(err.code === KEY_ERROR ? `Can't seed: ${err.message}` : err);
+    process.exit(1);
+  }
   console.log(`Seeding demo data into ${config.dbPath}`);
   const { familyId } = await seedDemo(ctx);
   ctx.hub.close();

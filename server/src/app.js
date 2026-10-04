@@ -16,7 +16,7 @@ import { authRouter } from './core/auth.js';
 import { familiesRouter, familyRouter, invitePreviewHandler } from './core/families.js';
 import { activityRouter, dashboardHandler, notificationsRouter, searchHandler, streamHandler } from './core/feed.js';
 import { modules as defaultModules, validateModules } from './modules/index.js';
-import { config } from './config.js';
+import { ROOT, config } from './config.js';
 import { loadKey, makeSecretBox } from './secretbox.js';
 
 /** Default rate limits (per key, fixed window). Override with createApp({ limits }). */
@@ -105,6 +105,43 @@ export function createContext({ db, uploadDir, hub = createHub(), limits = {} })
   return ctx;
 }
 
+/** `err.code` of key/canary errors: startup prints just their message (no stack). */
+export const KEY_ERROR = 'HEARTH_KEY';
+
+/** Where the encryption key lives unless HEARTH_ENCRYPTION_KEY is set: KEY_FILE (relative to the repo root), else hearth.key next to the database. */
+export const defaultKeyFile = (dbPath) => (process.env.KEY_FILE ? path.resolve(ROOT, process.env.KEY_FILE) : path.join(path.dirname(dbPath), 'hearth.key'));
+
+/**
+ * The encryption-at-rest box for this database (see secretbox.js). A sealed canary in `app_meta`
+ * proves the key belongs to this database: with the wrong key, or with the key file gone while
+ * encrypted data exists, Hearth refuses to start instead of silently using a fresh key.
+ */
+export function openBox(db, keyFile) {
+  db.exec('CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
+  const canary = db.prepare("SELECT value FROM app_meta WHERE key = 'encryption_canary'").get()?.value;
+  let key;
+  try {
+    key = loadKey({ keyFile, create: !canary });
+  } catch (err) {
+    err.code ??= KEY_ERROR; // bad HEARTH_ENCRYPTION_KEY or missing key file (fs errors keep their code)
+    throw err;
+  }
+  const box = makeSecretBox(key);
+  if (!canary) {
+    db.prepare("INSERT INTO app_meta (key, value) VALUES ('encryption_canary', ?)").run(box.seal('hearth'));
+    return box;
+  }
+  let ok = false;
+  try {
+    ok = box.open(canary) === 'hearth';
+  } catch { /* wrong key: GCM authentication fails */ }
+  if (!ok) {
+    const source = process.env.HEARTH_ENCRYPTION_KEY ? 'HEARTH_ENCRYPTION_KEY' : keyFile;
+    throw Object.assign(new Error(`The encryption key doesn't match this database (${source}). Restore the original key (HEARTH_ENCRYPTION_KEY / hearth.key).`), { code: KEY_ERROR });
+  }
+  return box;
+}
+
 /**
  * createApp({ dbPath, uploadDir, clientDist?, modules? }) -> express app.
  * app.locals: { db, hub, ctx, modules, close() }.
@@ -116,15 +153,22 @@ export function createApp({
   modules = defaultModules,
   limits = {},
   trustProxy = config.trustProxy,
-  keyFile = process.env.KEY_FILE || path.join(path.dirname(dbPath), 'hearth.key'),
+  keyFile = defaultKeyFile(dbPath),
 } = {}) {
   validateModules(modules);
   fs.mkdirSync(uploadDir, { recursive: true });
   const db = openDb(dbPath, modules);
+  let box;
+  try {
+    box = openBox(db, keyFile);
+  } catch (err) {
+    db.close();
+    throw err;
+  }
   const hub = createHub({ isSessionValid: (token) => isSessionValid(db, token) });
   const ctx = createContext({ db, uploadDir, hub, limits });
   /** Encryption at rest (see secretbox.js): ctx.box.seal/open for strings, sealBuffer/openBuffer for files. */
-  ctx.box = makeSecretBox(loadKey({ keyFile }));
+  ctx.box = box;
   // Membership lifecycle hooks: modules may export onMemberJoined / onMemberLeft(ctx, { familyId, userId, reason }).
   ctx.memberEvent = (kind, info) => {
     const hook = kind === 'joined' ? 'onMemberJoined' : 'onMemberLeft';
@@ -149,6 +193,8 @@ export function createApp({
     threshold: 1024,
     filter: (req, res) => {
       if (req.path === '/api/stream' || String(res.getHeader('Content-Type') ?? '').startsWith('text/event-stream')) return false;
+      // Content-Range counts identity bytes, so a gzipped 206 would be corrupt.
+      if (res.statusCode === 206) return false;
       return compression.filter(req, res);
     },
   }));
@@ -222,7 +268,8 @@ export function createApp({
     } else if (err.type === 'entity.too.large') {
       message = 'Request body is too large';
     }
-    if (status >= 500) {
+    // 5xx details stay private unless the thrower marked the message safe (`expose: true`).
+    if (status >= 500 && err.expose !== true) {
       console.error(`[error] ${req.method} ${req.originalUrl}`, err);
       message = 'Something went wrong on our side';
     }

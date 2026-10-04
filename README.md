@@ -50,7 +50,9 @@ docker compose run --rm hearth node --disable-warning=ExperimentalWarning server
 ```
 
 Everything Hearth stores (the SQLite database and uploaded files) lives in the `hearth-data`
-volume mounted at `/app/data`, so it survives rebuilds and restarts — back that volume up.
+volume mounted at `/app/data`, so it survives rebuilds and restarts — back that volume up. The
+vault's encryption key is generated into that volume too (`/app/data/hearth.key`) unless you set
+`HEARTH_ENCRYPTION_KEY` in `docker-compose.yml` — see [Encryption at rest](#encryption-at-rest).
 The container runs as the unprivileged `node` user and has a health check on `/api/health`.
 Behind an HTTPS reverse proxy set `COOKIE_SECURE=1`, and `TRUST_PROXY` (e.g. `1`) if the proxy is
 another container or host, in `docker-compose.yml`.
@@ -93,10 +95,40 @@ scratch (other families are left untouched).
 | `CLIENT_DIST` | `client/dist` | Built web app to serve |
 | `COOKIE_SECURE` | unset | `1` to mark the session cookie `Secure` (HTTPS) |
 | `TRUST_PROXY` | `loopback` | Which reverse proxies may set `X-Forwarded-For` (used for rate limiting): `true`, `false`, a hop count like `1`, or a comma list of names/subnets (`loopback, 10.0.0.0/8`) |
+| `HEARTH_ENCRYPTION_KEY` | unset | Encryption-at-rest key, 32 bytes as 64 hex chars or base64 (`openssl rand -base64 32`). Unset: a key file is used (see [Encryption at rest](#encryption-at-rest)) |
+| `KEY_FILE` | `hearth.key` next to `DB_PATH` | Where the generated key file lives when `HEARTH_ENCRYPTION_KEY` is unset |
 | `HEARTH_RATE_LIMITS` | on | `off` disables login/register/join rate limiting (test instances only) |
 | `API_PORT` | `8080` | (dev only) where Vite proxies API calls |
 
-Relative paths resolve against the repository root. Back up by copying the `data/` folder.
+Relative paths resolve against the repository root. Back up by copying the `data/` folder
+(but read the next section about the key).
+
+## Encryption at rest
+
+The most sensitive data, in **Contacts & Docs**, is encrypted on disk with AES-256-GCM:
+
+- **Encrypted:** every document file in the vault, the free-text notes on documents, and the
+  contents (fields, secret or not, and text) of every info card.
+- **Not encrypted:** document names and info-card titles/types (listings and search need them),
+  contacts, photos, receipts, avatars, messages and everything else in the database.
+
+The key comes from `HEARTH_ENCRYPTION_KEY` if set. Otherwise Hearth creates a random key on first
+start in `hearth.key` next to the database (mode 0600; override the location with `KEY_FILE`).
+Data from older versions is encrypted automatically on the next start (backups taken before that
+still hold it unencrypted). Replaced plaintext files are deleted, but the filesystem frees their old
+disk blocks without wiping them, so disk images taken before the upgrade may still contain them. A
+vault file Hearth can't rewrite (e.g. wrong permissions) is left unencrypted and logged at startup.
+
+- **Losing the key means losing those files and cards** — there is no recovery. Keep a copy of the
+  key somewhere safe (e.g. your password manager).
+- Hearth checks the key on every start and refuses to run with the wrong one, or when `hearth.key`
+  is missing for a database that already holds encrypted data, rather than creating a new key.
+  Restore the original key to fix it.
+- For real protection keep the key **out of your backups**: anyone holding a backup that includes
+  `hearth.key` can decrypt everything. Set `HEARTH_ENCRYPTION_KEY` from your host's secret store,
+  or point `KEY_FILE` at a Docker secret (e.g. `/run/secrets/hearth_key`), or exclude `hearth.key` when backing up
+  `data/` and store the key separately. To move an existing install to the env var, set
+  `HEARTH_ENCRYPTION_KEY` to the contents of its `hearth.key` (then move the file out of `data/`).
 
 ## Tech
 

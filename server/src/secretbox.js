@@ -27,10 +27,17 @@ function parseKey(raw) {
   return key;
 }
 
-/** The instance key: env var first, else the key file (generated when missing). */
-export function loadKey({ keyFile, env = process.env.HEARTH_ENCRYPTION_KEY } = {}) {
+/**
+ * The instance key: env var first, else the key file. A missing key file is generated, unless
+ * `create` is false (the database already holds encrypted data): then it throws instead.
+ */
+export function loadKey({ keyFile, env = process.env.HEARTH_ENCRYPTION_KEY, create = true } = {}) {
   if (env) return parseKey(env);
   if (fs.existsSync(keyFile)) return parseKey(fs.readFileSync(keyFile, 'utf8'));
+  if (!create) {
+    throw new Error(`The encryption key file ${keyFile} is missing, but this database already holds encrypted data. `
+      + 'Restore the original hearth.key (or set HEARTH_ENCRYPTION_KEY / KEY_FILE). A new key would make that data unreadable.');
+  }
   const key = crypto.randomBytes(32);
   fs.mkdirSync(path.dirname(keyFile), { recursive: true });
   fs.writeFileSync(keyFile, `${key.toString('base64')}\n`, { mode: 0o600, flag: 'wx' });

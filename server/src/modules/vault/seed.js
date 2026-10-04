@@ -1,7 +1,6 @@
 // Demo content for the Rivera family: contacts, folders, generated documents (real PDFs, SVG
 // "scans", text/CSV files — no network) and info cards.
-import path from 'node:path';
-import { extOf, moveIntoVault } from './files.js';
+import { extOf, writeVaultFile } from './files.js';
 
 // ---- tiny file generators -------------------------------------------------------------------
 
@@ -202,11 +201,10 @@ export async function seedVault(ctx, { familyId, users }) {
   const docIds = {};
   for (const d of docs) {
     const ext = extOf(d.file);
-    const url = ctx.storeFile(familyId, d.buf, `.${ext}`);
-    const key = moveIntoVault(ctx.uploadDir, familyId, path.join(ctx.uploadDir, url.slice('/uploads/'.length)));
+    const key = writeVaultFile(ctx.uploadDir, familyId, ctx.box, d.buf, ext);
     const at = ago(d.at, 2);
     docIds[d.file] = Number(insDoc.run(familyId, d.folder ? folders[d.folder] : null, d.name, d.file, ext, MIME[ext] ?? 'application/octet-stream', d.buf.length, key,
-      d.by.id, d.private ?? 0, d.adults ?? 0, d.notes ?? null, d.expires ?? null, at, at).lastInsertRowid);
+      d.by.id, d.private ?? 0, d.adults ?? 0, ctx.box.seal(d.notes ?? null), d.expires ?? null, at, at).lastInsertRowid);
   }
   // Pretend the car-insurance reminder already went out, so a fresh seed doesn't immediately
   // notify; Alex's passport reminder is left for the sweep to deliver.
@@ -227,7 +225,8 @@ export async function seedVault(ctx, { familyId, users }) {
   const noteIds = {};
   for (const n of notes) {
     const at = ago(n.at);
-    noteIds[n.title] = Number(insNote.run(familyId, n.title, n.kind, JSON.stringify(n.fields.map(([label, value, secret]) => ({ label, value, secret }))), n.body ?? null,
+    const fields = JSON.stringify(n.fields.map(([label, value, secret]) => ({ label, value, secret })));
+    noteIds[n.title] = Number(insNote.run(familyId, n.title, n.kind, ctx.box.seal(fields), ctx.box.seal(n.body ?? null),
       n.private ?? 0, n.adults ?? 0, n.by.id, at, at).lastInsertRowid);
   }
 

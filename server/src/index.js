@@ -1,7 +1,13 @@
-import { createApp } from './app.js';
+import { KEY_ERROR, createApp } from './app.js';
 import { config } from './config.js';
 
-const app = createApp();
+let app;
+try {
+  app = createApp();
+} catch (err) {
+  console.error(err.code === KEY_ERROR ? `Hearth could not start: ${err.message}` : err);
+  process.exit(1);
+}
 const server = app.listen(config.port, () => {
   console.log(`Hearth listening on http://localhost:${config.port}`);
   console.log(`  db: ${config.dbPath}\n  uploads: ${config.uploadDir}`);

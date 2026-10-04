@@ -14,12 +14,20 @@
 // family-visible items create activity / notifications, and when an item stops being
 // family-visible or is deleted its Wall entries and other people's notifications are scrubbed.
 // Files are served exclusively through /api/vault/documents/:id/file (see vault/files.js).
+//
+// Encryption at rest (ctx.box): document files, document notes and info-card `fields` + `body` are
+// stored sealed and decrypted when read (getDoc/getNote/openDoc/openNote). Document names and card
+// titles/kinds stay plaintext so listings, sorting and search work in SQL. Data written before
+// encryption is sealed in place at startup (sealLegacyVault).
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import { Router } from 'express';
+import multer from 'multer';
 import { ISO_NOW } from '../db.js';
+import { MAX_UPLOAD_BYTES } from '../uploads.js';
 import { cleanStr, httpError, isDate, isEmail, toId } from '../util.js';
 import {
-  contentDisposition, downloadName, extOf, fixFilename, kindOf, moveIntoVault, removeVaultFile, serveTypeFor, vaultPath,
+  contentDisposition, downloadName, extOf, fixFilename, kindOf, readVaultFile, removeVaultFile, sealLegacyFiles, serveTypeFor, vaultPath, writeVaultFile,
 } from './vault/files.js';
 import { seedVault } from './vault/seed.js';
 
@@ -115,6 +123,26 @@ const parseJson = (s, fallback) => {
     return fallback;
   }
 };
+/**
+ * Rows as stored -> plaintext (sealed columns opened). A value that can't be decrypted (corrupted,
+ * or sealed with another key) doesn't break the whole list: that item comes back empty with
+ * `unreadable: true`, logged once per item. The placeholders are never written back: PATCH keeps
+ * the stored ciphertext (409 for real new content), and the startup migration skips sealed values.
+ */
+const reported = new Set();
+function openRow(table, row, open) {
+  try {
+    return open();
+  } catch (err) {
+    if (!reported.has(`${table}:${row.id}`)) console.error(`[vault] can't decrypt ${table} ${row.id}: ${err.message}`);
+    reported.add(`${table}:${row.id}`);
+    return null;
+  }
+}
+const openDoc = (box, row) => openRow('vault_documents', row, () => ({ ...row, notes: box.open(row.notes) }))
+  ?? { ...row, notes: null, unreadable: true };
+const openNote = (box, row) => openRow('vault_notes', row, () => ({ ...row, fields: box.open(row.fields), body: box.open(row.body) }))
+  ?? { ...row, fields: '[]', body: null, unreadable: true };
 const isAdult = (req) => req.role === 'admin' || req.role === 'member';
 const visibilityOf = (row) => (row.is_private ? 'private' : row.adults_only ? 'adults' : 'family');
 
@@ -391,7 +419,16 @@ function scrubEntity(ctx, familyId, verbs, entityId, link, keepUserIds = []) {
 
 export function router(ctx) {
   const r = Router();
-  const { db } = ctx;
+  const { db, box } = ctx;
+  sealLegacyVault(ctx);
+  // Vault uploads stay in memory until sealed, so plaintext never touches the disk.
+  // ponytail: up to 25 MB of RAM per upload in flight; fine for a family server, stream-encrypt if not.
+  const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_UPLOAD_BYTES, files: 1 } });
+  /** Seal user text. Text that already looks sealed is refused: it would be *opened* on read (a decryption oracle). */
+  const sealInput = (v, field) => {
+    if (box.isSealed(v)) throw httpError(400, `${field} can't start with “enc:v1:”`);
+    return box.seal(v);
+  };
 
   const contactSelect = `SELECT c.*, (SELECT 1 FROM vault_contact_favorites v WHERE v.contact_id = c.id AND v.user_id = ?) AS is_fav FROM vault_contacts c`;
   const getContact = (req, id) => {
@@ -409,13 +446,13 @@ export function router(ctx) {
     const row = db.prepare(`SELECT d.*, f.name AS folder_name, f.color AS folder_color FROM vault_documents d LEFT JOIN vault_folders f ON f.id = d.folder_id
                              WHERE d.id = ? AND d.family_id = ? AND ${v.sql}`).get(toId(id), req.family.id, ...v.args);
     if (!row) throw httpError(404, 'Document not found');
-    return row;
+    return openDoc(box, row);
   };
   const getNote = (req, id) => {
     const v = visible(req);
     const row = db.prepare(`SELECT * FROM vault_notes WHERE id = ? AND family_id = ? AND ${v.sql}`).get(toId(id), req.family.id, ...v.args);
     if (!row) throw httpError(404, 'Note not found');
-    return row;
+    return openNote(box, row);
   };
   const forbidUnless = (ok, msg = "You can't change something another family member added") => {
     if (!ok) throw httpError(403, msg);
@@ -447,7 +484,7 @@ export function router(ctx) {
       folders: db.prepare('SELECT COUNT(*) n FROM vault_folders WHERE family_id = ?').get(fid).n,
       documents: db.prepare(`SELECT COUNT(*) n FROM vault_documents WHERE family_id = ? AND ${v.sql}`).get(fid, ...v.args).n,
       notes: db.prepare(`SELECT COUNT(*) n FROM vault_notes WHERE family_id = ? AND ${v.sql}`).get(fid, ...v.args).n,
-      expiring: expiringDocs(ctx, req).map((d) => documentOut(d, req)),
+      expiring: expiringDocs(ctx, req).map((d) => documentOut(openDoc(box, d), req)),
     });
   });
 
@@ -629,11 +666,8 @@ export function router(ctx) {
       where.push('d.folder_id = ?');
       args.push(getFolder(req, folder).id);
     }
-    const term = typeof req.query.q === 'string' ? req.query.q.trim().slice(0, 100) : '';
-    if (term) {
-      where.push(`(d.name LIKE '%' || ? || '%' OR d.original_name LIKE '%' || ? || '%' OR IFNULL(d.notes,'') LIKE '%' || ? || '%')`);
-      args.push(term, term, term);
-    }
+    // Notes are sealed, so the text filter runs in JS after decrypting.
+    const term = typeof req.query.q === 'string' ? req.query.q.trim().slice(0, 100).toLowerCase() : '';
     if (req.query.private === '1') where.push('d.is_private = 1');
     if (req.query.mine === '1') {
       where.push('d.owner_id = ?');
@@ -641,8 +675,13 @@ export function router(ctx) {
     }
     const sort = { name: 'd.name COLLATE NOCASE ASC', size: 'd.size DESC', recent: 'd.created_at DESC' }[req.query.sort] ?? 'd.created_at DESC';
     const limit = Math.min(Math.max(Number(req.query.limit) || 500, 1), 500);
+    // ponytail: with a search term every visible row is decrypted and filtered in JS (fine for a
+    // family's few hundred documents); add a plaintext search index if vaults grow to many thousands.
     const rows = db.prepare(`SELECT d.*, f.name AS folder_name, f.color AS folder_color FROM vault_documents d LEFT JOIN vault_folders f ON f.id = d.folder_id
-                              WHERE ${where.join(' AND ')} ORDER BY ${sort}, d.id DESC LIMIT ${limit}`).all(...args);
+                              WHERE ${where.join(' AND ')} ORDER BY ${sort}, d.id DESC ${term ? '' : `LIMIT ${limit}`}`).all(...args)
+      .map((row) => openDoc(box, row))
+      .filter((d) => !term || [d.name, d.original_name, d.notes ?? ''].some((t) => t.toLowerCase().includes(term)))
+      .slice(0, limit);
     res.json(rows.map((row) => documentOut(row, req)));
   });
 
@@ -679,7 +718,7 @@ export function router(ctx) {
     });
   }
 
-  r.post('/documents', ctx.upload.single('file'), (req, res) => {
+  r.post('/documents', upload.single('file'), (req, res) => {
     if (!req.file) throw httpError(400, 'Please choose a file to upload');
     if (!req.file.size) throw httpError(400, 'That file is empty');
     const original = fixFilename(req.file.originalname).slice(0, 200) || 'Untitled';
@@ -689,11 +728,11 @@ export function router(ctx) {
     const folderId = folderFromBody(req, req.body?.folder_id) ?? null;
     const visibility = visibilityInput(req.body ?? {}, req) ?? 'family';
     const cols = visibilityCols(visibility);
-    const notes = cleanStr(req.body?.notes, { field: 'Notes', max: 1000 });
+    const notes = sealInput(cleanStr(req.body?.notes, { field: 'Notes', max: 1000 }), 'Notes');
     const expires = cleanExpiry(req.body?.expires_on || undefined) ?? null;
     const mime = typeof req.file.mimetype === 'string' ? req.file.mimetype.slice(0, 100) : 'application/octet-stream';
 
-    const key = moveIntoVault(ctx.uploadDir, req.family.id, req.file.path);
+    const key = writeVaultFile(ctx.uploadDir, req.family.id, box, req.file.buffer, ext);
     let id;
     try {
       ({ lastInsertRowid: id } = db.prepare(
@@ -728,10 +767,26 @@ export function router(ctx) {
         ? "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; object-src 'self'"
         : "default-src 'none'; img-src 'self' data:; media-src 'self'; style-src 'unsafe-inline'; sandbox",
       'Cross-Origin-Resource-Policy': 'same-origin',
+      'Accept-Ranges': 'bytes',
+      // A stored file never changes (each upload gets a fresh key), so a hash of the key identifies the content.
+      ETag: `"${crypto.createHash('sha256').update(doc.storage_key).digest('base64url').slice(0, 27)}"`,
     });
-    res.sendFile(abs, { headers: { 'Content-Type': type }, dotfiles: 'allow' }, (err) => {
-      if (err && !res.headersSent) res.status(404).json({ error: 'This file is missing' });
-    });
+    if (req.fresh) return res.status(304).end(); // the browser's copy is current: skip decrypting
+    const file = readVaultFile(ctx.uploadDir, req.family.id, box, doc.storage_key);
+    if (!file) throw httpError(404, 'This file is missing');
+    // Single byte ranges for media seeking / PDF viewers. Multi-range or malformed headers get the
+    // whole file (allowed by RFC 9110), as does an If-Range that doesn't match our ETag.
+    const ranges = req.headers['if-range'] && req.headers['if-range'] !== res.get('ETag') ? undefined : req.range(file.length, { combine: true });
+    if (ranges === -1) {
+      res.set('Content-Range', `bytes */${file.length}`);
+      return res.status(416).end();
+    }
+    if (Array.isArray(ranges) && ranges.type === 'bytes' && ranges.length === 1) {
+      const { start, end } = ranges[0];
+      res.status(206).set('Content-Range', `bytes ${start}-${end}/${file.length}`);
+      return res.send(file.subarray(start, end + 1));
+    }
+    res.send(file);
   });
 
   r.patch('/documents/:id', (req, res) => {
@@ -743,7 +798,12 @@ export function router(ctx) {
     if (body.name !== undefined) sets.name = cleanStr(body.name, { field: 'Name', required: true, max: 120 });
     const folderId = folderFromBody(req, body.folder_id);
     if (folderId !== undefined) sets.folder_id = folderId;
-    if (body.notes !== undefined) sets.notes = cleanStr(body.notes, { field: 'Notes', max: 1000 });
+    if (body.notes !== undefined) {
+      const notes = cleanStr(body.notes, { field: 'Notes', max: 1000 });
+      if (!before.unreadable) sets.notes = sealInput(notes, 'Notes');
+      // Unreadable: an empty value is just the placeholder sent back; anything else would destroy the ciphertext.
+      else if (notes) throw httpError(409, "This document's notes can't be decrypted — restore the encryption key or a backup before editing them");
+    }
     const expires = cleanExpiry(body.expires_on);
     if (expires !== undefined) {
       sets.expires_on = expires;
@@ -792,7 +852,7 @@ export function router(ctx) {
   r.get('/notes', (req, res) => {
     const v = visible(req);
     const rows = db.prepare(`SELECT * FROM vault_notes WHERE family_id = ? AND ${v.sql} ORDER BY updated_at DESC, id DESC`).all(req.family.id, ...v.args);
-    res.json(rows.map((row) => noteOut(row, req)));
+    res.json(rows.map((row) => noteOut(openNote(box, row), req)));
   });
 
   const noteInput = (body = {}, partial = false) => {
@@ -816,7 +876,7 @@ export function router(ctx) {
     const visibility = visibilityInput(req.body ?? {}, req) ?? 'family';
     const cols = visibilityCols(visibility);
     const { lastInsertRowid } = db.prepare('INSERT INTO vault_notes (family_id, title, kind, fields, body, is_private, adults_only, owner_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(req.family.id, n.title, n.kind, n.fields, n.body, cols.is_private, cols.adults_only, req.user.id);
+      .run(req.family.id, n.title, n.kind, box.seal(n.fields), sealInput(n.body, 'Note'), cols.is_private, cols.adults_only, req.user.id);
     const row = getNote(req, lastInsertRowid);
     emit(req, 'vault.note.created', { id: row.id, visibility, ownerId: req.user.id });
     if (visibility === 'family') {
@@ -844,8 +904,18 @@ export function router(ctx) {
       forbidUnless(before.owner_id === req.user.id, 'Only the person who added this card can change who sees it');
       Object.assign(n, visibilityCols(vis));
     }
+    if (before.unreadable) {
+      // Keep the stored ciphertext: empty fields/body are the placeholders sent back, real content is refused.
+      if ((n.fields !== undefined && n.fields !== '[]') || n.body) {
+        throw httpError(409, "This card can't be decrypted — restore the encryption key or a backup before editing its contents");
+      }
+      delete n.fields;
+      delete n.body;
+    }
     const merged = { fields: n.fields ?? before.fields, body: n.body !== undefined ? n.body : before.body };
-    if (!parseJson(merged.fields, []).length && !merged.body) throw httpError(400, 'Add at least one field or some text');
+    if (!before.unreadable && !parseJson(merged.fields, []).length && !merged.body) throw httpError(400, 'Add at least one field or some text');
+    if (n.fields !== undefined) n.fields = box.seal(n.fields);
+    if (n.body !== undefined) n.body = sealInput(n.body, 'Note');
     const keys = Object.keys(n);
     if (keys.length) {
       db.prepare(`UPDATE vault_notes SET ${keys.map((k) => `${k} = ?`).join(', ')}, updated_at = ? WHERE id = ? AND family_id = ?`)
@@ -883,6 +953,44 @@ export function router(ctx) {
   setInterval(sweep, 60 * 60_000).unref?.();
 
   return r;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Encryption at rest: one-time migration
+
+/**
+ * Seal info cards, document notes and vault files stored before encryption at rest. Runs at every
+ * startup but only touches plaintext (isSealed / sealed file header), so a second run is a no-op;
+ * the DB part is one transaction and each file is replaced atomically, so a crash is harmless.
+ * The old plaintext would linger in the database file's free pages, so the sealing transaction also
+ * records `vacuum_pending` in app_meta, cleared only once VACUUM succeeded (retried every start).
+ * ponytail: scans every note/document row and vault file header at startup (cheap for family-sized
+ * vaults); keep a "done" flag in app_meta if that ever shows up in boot time.
+ */
+export function sealLegacyVault(ctx) {
+  const { db, box } = ctx;
+  let sealed = 0;
+  ctx.tx(db, () => {
+    const setNote = db.prepare('UPDATE vault_notes SET fields = ?, body = ? WHERE id = ?');
+    for (const n of db.prepare('SELECT id, fields, body FROM vault_notes').all()) {
+      if (!box.isSealed(n.fields) || (n.body != null && !box.isSealed(n.body))) sealed += Number(setNote.run(box.seal(n.fields), box.seal(n.body), n.id).changes);
+    }
+    const setDoc = db.prepare('UPDATE vault_documents SET notes = ? WHERE id = ?');
+    for (const d of db.prepare('SELECT id, notes FROM vault_documents WHERE notes IS NOT NULL').all()) {
+      if (!box.isSealed(d.notes)) sealed += Number(setDoc.run(box.seal(d.notes), d.id).changes);
+    }
+    if (sealed) db.prepare("INSERT OR REPLACE INTO app_meta (key, value) VALUES ('vacuum_pending', ?)").run(new Date().toISOString());
+  });
+  if (db.prepare("SELECT 1 FROM app_meta WHERE key = 'vacuum_pending'").get()) {
+    try {
+      db.exec('VACUUM');
+      db.exec("DELETE FROM app_meta WHERE key = 'vacuum_pending'");
+      db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+    } catch (err) {
+      console.error(`[vault] could not compact the database (old plaintext may remain until the next start): ${err.message}`);
+    }
+  }
+  sealLegacyFiles(ctx.uploadDir, box);
 }
 
 // ---------------------------------------------------------------------------------------------

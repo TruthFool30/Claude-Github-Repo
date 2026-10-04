@@ -330,6 +330,14 @@ export function router(ctx) {
     `publicUser(row)` — strip secrets. (`purge()` from `../purge.js` runs its own transaction and
     throws if called inside `tx()`.)
   - `rateLimit(rule, req => key)` — middleware using a rule from `DEFAULT_LIMITS` in `app.js`.
+  - `box` — encryption at rest (AES-256-GCM, one instance key; `secretbox.js`). `box.seal(str)` →
+    `'enc:v1:…'` (null stays null, never double-seals), `box.open(v)` (plaintext passes through, so
+    legacy rows keep working); `box.sealBuffer(buf)` / `box.openBuffer(buf)` for files;
+    `box.isSealed(v)` / `box.isSealedBuffer(buf)`. Seal sensitive columns/files on write and open them
+    on read; sealed values can't be searched or sorted in SQL, so keep what listings need plaintext.
+    Refuse user input that already looks sealed (it would be *opened* on read). Startup checks the
+    key against a canary in `app_meta` and refuses to run with the wrong one. Used by the vault
+    (see `modules/vault.js`).
 - **Errors**: `throw httpError(status, 'Message')` (or `ctx.httpError`) anywhere in a handler, or
   `res.status(4xx).json({ error })`. Unknown errors → 500 `{ error: 'Something went wrong on our side' }`.
 - **Timestamps**: core tables store ISO-8601 UTC (`2026-09-29T07:41:00.123Z`). Use `ISO_NOW` as the
