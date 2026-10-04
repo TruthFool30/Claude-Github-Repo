@@ -1,0 +1,13 @@
+node_modules/
+data/
+dist/
+*.db
+*.db-shm
+*.db-wal
+test-results/
+screenshots/
+playwright-report/
+.DS_Store
+*.log
+.env
+.claude/worktrees/

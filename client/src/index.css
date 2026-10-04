@@ -1,0 +1,220 @@
+@import 'tailwindcss';
+
+/* Dark mode is driven by a `.dark` class on <html> (see lib/theme.tsx). */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* ------------------------------------------------------------------
+   Design tokens (raw values). Light first, then dark overrides.
+   Use them through the Tailwind classes generated in @theme below:
+   bg-bg, bg-surface, bg-surface-2, bg-surface-3, text-fg, text-muted,
+   text-subtle, border-border, border-border-strong, bg-primary,
+   text-primary, bg-primary-soft, text-on-primary, ring-ring, bg-danger,
+   text-danger, bg-danger-soft, success/warning/info (+ -soft) …
+   ------------------------------------------------------------------ */
+:root {
+  --bg: #f7f7fb;
+  --surface: #ffffff;
+  --surface-2: #f2f2f8;
+  --surface-3: #e9e9f2;
+  --overlay: rgb(15 17 23 / 0.45);
+  --border: #e6e6ef;
+  --border-strong: #d4d4e0;
+  --fg: #1a1b26;
+  --muted: #545766;
+  --subtle: #676a7c;
+  --primary: #5b5bd6;
+  --primary-hover: #4d4dc4;
+  /* Filled backgrounds carrying white text/icons (buttons, checkboxes, badges): ≥4.5:1 with white. */
+  --primary-solid: #5b5bd6;
+  --primary-solid-hover: #4d4dc4;
+  --primary-soft: #ededfc;
+  --primary-soft-fg: #4040b0;
+  --on-primary: #ffffff;
+  --ring: rgb(91 91 214 / 0.45);
+  --danger: #ce2c31;
+  --danger-hover: #b8262b;
+  --danger-solid: #ce2c31;
+  --danger-solid-hover: #b8262b;
+  --danger-soft: #feeceb;
+  --danger-soft-fg: #c62a2f;
+  --success: #30a46c;
+  --success-soft: #e6f6ec;
+  --success-soft-fg: #1d7a4d;
+  --warning: #f76b15;
+  --warning-soft: #fff1e6;
+  --warning-soft-fg: #bd4b00;
+  --info: #0090ff;
+  --info-soft: #e6f4ff;
+  --info-soft-fg: #0068c7;
+  --shadow-color: 230 20% 30%;
+  color-scheme: light;
+}
+
+.dark {
+  --bg: #0f1117;
+  --surface: #171a23;
+  --surface-2: #1e222d;
+  --surface-3: #272b38;
+  --overlay: rgb(0 0 0 / 0.6);
+  --border: #262a36;
+  --border-strong: #353a49;
+  --fg: #ecedf3;
+  --muted: #a3a7b7;
+  --subtle: #8a8fa1;
+  --primary: #8b8bf2;
+  --primary-hover: #a0a0f5;
+  --primary-solid: #5b5bd6;
+  --primary-solid-hover: #6666dc;
+  --primary-soft: #23244a;
+  --primary-soft-fg: #b3b3ff;
+  --on-primary: #ffffff;
+  --ring: rgb(129 129 240 / 0.55);
+  --danger: #ec5d5e;
+  --danger-hover: #f07172;
+  --danger-solid: #ce2c31;
+  --danger-solid-hover: #dc3e42;
+  --danger-soft: #3b1a1c;
+  --danger-soft-fg: #ff9592;
+  --success: #3dd68c;
+  --success-soft: #132d21;
+  --success-soft-fg: #4cc38a;
+  --warning: #ff8b3e;
+  --warning-soft: #33200f;
+  --warning-soft-fg: #ffa057;
+  --info: #3b9eff;
+  --info-soft: #0f2139;
+  --info-soft-fg: #70b8ff;
+  --shadow-color: 230 40% 2%;
+  color-scheme: dark;
+}
+
+@theme inline {
+  --font-sans: 'Inter Variable', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+  --color-overlay: var(--overlay);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-fg: var(--fg);
+  --color-muted: var(--muted);
+  --color-subtle: var(--subtle);
+  --color-primary: var(--primary);
+  --color-primary-hover: var(--primary-hover);
+  --color-primary-solid: var(--primary-solid);
+  --color-primary-solid-hover: var(--primary-solid-hover);
+  --color-primary-soft: var(--primary-soft);
+  --color-primary-soft-fg: var(--primary-soft-fg);
+  --color-on-primary: var(--on-primary);
+  --color-ring: var(--ring);
+  --color-danger: var(--danger);
+  --color-danger-hover: var(--danger-hover);
+  --color-danger-solid: var(--danger-solid);
+  --color-danger-solid-hover: var(--danger-solid-hover);
+  --color-danger-soft: var(--danger-soft);
+  --color-danger-soft-fg: var(--danger-soft-fg);
+  --color-success: var(--success);
+  --color-success-soft: var(--success-soft);
+  --color-success-soft-fg: var(--success-soft-fg);
+  --color-warning: var(--warning);
+  --color-warning-soft: var(--warning-soft);
+  --color-warning-soft-fg: var(--warning-soft-fg);
+  --color-info: var(--info);
+  --color-info-soft: var(--info-soft);
+  --color-info-soft-fg: var(--info-soft-fg);
+
+  --shadow-xs: 0 1px 2px hsl(var(--shadow-color) / 0.06);
+  --shadow-card: 0 1px 2px hsl(var(--shadow-color) / 0.05), 0 2px 8px -2px hsl(var(--shadow-color) / 0.06);
+  --shadow-lift: 0 2px 4px hsl(var(--shadow-color) / 0.05), 0 12px 28px -8px hsl(var(--shadow-color) / 0.16);
+  --shadow-pop: 0 4px 12px hsl(var(--shadow-color) / 0.08), 0 24px 56px -12px hsl(var(--shadow-color) / 0.28);
+}
+
+@theme {
+  --animate-fade-in: fade-in 180ms ease-out both;
+  --animate-fade-out: fade-out 160ms ease-in both;
+  --animate-scale-in: scale-in 200ms cubic-bezier(0.2, 0.9, 0.3, 1.15) both;
+  --animate-scale-out: scale-out 140ms ease-in both;
+  --animate-sheet-in: sheet-in 320ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  --animate-sheet-out: sheet-out 220ms cubic-bezier(0.4, 0, 1, 1) both;
+  --animate-pop-in: pop-in 160ms cubic-bezier(0.2, 0.9, 0.3, 1.1) both;
+  --animate-toast-in: toast-in 280ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  --animate-shimmer: shimmer 1.6s ease-in-out infinite;
+  --animate-check: check 240ms cubic-bezier(0.2, 0.9, 0.3, 1.3) both;
+
+  @keyframes fade-in { from { opacity: 0 } to { opacity: 1 } }
+  @keyframes fade-out { from { opacity: 1 } to { opacity: 0 } }
+  @keyframes scale-in { from { opacity: 0; transform: translateY(8px) scale(0.97) } to { opacity: 1; transform: none } }
+  @keyframes scale-out { from { opacity: 1; transform: none } to { opacity: 0; transform: translateY(4px) scale(0.98) } }
+  @keyframes sheet-in { from { transform: translateY(100%) } to { transform: translateY(0) } }
+  @keyframes sheet-out { from { transform: translateY(var(--sheet-drag, 0px)) } to { transform: translateY(100%) } }
+  @keyframes pop-in { from { opacity: 0; transform: translateY(-4px) scale(0.98) } to { opacity: 1; transform: none } }
+  @keyframes toast-in { from { opacity: 0; transform: translateY(16px) scale(0.96) } to { opacity: 1; transform: none } }
+  @keyframes shimmer { 0% { background-position: 150% 0 } 100% { background-position: -50% 0 } }
+  @keyframes check { 0% { transform: scale(0.4); opacity: 0 } 100% { transform: scale(1); opacity: 1 } }
+}
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+    -webkit-tap-highlight-color: transparent;
+    text-rendering: optimizeLegibility;
+  }
+  body {
+    @apply bg-bg text-fg font-sans antialiased;
+    font-feature-settings: 'cv11', 'ss01';
+    min-height: 100dvh;
+    /* Never let a wide child create sideways scrolling on phones (clip keeps position:sticky working). */
+    overflow-x: clip;
+  }
+  :focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
+  }
+  button, [role='button'] {
+    cursor: pointer;
+  }
+  button:disabled {
+    cursor: not-allowed;
+  }
+  ::selection {
+    background: var(--primary-soft);
+    color: var(--fg);
+  }
+  input[type='date']::-webkit-calendar-picker-indicator,
+  input[type='time']::-webkit-calendar-picker-indicator {
+    opacity: 0.55;
+    cursor: pointer;
+  }
+  .dark input[type='date']::-webkit-calendar-picker-indicator,
+  .dark input[type='time']::-webkit-calendar-picker-indicator {
+    opacity: 0.8; /* color-scheme: dark already renders a light icon */
+  }
+}
+
+@layer utilities {
+  /* Hide scrollbars but keep scrolling (chip rows, carousels). */
+  .scrollbar-none { scrollbar-width: none; }
+  .scrollbar-none::-webkit-scrollbar { display: none; }
+  /* Subtle thin scrollbars for panels. */
+  .scrollbar-thin { scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
+  .pb-safe { padding-bottom: env(safe-area-inset-bottom); }
+  .pt-safe { padding-top: env(safe-area-inset-top); }
+  .tabular { font-variant-numeric: tabular-nums; }
+  .skeleton-shimmer {
+    background: linear-gradient(90deg, var(--surface-2) 25%, var(--surface-3) 45%, var(--surface-2) 65%);
+    background-size: 300% 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 1ms !important;
+    transition-duration: 1ms !important;
+  }
+}
+
+/* Leaflet: make popups/tiles match the theme a bit better. */
+.dark .leaflet-tile-pane { filter: brightness(0.8) contrast(1.1) saturate(0.8); }
+.leaflet-container { font-family: inherit; border-radius: inherit; }
