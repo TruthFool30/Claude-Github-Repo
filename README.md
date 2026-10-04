@@ -73,6 +73,23 @@ After `npm run seed` (password for all: **`hearth123`**):
 The demo family's invite code is `HRTH-2026`. Re-running the seed recreates the demo family from
 scratch (other families are left untouched).
 
+## Two-factor login
+
+Anyone can turn on two-factor login under **Settings → Two-factor login**: scan the QR code with an
+authenticator app (Google Authenticator, 1Password, Authy, …), enter a code, and save the 10 one-time
+recovery codes. After that, signing in asks for a code from the app (or a recovery code) after the password.
+Turning it on signs out your other devices.
+
+Locked out (lost phone *and* recovery codes)? Whoever runs the server can turn it off for that account:
+
+```bash
+npm run reset-2fa -- someone@example.com        # uses the same DB_PATH as the server
+# Docker: docker compose exec hearth node --disable-warning=ExperimentalWarning server/src/reset-2fa.js someone@example.com
+```
+
+Authenticator secrets are stored encrypted with the instance key (`HEARTH_ENCRYPTION_KEY` or the key
+file next to the database); if that key is lost, reset 2FA the same way.
+
 ## Scripts
 
 | Command | What it does |
@@ -82,6 +99,7 @@ scratch (other families are left untouched).
 | `npm start` | Runs the server; serves `client/dist` with SPA fallback when it exists |
 | `npm test` | Server API tests (`node --test server/test/*.test.js`) |
 | `npm run seed` | Creates/recreates the demo family in the database |
+| `npm run reset-2fa -- <email>` | Turns off two-factor login for one account (lockout escape hatch) |
 | `npm run typecheck` | `tsc --noEmit -p client` |
 | `npm run e2e` | Playwright regression checks against a running seeded instance (`BASE=http://localhost:8080`) |
 

@@ -12,7 +12,7 @@ import { createApp } from '../src/app.js';
 /** Rate limits are effectively disabled in tests unless a test passes its own `limits`. */
 const RELAXED = { max: 1e9, windowMs: 60_000 };
 export const TEST_LIMITS = {
-  'login-ip': RELAXED, 'login-email': RELAXED, 'register-ip': RELAXED, 'join-ip': RELAXED, 'invite-ip': RELAXED,
+  'login-ip': RELAXED, 'login-email': RELAXED, 'register-ip': RELAXED, 'join-ip': RELAXED, 'invite-ip': RELAXED, 'code-user': RELAXED,
 };
 
 export async function startServer(options = {}) {

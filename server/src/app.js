@@ -26,6 +26,7 @@ export const DEFAULT_LIMITS = {
   'register-ip': { max: 30, windowMs: 60 * 60_000 },
   'join-ip': { max: 60, windowMs: 10 * 60_000 },
   'invite-ip': { max: 120, windowMs: 10 * 60_000 },
+  'code-user': { max: 20, windowMs: 15 * 60_000 }, // wrong 2FA codes per account, any IP
 };
 
 /** HEARTH_RATE_LIMITS=off disables rate limiting (handy for scripted test instances). */
@@ -73,7 +74,7 @@ export function createContext({ db, uploadDir, hub = createHub(), limits = {} })
       for (const [rule, key] of entries) if (rules[rule] && key) limiter.hit(`${rule}:${key}`, rules[rule]);
     },
     succeed() {
-      for (const [rule, key] of entries) if (key && rule.endsWith('-email')) limiter.clear(`${rule}:${key}`);
+      for (const [rule, key] of entries) if (key && (rule.endsWith('-email') || rule.endsWith('-user'))) limiter.clear(`${rule}:${key}`);
     },
   });
   const ctx = {

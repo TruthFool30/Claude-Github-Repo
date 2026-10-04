@@ -34,7 +34,7 @@ export async function seedDemo(ctx, modules = defaultModules, { log = console.lo
   const users = {};
   const hash = hashPassword(DEMO_PASSWORD);
   const insertUser = db.prepare('INSERT INTO users (email, password_hash, name, color, birthday, phone) VALUES (?, ?, ?, ?, ?, ?)');
-  const resetUser = db.prepare('UPDATE users SET password_hash = ?, name = ?, color = ?, birthday = ?, phone = ?, avatar_url = NULL WHERE id = ?');
+  const resetUser = db.prepare('UPDATE users SET password_hash = ?, name = ?, color = ?, birthday = ?, phone = ?, avatar_url = NULL, totp_secret = NULL, totp_pending = NULL, totp_last_step = NULL, totp_recovery = NULL WHERE id = ?');
   for (const u of DEMO_USERS) {
     const existing = db.prepare('SELECT id FROM users WHERE email = ?').get(u.email);
     let id;

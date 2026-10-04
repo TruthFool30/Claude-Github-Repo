@@ -5,6 +5,7 @@ import {
 } from 'lucide-react';
 import { api, errorMessage } from '../lib/api';
 import { useAuth } from '../lib/auth';
+import { copy } from '../lib/clipboard';
 import { age, fmtDate, plural } from '../lib/format';
 import type { Family as FamilyT, Member, Role } from '../lib/types';
 import {
@@ -20,15 +21,6 @@ const roleMeta: Record<Role, { label: string; tone: 'primary' | 'neutral' | 'war
   member: { label: 'Member', tone: 'neutral', icon: Shield },
   child: { label: 'Child', tone: 'warning', icon: Smile },
 };
-
-async function copy(text: string, what: string) {
-  try {
-    await navigator.clipboard.writeText(text);
-    toast.success(`${what} copied`);
-  } catch {
-    toast.error('Could not copy — select and copy it manually');
-  }
-}
 
 export default function FamilyPage() {
   const { family, user, isAdmin, refresh, forgetFamily, expectFamilyExit } = useAuth();

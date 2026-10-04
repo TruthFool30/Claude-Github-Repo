@@ -265,7 +265,15 @@ await check('leave family via UI -> next family, one toast', async () => {
   try {
     await page.goto(`${BASE}/home`);
     await page.getByRole('button', { name: new RegExp(name) }).first().click();
-    await page.getByRole('menuitem', { name: /Rivera Family/ }).click();
+    // Wait for the switch to finish (server default saved + this tab's family stored) before reloading.
+    await Promise.all([
+      page.waitForResponse((r) => r.url().includes('/activate') && r.ok()),
+      page.getByRole('menuitem', { name: /Rivera Family/ }).click(),
+    ]);
+    await page.waitForFunction((id) => {
+      const v = sessionStorage.getItem('hearth-tab-family');
+      return v && v !== String(id);
+    }, side.id);
     await page.goto(`${BASE}/family`);
     await page.waitForSelector('main h2');
     await page.getByRole('button', { name: /^Leave Rivera Family$/ }).click();
