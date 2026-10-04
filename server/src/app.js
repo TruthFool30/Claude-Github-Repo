@@ -17,6 +17,7 @@ import { familiesRouter, familyRouter, invitePreviewHandler } from './core/famil
 import { activityRouter, dashboardHandler, notificationsRouter, searchHandler, streamHandler } from './core/feed.js';
 import { modules as defaultModules, validateModules } from './modules/index.js';
 import { config } from './config.js';
+import { loadKey, makeSecretBox } from './secretbox.js';
 
 /** Default rate limits (per key, fixed window). Override with createApp({ limits }). */
 export const DEFAULT_LIMITS = {
@@ -115,12 +116,15 @@ export function createApp({
   modules = defaultModules,
   limits = {},
   trustProxy = config.trustProxy,
+  keyFile = process.env.KEY_FILE || path.join(path.dirname(dbPath), 'hearth.key'),
 } = {}) {
   validateModules(modules);
   fs.mkdirSync(uploadDir, { recursive: true });
   const db = openDb(dbPath, modules);
   const hub = createHub({ isSessionValid: (token) => isSessionValid(db, token) });
   const ctx = createContext({ db, uploadDir, hub, limits });
+  /** Encryption at rest (see secretbox.js): ctx.box.seal/open for strings, sealBuffer/openBuffer for files. */
+  ctx.box = makeSecretBox(loadKey({ keyFile }));
   // Membership lifecycle hooks: modules may export onMemberJoined / onMemberLeft(ctx, { familyId, userId, reason }).
   ctx.memberEvent = (kind, info) => {
     const hook = kind === 'joined' ? 'onMemberJoined' : 'onMemberLeft';

@@ -769,7 +769,7 @@ export async function seed(ctx, { familyId, users }) {
         familyId, user, lat: round6(pos.lat), lng: round6(pos.lng), accuracy: Math.round(8 + rand() * 30),
         source: manual ? 'checkin' : 'live', note: current && manual ? NOTES[st.stop] ?? null : null,
         battery: null, createdAt: new Date(st.t).toISOString(), silent: true,
-        activity: now - st.t < 12 * 3600e3, // the Wall shows today's comings and goings
+        activity: current || now - st.t < 12 * 3600e3, // today's comings and goings, plus where everyone is now (early mornings have none yet)
       });
       if (now - st.t < 6 * 3600e3 && transitions.some((t) => t.kind === 'arrived')) recent.push({ user, checkin, place: transitions.find((t) => t.kind === 'arrived').place_name });
       // They stayed until shortly before the next stop (live sharing kept refreshing the spot).
