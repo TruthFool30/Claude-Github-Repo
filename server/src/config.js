@@ -22,7 +22,7 @@ export function parseTrustProxy(raw) {
 
 export const config = {
   trustProxy: parseTrustProxy(process.env.TRUST_PROXY),
-  port: Number(process.env.PORT || 3000),
+  port: Number(process.env.PORT || 8080),
   dbPath: fromRoot(process.env.DB_PATH || './data/hearth.db'),
   uploadDir: fromRoot(process.env.UPLOAD_DIR || './data/uploads'),
   clientDist: fromRoot(process.env.CLIENT_DIST || 'client/dist'),

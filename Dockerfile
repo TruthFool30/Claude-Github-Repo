@@ -1,6 +1,6 @@
 # Hearth — self-hosted family organizer.
 #   docker build -t hearth .
-#   docker run -p 3000:3000 -v hearth-data:/app/data hearth
+#   docker run -p 8080:8080 -v hearth-data:/app/data hearth
 # Data (SQLite database + uploads) lives in /app/data — mount a volume there.
 
 # ---- build: install everything, build the client ----
@@ -19,7 +19,7 @@ RUN npm run build \
 FROM node:22-slim AS runtime
 WORKDIR /app
 ENV NODE_ENV=production \
-    PORT=3000 \
+    PORT=8080 \
     DB_PATH=/app/data/hearth.db \
     UPLOAD_DIR=/app/data/uploads \
     PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
@@ -32,7 +32,7 @@ COPY --from=build /app/client/dist client/dist
 RUN mkdir -p /app/data && chown -R node:node /app/data
 USER node
 VOLUME ["/app/data"]
-EXPOSE 3000
+EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||3000)+'/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||8080)+'/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 CMD ["node", "--disable-warning=ExperimentalWarning", "server/src/index.js"]

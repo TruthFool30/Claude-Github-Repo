@@ -24,7 +24,7 @@ Requirements: **Node 22.13+** (uses the built-in `node:sqlite`, incl. custom SQL
 ```bash
 npm install
 npm run seed      # optional: creates the demo "Rivera Family"
-npm run dev       # API on http://localhost:3000 + web app on http://localhost:5173
+npm run dev       # API on http://localhost:8080 + web app on http://localhost:5173
 ```
 
 Open http://localhost:5173 and sign in with a demo account, or create your own account and family.
@@ -34,7 +34,7 @@ Open http://localhost:5173 and sign in with a demo account, or create your own a
 ```bash
 npm install
 npm run build     # builds the web app into client/dist
-npm start         # serves API + web app on http://localhost:3000
+npm start         # serves API + web app on http://localhost:8080
 ```
 
 Put it behind any reverse proxy with HTTPS (set `COOKIE_SECURE=1` so the session cookie is
@@ -44,7 +44,7 @@ marked `Secure`). SSE needs response buffering disabled on the proxy for `/api/s
 ## Docker
 
 ```bash
-docker compose up -d                 # builds the image and serves http://localhost:3000
+docker compose up -d                 # builds the image and serves http://localhost:8080
 # optional: load the demo Rivera family into the volume
 docker compose run --rm hearth node --disable-warning=ExperimentalWarning server/src/seed.js
 ```
@@ -55,7 +55,7 @@ The container runs as the unprivileged `node` user and has a health check on `/a
 Behind an HTTPS reverse proxy set `COOKIE_SECURE=1`, and `TRUST_PROXY` (e.g. `1`) if the proxy is
 another container or host, in `docker-compose.yml`.
 
-Without Compose: `docker build -t hearth . && docker run -d -p 3000:3000 -v hearth-data:/app/data hearth`.
+Without Compose: `docker build -t hearth . && docker run -d -p 8080:8080 -v hearth-data:/app/data hearth`.
 
 ## Demo logins
 
@@ -75,26 +75,26 @@ scratch (other families are left untouched).
 
 | Command | What it does |
 |---|---|
-| `npm run dev` | API (nodemon, port 3000) + Vite dev server (port 5173, proxies `/api` and `/uploads`) |
+| `npm run dev` | API (nodemon, port 8080) + Vite dev server (port 5173, proxies `/api` and `/uploads`) |
 | `npm run build` | Type-checks and builds the client into `client/dist` |
 | `npm start` | Runs the server; serves `client/dist` with SPA fallback when it exists |
 | `npm test` | Server API tests (`node --test server/test/*.test.js`) |
 | `npm run seed` | Creates/recreates the demo family in the database |
 | `npm run typecheck` | `tsc --noEmit -p client` |
-| `npm run e2e` | Playwright regression checks against a running seeded instance (`BASE=http://localhost:3000`) |
+| `npm run e2e` | Playwright regression checks against a running seeded instance (`BASE=http://localhost:8080`) |
 
 ## Configuration
 
 | Env var | Default | Purpose |
 |---|---|---|
-| `PORT` | `3000` | HTTP port |
+| `PORT` | `8080` | HTTP port |
 | `DB_PATH` | `./data/hearth.db` | SQLite database file |
 | `UPLOAD_DIR` | `./data/uploads` | Uploaded files (served only to family members) |
 | `CLIENT_DIST` | `client/dist` | Built web app to serve |
 | `COOKIE_SECURE` | unset | `1` to mark the session cookie `Secure` (HTTPS) |
 | `TRUST_PROXY` | `loopback` | Which reverse proxies may set `X-Forwarded-For` (used for rate limiting): `true`, `false`, a hop count like `1`, or a comma list of names/subnets (`loopback, 10.0.0.0/8`) |
 | `HEARTH_RATE_LIMITS` | on | `off` disables login/register/join rate limiting (test instances only) |
-| `API_PORT` | `3000` | (dev only) where Vite proxies API calls |
+| `API_PORT` | `8080` | (dev only) where Vite proxies API calls |
 
 Relative paths resolve against the repository root. Back up by copying the `data/` folder.
 

@@ -26,7 +26,7 @@ package.json            # root: workspaces + scripts (dev, build, start, test, s
 server/
   package.json
   src/
-    index.js            # boot: create app, listen on PORT (default 3000)
+    index.js            # boot: create app, listen on PORT (default 8080)
     app.js              # createApp({ dbPath }) -> express app (used by tests)
     db.js               # openDb(path), runs core + module migrations
     auth.js             # hashing, sessions, requireAuth / requireFamily middleware
@@ -41,7 +41,7 @@ server/
   test/
 client/
   package.json
-  vite.config.ts        # proxy /api and /uploads -> http://localhost:${API_PORT||3000}
+  vite.config.ts        # proxy /api and /uploads -> http://localhost:${API_PORT||8080}
   index.html
   src/
     main.tsx App.tsx
@@ -61,11 +61,11 @@ docs/
 ## Running
 
 - `npm install` at repo root.
-- `npm run dev` — server on :3000 (nodemon) + Vite on :5173 (proxying API).
-- `npm run build` — builds client to `client/dist`; `npm start` serves API + `client/dist` on :3000.
+- `npm run dev` — server on :8080 (nodemon) + Vite on :5173 (proxying API).
+- `npm run build` — builds client to `client/dist`; `npm start` serves API + `client/dist` on :8080.
 - `npm run seed` — creates demo family (see Seed data) in the DB.
 - `npm test` — server tests.
-- Env vars: `PORT` (3000), `DB_PATH` (`./data/hearth.db`), `UPLOAD_DIR` (`./data/uploads`),
+- Env vars: `PORT` (8080), `DB_PATH` (`./data/hearth.db`), `UPLOAD_DIR` (`./data/uploads`),
   `CLIENT_DIST` (`client/dist`). Tests/critics use temp `DB_PATH`/`UPLOAD_DIR` and unique ports so
   several instances can run at once.
 
