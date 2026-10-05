@@ -396,7 +396,10 @@ test('uploads: bytes are verified, never the client type, name or dimensions', a
   // nothing was stored
   assert.equal((await a.get('/api/photos')).body.total, 0);
   const famDir = path.join(srv.dir, 'uploads', String((await a.get('/api/family')).body.id));
-  assert.equal(fs.existsSync(famDir) ? fs.readdirSync(famDir).length : 0, 0);
+  // Rejected uploads are removed just after the response is sent (app.js cleanup), so give it a moment.
+  const leftovers = () => (fs.existsSync(famDir) ? fs.readdirSync(famDir).length : 0);
+  for (let i = 0; i < 50 && leftovers(); i++) await new Promise((r) => setTimeout(r, 20));
+  assert.equal(leftovers(), 0);
 
   // a real PNG sent as "image/jpeg" named .jpg is stored as .png with its true size; client dims ignored
   const ok = await rawUpload(a, { file: { buf: good, type: 'image/jpeg', name: 'photo.jpg' }, width: 9999, height: 1 });

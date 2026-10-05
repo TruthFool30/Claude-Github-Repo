@@ -3,7 +3,7 @@
 // savings goals and kids' allowances. See docs/MODULE_SPECS.md ("budget").
 import { Router } from 'express';
 import { ISO_NOW } from '../db.js';
-import { cleanStr, httpError, isColor, toId } from '../util.js';
+import { cleanStr, firstName, httpError, isColor, toId } from '../util.js';
 import {
   BILL_SELECT, ICONS, KINDS, TX_SELECT, addMonths, billOut, billStatus, canManage, categoryOut, dateKey, dueDate,
   ensureDefaults, familyToday, fromCents, generateDue, isValidDate, monthEnd, monthLabel, monthOf, monthStart, money, parseMonth,
@@ -109,6 +109,9 @@ export const migrations = [
      last_paid_at TEXT,
      created_at TEXT NOT NULL DEFAULT ${ISO_NOW},
      UNIQUE (family_id, member_id))`,
+  `CREATE INDEX IF NOT EXISTS idx_budget_runs_tx ON budget_recurring_runs(transaction_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_budget_runs_family_month ON budget_recurring_runs(family_id, month)`,
+  `CREATE INDEX IF NOT EXISTS idx_budget_goals_family ON budget_goals(family_id)`,
 ];
 
 // --------------------------------------------------------------------------------------------
@@ -125,7 +128,6 @@ function assertMember(db, familyId, userId, field = 'Member') {
 }
 const adultIds = (db, familyId) => memberIds(db, familyId).filter((m) => m.role !== 'child').map((m) => m.user_id);
 const allIds = (db, familyId) => memberIds(db, familyId).map((m) => m.user_id);
-const firstName = (n) => String(n || '').trim().split(/\s+/)[0] || 'Someone';
 
 function requireManager(req, what = 'do that') {
   if (!canManage(req)) throw httpError(403, `Ask a parent to ${what}`);
@@ -155,26 +157,28 @@ function loadGoal(db, familyId, id) {
   return row;
 }
 
-function goalSaved(db, goalId) {
-  return db.prepare('SELECT COALESCE(SUM(amount_cents), 0) AS s FROM budget_goal_entries WHERE goal_id = ?').get(goalId).s;
-}
+/** Entry totals per goal: on goal rows from GOALS_SELECT, or `goalStats(db, id)` for a single one. */
+const GOAL_STATS = 'COALESCE(SUM(e.amount_cents), 0) AS saved_cents, COUNT(e.id) AS entry_count, MAX(e.created_at) AS last_entry_at';
+const GOALS_SELECT = `SELECT g.*, ${GOAL_STATS} FROM budget_goals g LEFT JOIN budget_goal_entries e ON e.goal_id = g.id`;
+const goalStats = (db, goalId) => db.prepare(`SELECT ${GOAL_STATS} FROM budget_goal_entries e WHERE e.goal_id = ?`).get(goalId);
+const goalSaved = (db, goalId) => goalStats(db, goalId).saved_cents;
 
 function goalOut(db, row, { entries = false } = {}) {
-  const saved = goalSaved(db, row.id);
+  const stats = row.entry_count === undefined ? goalStats(db, row.id) : row;
   const out = {
     id: row.id,
     name: row.name,
     emoji: row.emoji,
     color: row.color,
     target: fromCents(row.target_cents),
-    saved: fromCents(saved),
+    saved: fromCents(stats.saved_cents),
     owner_id: row.owner_id,
     target_date: row.target_date,
     completed_at: row.completed_at,
     created_by: row.created_by,
     created_at: row.created_at,
-    entry_count: db.prepare('SELECT COUNT(*) AS n FROM budget_goal_entries WHERE goal_id = ?').get(row.id).n,
-    last_entry_at: db.prepare('SELECT MAX(created_at) AS m FROM budget_goal_entries WHERE goal_id = ?').get(row.id).m,
+    entry_count: stats.entry_count,
+    last_entry_at: stats.last_entry_at,
   };
   if (entries) {
     out.entries = db
@@ -272,49 +276,27 @@ function canEditTx(req, row) {
 function buildSummary(db, familyId, month) {
   const start = monthStart(month);
   const end = monthEnd(month);
-  const totals = { income: 0, spent: 0 };
-  for (const r of db
-    .prepare(
-      `SELECT kind, SUM(amount_cents) AS s, COUNT(*) AS n FROM budget_transactions
-       WHERE family_id = ? AND deleted_at IS NULL AND date BETWEEN ? AND ? GROUP BY kind`,
-    )
-    .all(familyId, start, end)) {
-    if (r.kind === 'income') totals.income = r.s;
-    else totals.spent = r.s;
-  }
-  const count = db
-    .prepare('SELECT COUNT(*) AS n FROM budget_transactions WHERE family_id = ? AND deleted_at IS NULL AND date BETWEEN ? AND ?')
-    .get(familyId, start, end).n;
-
   const catRows = db.prepare('SELECT * FROM budget_categories WHERE family_id = ? ORDER BY sort, id').all(familyId);
-  const agg = new Map(
-    db
-      .prepare(
-        `SELECT category_id, SUM(amount_cents) AS s, COUNT(*) AS n FROM budget_transactions
-         WHERE family_id = ? AND deleted_at IS NULL AND date BETWEEN ? AND ? GROUP BY category_id, kind`,
-      )
-      .all(familyId, start, end)
-      .map((r) => [r.category_id ?? 0, r]),
-  );
-  const uncategorized = db
+  const catAgg = db
     .prepare(
-      `SELECT kind, SUM(amount_cents) AS s, COUNT(*) AS n FROM budget_transactions
-       WHERE family_id = ? AND deleted_at IS NULL AND category_id IS NULL AND date BETWEEN ? AND ? GROUP BY kind`,
+      `SELECT category_id, kind, SUM(amount_cents) AS s, COUNT(*) AS n FROM budget_transactions
+       WHERE family_id = ? AND deleted_at IS NULL AND date BETWEEN ? AND ? GROUP BY category_id, kind`,
     )
     .all(familyId, start, end);
+  const totals = { income: 0, spent: 0 };
+  let count = 0;
+  for (const r of catAgg) {
+    if (r.kind === 'income') totals.income += r.s;
+    else totals.spent += r.s;
+    count += r.n;
+  }
+  const agg = new Map(catAgg.map((r) => [r.category_id ?? 0, r]));
+  const uncategorized = catAgg.filter((r) => r.category_id === null);
 
   const categories = catRows.map((c) => {
     const a = agg.get(c.id);
     return { ...categoryOut(c), total: fromCents(a?.s ?? 0), count: a?.n ?? 0 };
   });
-
-  const prevMonth = addMonths(month, -1);
-  const prev = db
-    .prepare(
-      `SELECT COALESCE(SUM(CASE WHEN kind='expense' THEN amount_cents END), 0) AS spent
-       FROM budget_transactions WHERE family_id = ? AND deleted_at IS NULL AND date BETWEEN ? AND ?`,
-    )
-    .get(familyId, monthStart(prevMonth), monthEnd(prevMonth));
 
   const firstTrend = addMonths(month, -5);
   const trendRows = db
@@ -332,6 +314,8 @@ function buildSummary(db, familyId, month) {
       spent: fromCents(trendRows.find((r) => r.m === m && r.kind === 'expense')?.s ?? 0),
     });
   }
+  const prevMonth = addMonths(month, -1);
+  const prevSpent = trendRows.find((r) => r.m === prevMonth && r.kind === 'expense')?.s ?? 0;
 
   const byMember = db
     .prepare(
@@ -359,7 +343,7 @@ function buildSummary(db, familyId, month) {
       income: fromCents(totals.income),
       spent: fromCents(totals.spent),
       balance: fromCents(totals.income - totals.spent),
-      prev_spent: fromCents(prev.spent),
+      prev_spent: fromCents(prevSpent),
       budgeted: fromCents(totalLimit),
       count,
     },
@@ -948,7 +932,7 @@ export function router(ctx) {
 
   r.get('/goals', (req, res) => {
     const rows = db
-      .prepare('SELECT * FROM budget_goals WHERE family_id = ? ORDER BY (completed_at IS NOT NULL), created_at DESC, id DESC')
+      .prepare(`${GOALS_SELECT} WHERE g.family_id = ? GROUP BY g.id ORDER BY (g.completed_at IS NOT NULL), g.created_at DESC, g.id DESC`)
       .all(req.family.id);
     res.json(rows.map((g) => goalOut(db, g)));
   });
@@ -1249,9 +1233,10 @@ export function dashboard(ctx, req) {
       .filter((b) => ['overdue', 'due_today', 'upcoming'].includes(b.status) && b.kind === 'expense')
       .slice(0, 5)
       .map((b) => ({ id: b.id, description: b.description, amount: b.amount, due_date: b.due_date, status: b.status })),
+    // Ties (seeded goals share a timestamp) keep the order they always had: oldest id first.
     goals: db
-      .prepare('SELECT * FROM budget_goals WHERE family_id = ? AND completed_at IS NULL ORDER BY created_at DESC LIMIT 3')
+      .prepare(`${GOALS_SELECT} WHERE g.family_id = ? AND g.completed_at IS NULL GROUP BY g.id ORDER BY g.created_at DESC, g.id LIMIT 3`)
       .all(req.family.id)
-      .map((g) => ({ id: g.id, name: g.name, emoji: g.emoji, target: fromCents(g.target_cents), saved: fromCents(goalSaved(db, g.id)) })),
+      .map((g) => ({ id: g.id, name: g.name, emoji: g.emoji, target: fromCents(g.target_cents), saved: fromCents(g.saved_cents) })),
   };
 }

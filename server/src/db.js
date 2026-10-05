@@ -81,6 +81,7 @@ export const coreMigrations = [
   `ALTER TABLE users ADD COLUMN totp_pending TEXT`,
   `ALTER TABLE users ADD COLUMN totp_last_step INTEGER`,
   `ALTER TABLE users ADD COLUMN totp_recovery TEXT`,
+  `CREATE INDEX IF NOT EXISTS idx_activity_family_created ON activity(family_id, created_at DESC, id DESC)`,
 ];
 
 const NON_ALNUM = /[^\p{L}\p{N}]+/gu;

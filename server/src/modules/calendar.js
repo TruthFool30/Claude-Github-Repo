@@ -12,7 +12,7 @@
 // Member birthdays are added automatically as yearly all-day entries (kind: 'birthday').
 import { Router } from 'express';
 import { ISO_NOW } from '../db.js';
-import { cleanStr, httpError, isColor, isDate, toId } from '../util.js';
+import { cleanStr, httpError, isColor, isDate, parseJson, toId } from '../util.js';
 import {
   dayFromKey, dayKey, dayNum, dayTimeToUtc, describeWhen, isValidTz, localClock, localDay, occurrenceIndex, offsetMs,
   seriesDays, weekday, ymd, zonedParts,
@@ -69,15 +69,6 @@ export const migrations = [
 // ---------------------------------------------------------------------------------------------
 // Loading + expansion
 // ---------------------------------------------------------------------------------------------
-
-const parseJson = (s, fallback) => {
-  if (s === null || s === undefined) return fallback;
-  try {
-    return JSON.parse(s);
-  } catch {
-    return fallback;
-  }
-};
 
 /** Load event rows (optionally only some ids / a coarse date window) with attendees + exceptions. */
 function loadEvents(db, familyId, { ids, fromKey, toKey, withReminders } = {}) {
@@ -1466,6 +1457,3 @@ export function seed(ctx, { familyId, users }) {
     body: describeWhen({ all_day: true, start: dayKey(monday + 18) }, tz, false), link: linkTo('Lake Tahoe trip'),
   });
 }
-
-// Re-exported for tests.
-export const _internal = { zonedParts, seriesDays, makeRange };

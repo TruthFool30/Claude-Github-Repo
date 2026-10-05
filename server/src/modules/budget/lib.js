@@ -1,5 +1,5 @@
 // Budget module helpers: constants, validation, month math, serialization and the recurring-bill engine.
-import { httpError } from '../../util.js';
+import { httpError, isDate } from '../../util.js';
 
 /** Icon keys the client knows how to render (client/src/modules/budget/icons.tsx mirrors this list). */
 export const ICONS = [
@@ -111,13 +111,7 @@ export function requestToday(ctx, req) {
   return ctx.time?.today ? ctx.time.today(req) : dateKey();
 }
 
-function isValidDate(s) {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
-  const [y, m, d] = s.split('-').map(Number);
-  const dt = new Date(Date.UTC(y, m - 1, d));
-  return dt.getUTCFullYear() === y && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d && inRange(s);
-}
-export { isValidDate };
+export const isValidDate = (s) => isDate(s) && inRange(s);
 
 export function monthLabel(month) {
   const [y, m] = month.split('-').map(Number);
@@ -260,19 +254,23 @@ export function recordBillPayment(db, bill, month, { amountCents, date, userId, 
 export function generateDue(db, familyId, today = dateKey()) {
   const bills = db.prepare('SELECT * FROM budget_recurring WHERE family_id = ? AND active = 1 AND auto_create = 1').all(familyId);
   if (!bills.length) return [];
-  const hasRun = db.prepare('SELECT 1 FROM budget_recurring_runs WHERE recurring_id = ? AND month = ?');
   const created = [];
   const current = monthOf(today);
+  const earliest = addMonths(current, -12);
+  const runs = new Set(
+    db.prepare('SELECT recurring_id, month FROM budget_recurring_runs WHERE family_id = ? AND month >= ?')
+      .all(familyId, earliest).map((r) => `${r.recurring_id}|${r.month}`),
+  );
   db.exec('SAVEPOINT budget_gen');
   try {
     for (const bill of bills) {
       const since = (bill.generate_from || bill.created_at || '').slice(0, 10);
-      let month = bill.start_month > addMonths(current, -12) ? bill.start_month : addMonths(current, -12);
+      let month = bill.start_month > earliest ? bill.start_month : earliest;
       for (; month <= current; month = addMonths(month, 1)) {
         if (bill.end_month && month > bill.end_month) break;
         const due = dueDate(month, bill.day_of_month);
         if (due > today || due < since) continue;
-        if (hasRun.get(bill.id, month)) continue;
+        if (runs.has(`${bill.id}|${month}`)) continue;
         created.push(recordBillPayment(db, bill, month, {}));
       }
     }

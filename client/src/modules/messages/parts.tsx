@@ -1,6 +1,6 @@
 // Small shared presentational pieces for the messages module.
 import { Fragment, type ReactNode } from 'react';
-import { Home, Users } from 'lucide-react';
+import { Home } from 'lucide-react';
 import { format, isThisYear, isToday, isYesterday, differenceInCalendarDays } from 'date-fns';
 import { cn } from '../../lib/cn';
 import { readableOn } from '../../lib/color';
@@ -101,10 +101,6 @@ export function ConversationAvatar({ conv, meId, size = 48, className }: { conv:
       )}
     </span>
   );
-}
-
-export function GroupIcon({ size = 16 }: { size?: number }) {
-  return <Users size={size} aria-hidden />;
 }
 
 /** Subtitle under a conversation's title in the chat header. */

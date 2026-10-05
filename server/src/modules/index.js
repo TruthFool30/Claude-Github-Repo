@@ -18,6 +18,7 @@ import * as vault from './vault.js';
  * @property {(userIds:number[], type:string, payload?:any, familyId?:number|null) => void} sendToUsers  SSE to specific users
  * @property {(a:{familyId:number,userId?:number|null,module:string,verb:string,entityId?:number|null,summary:string,link?:string|null,createdAt?:string|null}) => object} logActivity
  * @property {(a:{familyId:number,userIds:number[],module?:string,title:string,body?:string|null,link?:string|null,excludeUserId?:number|null}) => object[]} notify
+ * @property {(familyId:number, rows:{id:number,user_id:number}[]) => void} removeNotifications  delete them + tell those users' bells
  * @property {import('multer').Multer} upload  stores to UPLOAD_DIR/<familyId>/, sets req.file.url
  * @property {(row:object) => object} publicUser
  * @property {(familyId:number, buffer:Buffer, ext?:string) => string} storeFile  write a file into the family's uploads, returns URL

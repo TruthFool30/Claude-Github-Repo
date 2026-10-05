@@ -9,7 +9,7 @@ import { isSessionValid, makeAuth, publicUser } from './auth.js';
 import { openDb, tx } from './db.js';
 import { createHub } from './realtime.js';
 import { makeLogActivity } from './activity.js';
-import { makeNotify } from './notifications.js';
+import { makeNotify, makeRemoveNotifications } from './notifications.js';
 import { imageOnly, makeRemoveFile, makeStoreFile, makeUpload, makeUploadServer, verifyImageUpload } from './uploads.js';
 import { TOO_MANY, createRateLimiter, httpError } from './util.js';
 import { authRouter } from './core/auth.js';
@@ -89,6 +89,7 @@ export function createContext({ db, uploadDir, hub = createHub(), limits = {} })
     sendToUsers: (userIds, type, payload, familyId) => hub.sendToUsers(userIds, type, payload, familyId),
     logActivity: makeLogActivity(db, hub),
     notify: makeNotify(db, hub),
+    removeNotifications: makeRemoveNotifications(db, hub),
     upload: makeUpload(uploadDir),
     avatarUpload: makeUpload(uploadDir, { scope: (req) => `users/${req.user.id}`, fileFilter: imageOnly }),
     coverUpload: makeUpload(uploadDir, { fileFilter: imageOnly }),

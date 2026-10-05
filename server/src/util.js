@@ -45,6 +45,19 @@ export function toId(value, field = 'id') {
 
 export const nowIso = () => new Date().toISOString();
 
+/** First word of a name ("Alex Rivera" → "Alex"), or `fallback` when there is none. */
+export const firstName = (name, fallback = 'Someone') => String(name ?? '').trim().split(/\s+/)[0] || fallback;
+
+/** JSON.parse that returns `fallback` for null/undefined or invalid JSON. */
+export function parseJson(s, fallback) {
+  if (s === null || s === undefined) return fallback;
+  try {
+    return JSON.parse(s);
+  } catch {
+    return fallback;
+  }
+}
+
 /**
  * Tiny in-memory fixed-window rate limiter.
  *   const limiter = createRateLimiter();

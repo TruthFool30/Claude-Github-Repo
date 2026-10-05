@@ -28,7 +28,7 @@ import path from 'node:path';
 import { Router } from 'express';
 import { ISO_NOW } from '../db.js';
 import { makeUpload } from '../uploads.js';
-import { cleanStr, httpError, isDate, toId } from '../util.js';
+import { cleanStr, firstName, httpError, isDate, toId } from '../util.js';
 import { dateIn } from '../time.js';
 import { hydrateActivity } from '../activity.js';
 import { encodePng, isIntactImage } from './photos/png.js';
@@ -84,6 +84,7 @@ export const migrations = [
   // Wall entry that announced this photo (so its "added N photos" count can be kept right).
   `ALTER TABLE photos ADD COLUMN activity_id INTEGER`,
   `CREATE INDEX IF NOT EXISTS photos_timeline ON photos(family_id, taken_date DESC, taken_at DESC, id DESC)`,
+  `CREATE INDEX IF NOT EXISTS photos_family_created ON photos(family_id, created_at DESC, id DESC)`,
 ];
 
 const BATCH_RE = /^[A-Za-z0-9_-]{6,48}$/;
@@ -189,12 +190,7 @@ export function router(ctx) {
       db.prepare(`UPDATE photos SET activity_id = NULL WHERE activity_id IN (${ids.map(() => '?').join(',')})`).run(...ids);
       ctx.broadcast(familyId, 'activity.removed', { ids });
     }
-    if (notes.length) {
-      db.prepare(`DELETE FROM notifications WHERE id IN (${notes.map(() => '?').join(',')})`).run(...notes.map((n) => n.id));
-      const byUser = new Map();
-      for (const n of notes) byUser.set(n.user_id, [...(byUser.get(n.user_id) ?? []), n.id]);
-      for (const [uid, ids] of byUser) ctx.sendToUsers([uid], 'notification.removed', { ids }, familyId);
-    }
+    ctx.removeNotifications(familyId, notes);
   }
 
   // Local capture dates for rows that predate the column, in each family's zone (not UTC).
@@ -619,7 +615,6 @@ export function router(ctx) {
   return r;
 }
 
-const firstName = (n) => String(n || '').trim().split(/\s+/)[0] || 'Someone';
 
 /** Shared SQL/serialization helpers (also used by seed/search/dashboard). */
 function makeHelpers(ctx) {

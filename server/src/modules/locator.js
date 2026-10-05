@@ -13,7 +13,7 @@
 // single check-ins or clear their whole history.
 import { Router } from 'express';
 import { ISO_NOW } from '../db.js';
-import { cleanStr, httpError, isColor, toId } from '../util.js';
+import { cleanStr, firstName, httpError, isColor, toId } from '../util.js';
 import { distanceMeters, nearestPlace, placeFor } from './locator/geo.js';
 
 export const name = 'locator';
@@ -77,6 +77,7 @@ export const migrations = [
      sharing INTEGER NOT NULL DEFAULT 1,
      updated_at TEXT NOT NULL DEFAULT ${ISO_NOW},
      PRIMARY KEY (family_id, user_id))`,
+  `CREATE INDEX IF NOT EXISTS idx_locator_events_checkin ON locator_events(checkin_id)`,
 ];
 
 // ---------------------------------------------------------------------------------------------
@@ -94,7 +95,6 @@ function num(value, field, { min, max, required = false, integer = false } = {})
   return n;
 }
 
-const firstName = (n) => String(n ?? '').trim().split(/\s+/)[0] || 'Someone';
 const round6 = (n) => Math.round(n * 1e6) / 1e6;
 
 function placeRow(p) {
@@ -155,11 +155,8 @@ export function scrubTraces(ctx, familyId, userId, checkinId = null) {
     .prepare(`SELECT id, user_id FROM notifications WHERE family_id = ? AND module = 'locator' AND ${checkinId ? 'link = ?' : '(link = ? OR link LIKE ?)'}`)
     .all(...(checkinId ? [familyId, `${base}?c=${checkinId}`] : [familyId, base, `${base}?c=%`]));
   if (acts.length) db.prepare(`DELETE FROM activity WHERE id IN (${acts.map((a) => Number(a.id)).join(',')})`).run();
-  if (notes.length) db.prepare(`DELETE FROM notifications WHERE id IN (${notes.map((n) => Number(n.id)).join(',')})`).run();
   for (const a of acts) ctx.broadcast(familyId, 'activity.removed', { id: a.id });
-  const byUser = new Map();
-  for (const n of notes) byUser.set(n.user_id, [...(byUser.get(n.user_id) ?? []), n.id]);
-  for (const [uid, ids] of byUser) ctx.sendToUsers([uid], 'notification.removed', { ids }, familyId);
+  ctx.removeNotifications(familyId, notes);
   return { activity: acts.length, notifications: notes.length };
 }
 

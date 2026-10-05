@@ -25,7 +25,7 @@ import { Router } from 'express';
 import multer from 'multer';
 import { ISO_NOW } from '../db.js';
 import { MAX_UPLOAD_BYTES } from '../uploads.js';
-import { cleanStr, httpError, isDate, isEmail, toId } from '../util.js';
+import { cleanStr, httpError, isDate, isEmail, parseJson, toId } from '../util.js';
 import {
   contentDisposition, downloadName, extOf, fixFilename, kindOf, readVaultFile, removeVaultFile, sealLegacyFiles, serveTypeFor, vaultPath, writeVaultFile,
 } from './vault/files.js';
@@ -115,13 +115,10 @@ export const migrations = [
 // Shapes & visibility
 
 const nowIso = () => new Date().toISOString();
-const parseJson = (s, fallback) => {
-  try {
-    const v = JSON.parse(s);
-    return Array.isArray(v) ? v : fallback;
-  } catch {
-    return fallback;
-  }
+/** JSON array column → array (`fallback` when missing, invalid or not an array). */
+const parseList = (s, fallback) => {
+  const v = parseJson(s, fallback);
+  return Array.isArray(v) ? v : fallback;
 };
 /**
  * Rows as stored -> plaintext (sealed columns opened). A value that can't be decrypted (corrupted,
@@ -159,7 +156,7 @@ function canManage(req, ownerId) {
 
 function contactOut(row, req) {
   const { favorite: _legacy, is_fav, ...rest } = row; // eslint-disable-line no-unused-vars
-  return { ...rest, phones: parseJson(row.phones, []), favorite: !!is_fav, emergency: !!row.emergency, can_edit: canManage(req, row.created_by) };
+  return { ...rest, phones: parseList(row.phones, []), favorite: !!is_fav, emergency: !!row.emergency, can_edit: canManage(req, row.created_by) };
 }
 
 function documentOut(row, req) {
@@ -179,7 +176,7 @@ function documentOut(row, req) {
 
 /** Listing shape: secret field values are withheld (null) until /reveal. */
 function noteOut(row, req, { reveal = false } = {}) {
-  const fields = parseJson(row.fields, []).map((f) => ({
+  const fields = parseList(row.fields, []).map((f) => ({
     label: String(f.label ?? ''),
     value: f.secret && !reveal ? null : String(f.value ?? ''),
     secret: !!f.secret,
@@ -337,12 +334,7 @@ function scrubNotifications(ctx, familyId, link, keepUserIds = []) {
   const keep = new Set(keepUserIds);
   const rows = ctx.db.prepare("SELECT id, user_id FROM notifications WHERE family_id = ? AND module = 'vault' AND link = ?").all(familyId, link)
     .filter((n) => !keep.has(n.user_id));
-  if (!rows.length) return 0;
-  const del = ctx.db.prepare('DELETE FROM notifications WHERE id = ?');
-  for (const n of rows) del.run(n.id);
-  const byUser = new Map();
-  for (const n of rows) byUser.set(n.user_id, [...(byUser.get(n.user_id) ?? []), n.id]);
-  for (const [uid, ids] of byUser) ctx.sendToUsers([uid], 'notification.removed', { ids }, familyId);
+  ctx.removeNotifications(familyId, rows);
   return rows.length;
 }
 
@@ -913,7 +905,7 @@ export function router(ctx) {
       delete n.body;
     }
     const merged = { fields: n.fields ?? before.fields, body: n.body !== undefined ? n.body : before.body };
-    if (!before.unreadable && !parseJson(merged.fields, []).length && !merged.body) throw httpError(400, 'Add at least one field or some text');
+    if (!before.unreadable && !parseList(merged.fields, []).length && !merged.body) throw httpError(400, 'Add at least one field or some text');
     if (n.fields !== undefined) n.fields = box.seal(n.fields);
     if (n.body !== undefined) n.body = sealInput(n.body, 'Note');
     const keys = Object.keys(n);
@@ -1043,7 +1035,7 @@ export function search(ctx, familyId, term, req) {
       WHERE c.family_id = ? AND (search_match(c.name, ?) OR search_match(IFNULL(c.organization,''), ?) OR search_match(IFNULL(c.role,''), ?) OR search_match(c.phones, ?))
       ORDER BY c.emergency DESC, fav DESC, c.name COLLATE NOCASE LIMIT 5`,
   ).all(me, familyId, like, like, like, like).map((c) => {
-    const phone = parseJson(c.phones, [])[0]?.number;
+    const phone = parseList(c.phones, [])[0]?.number;
     return { title: c.name, subtitle: [c.role || c.organization, phone].filter(Boolean).join(' · ') || 'Contact', link: `/vault/contacts/${c.id}` };
   });
   const docs = ctx.db.prepare(
@@ -1070,7 +1062,7 @@ export function search(ctx, familyId, term, req) {
 
 export function dashboard(ctx, req) {
   const emergency = ctx.db.prepare('SELECT id, name, role, organization, phones FROM vault_contacts WHERE family_id = ? AND emergency = 1 ORDER BY name COLLATE NOCASE LIMIT 6')
-    .all(req.family.id).map((c) => ({ id: c.id, name: c.name, role: c.role || c.organization, phone: parseJson(c.phones, [])[0]?.number ?? null }));
+    .all(req.family.id).map((c) => ({ id: c.id, name: c.name, role: c.role || c.organization, phone: parseList(c.phones, [])[0]?.number ?? null }));
   const expiring = expiringDocs(ctx, req).map((d) => ({ id: d.id, name: d.name, expires_on: d.expires_on, visibility: visibilityOf(d) }));
   return { emergency, expiring };
 }
