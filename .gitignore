@@ -6,6 +6,7 @@ dist/
 *.db-wal
 test-results/
 screenshots/
+e2e-shots/
 playwright-report/
 .DS_Store
 *.log
