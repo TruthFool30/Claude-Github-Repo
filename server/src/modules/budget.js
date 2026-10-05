@@ -469,7 +469,7 @@ export function sweep(ctx, todayOverride = null) {
   for (const familyId of families) {
     // Each family's own calendar day (from the time zone its members' browsers report).
     const today = todayOverride ?? familyToday(ctx, familyId);
-    const created = generateDue(db, familyId, today);
+    const created = generateDue(db, familyId, today, ctx.time.familyTz(familyId));
     if (created.length) ctx.broadcast(familyId, 'budget.transaction.created', { ids: created, auto: true });
     // Reminders for manual bills due today.
     const month = monthOf(today);
@@ -524,7 +524,7 @@ export function router(ctx) {
     const familyId = req.family.id;
     ensureDefaults(db, familyId);
     const today = requestToday(ctx, req);
-    const created = generateDue(db, familyId, today);
+    const created = generateDue(db, familyId, today, ctx.time.tz(req));
     if (created.length) ctx.broadcast(familyId, 'budget.transaction.created', { ids: created, auto: true });
     return today;
   };
@@ -822,7 +822,7 @@ export function router(ctx) {
       .run(req.family.id, f.kind, f.description, f.amount_cents, f.category_id, f.day_of_month, f.paid_by, f.auto_create, f.start_month, f.end_month, f.notes, req.user.id);
     const id = Number(lastInsertRowid);
     const today = requestToday(ctx, req);
-    const created = generateDue(db, req.family.id, today);
+    const created = generateDue(db, req.family.id, today, ctx.time.tz(req));
     const bill = billForMonth(req, id, monthOf(today), today);
     emit(req, 'bill.created', bill);
     if (created.length) emit(req, 'transaction.created', { ids: created, auto: true });
@@ -840,7 +840,7 @@ export function router(ctx) {
     const f = parseBillBody(db, req, req.body ?? {}, existing);
     updateRow(db, 'budget_recurring', existing.id, f);
     const today = requestToday(ctx, req);
-    generateDue(db, req.family.id, today);
+    generateDue(db, req.family.id, today, ctx.time.tz(req));
     const bill = billForMonth(req, existing.id, parseMonth(req.query.month ?? req.body?.month, monthOf(today)), today);
     emit(req, 'bill.updated', bill);
     res.json(bill);
@@ -917,8 +917,8 @@ export function router(ctx) {
       if (!run) throw httpError(404, 'Nothing recorded for that month');
       if (run.transaction_id) db.prepare(`UPDATE budget_transactions SET deleted_at = ${ISO_NOW} WHERE id = ? AND deleted_at IS NULL`).run(run.transaction_id);
       db.prepare('DELETE FROM budget_recurring_runs WHERE recurring_id = ? AND month = ?').run(bill.id, month);
-      // An auto bill would be re-created by the next sweep, so undoing its payment means "skipped".
-      if (bill.auto_create && run.status === 'paid') {
+      // An auto bill already due would be re-created by the next sweep, so undoing its payment means "skipped".
+      if (bill.auto_create && run.status === 'paid' && dueDate(month, bill.day_of_month) <= requestToday(ctx, req)) {
         db.prepare(`INSERT INTO budget_recurring_runs (recurring_id, family_id, month, status) VALUES (?, ?, ?, 'skipped')`).run(bill.id, req.family.id, month);
       }
     });

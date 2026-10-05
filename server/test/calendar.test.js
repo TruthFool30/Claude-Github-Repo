@@ -2,7 +2,7 @@ import { test, before, after, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { startServer, familyFixture, collectEvents } from './helpers.js';
 import * as calendar from '../src/modules/calendar.js';
-import { seedDemo } from '../src/seed.js';
+import { DEMO_TZ, seedDemo } from '../src/seed.js';
 
 let srv;
 before(async () => {
@@ -435,9 +435,9 @@ test('seed creates a lively Rivera calendar', async () => {
       assert.ok(list.some((e) => e.title.startsWith(t)), t);
     }
     assert.ok(list.some((e) => e.exception), 'has an edited occurrence');
-    // Demo users have no remembered zone yet: family-local wall clock in the default demo zone.
+    // Family-local wall clock in the demo zone.
     const run = list.find((e) => e.title === 'School run');
-    assert.equal(new Intl.DateTimeFormat('en-GB', { timeZone: 'America/Los_Angeles', hour: '2-digit', minute: '2-digit' }).format(new Date(run.start)), '07:45');
+    assert.equal(new Intl.DateTimeFormat('en-GB', { timeZone: process.env.HEARTH_DEMO_TZ || DEMO_TZ, hour: '2-digit', minute: '2-digit' }).format(new Date(run.start)), '07:45');
     assert.ok(list.some((e) => e.attendees.includes(users.mia.id)));
     const dash = (await agent.get('/api/dashboard')).body.calendar;
     assert.ok(Array.isArray(dash.today) && Array.isArray(dash.upcoming));

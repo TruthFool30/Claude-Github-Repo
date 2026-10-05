@@ -1,6 +1,6 @@
 // Demo data for the Rivera family: ~6 months of realistic spending (richest in the last 2),
 // monthly limits, recurring bills (auto + manual), savings goals and kids' allowances.
-import { addMonths, dateKey, daysInMonth, dueDate, ensureDefaults, generateDue, monthOf, recordBillPayment } from './lib.js';
+import { addMonths, dateKey, daysInMonth, dueDate, ensureDefaults, familyToday, generateDue, monthOf, recordBillPayment } from './lib.js';
 
 /** Small deterministic PRNG so the demo looks the same on every seed. */
 function rng(seed) {
@@ -44,7 +44,7 @@ export async function seed(ctx, { familyId, users }) {
   const setLimit = db.prepare('UPDATE budget_categories SET limit_cents = ? WHERE id = ?');
   for (const [name, limit] of Object.entries(LIMITS)) setLimit.run(limit * 100, cat[name]);
 
-  const today = dateKey();
+  const today = familyToday(ctx, familyId); // the family's day, not the server's (UTC) one
   const thisMonth = monthOf(today);
   const firstMonth = addMonths(thisMonth, -5);
   const rand = rng(20260929);
@@ -90,12 +90,12 @@ export async function seed(ctx, { familyId, users }) {
     bill('expense', 'Spotify Family', 16.99, 'Entertainment', 22, sam, true);
     const carInsurance = bill('expense', 'Car insurance', 142, 'Transport', 5, alex, false);
     const piano = bill('expense', "Leo's piano lessons", 120, 'Kids', 3, sam, false, 'Ms. Delgado — pay by Venmo');
-    const electric = bill('expense', 'Electric bill — PG&E', 135, 'Utilities', 20, alex, false, 'Amount varies with the season');
+    const electric = bill('expense', 'Electric bill — Austin Energy', 135, 'Utilities', 20, alex, false, 'Amount varies with the season');
     const water = bill('expense', 'Water & trash', 54, 'Utilities', 30, sam, false);
     const soccer = bill('expense', 'Soccer club dues', 85, 'Kids', 10, sam, false, "Mia's U12 team");
 
     // Auto bills: the same engine the server uses fills in every past month.
-    generateDue(db, familyId, today);
+    generateDue(db, familyId, today, ctx.time.familyTz(familyId));
 
     // Manual bills: paid for past months; this month is a mix of paid / overdue / upcoming.
     for (let m = firstMonth; m <= thisMonth; m = addMonths(m, 1)) {

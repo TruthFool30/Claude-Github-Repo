@@ -263,7 +263,9 @@ Sam (member, sam@hearth.test), Mia (child, mia@hearth.test), Leo (child, leo@hea
 password `hearth123`. Each module exports an optional `seed(ctx, { familyId, users })` that adds
 realistic demo content (events this week, a grocery list, a family chat, recipes, a meal plan,
 budget transactions for the last 2 months, places, contacts…). Seeding is idempotent-ish: it
-recreates the demo family from scratch.
+recreates the demo family from scratch. The Riveras live in Austin: the seed stores `America/Chicago`
+(`DEMO_TZ`; override with `HEARTH_DEMO_TZ`) as the demo users' zone unless a browser already reported
+one, so seeds use `ctx.time.familyTz` / `todayForFamily` for the family's "today", never the server's.
 
 ---
 

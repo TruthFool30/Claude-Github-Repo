@@ -1,4 +1,5 @@
 // Budget module helpers: constants, validation, month math, serialization and the recurring-bill engine.
+import { dateIn } from '../../time.js';
 import { httpError, isDate } from '../../util.js';
 
 /** Icon keys the client knows how to render (client/src/modules/budget/icons.tsx mirrors this list). */
@@ -248,10 +249,10 @@ export function recordBillPayment(db, bill, month, { amountCents, date, userId, 
 
 /**
  * Auto-create transactions for "auto" bills whose due date has arrived (on/after the day the bill
- * was created, at most 12 months back) and that have no run yet for that month.
+ * was created in zone `tz`, at most 12 months back) and that have no run yet for that month.
  * Returns the created transaction ids.
  */
-export function generateDue(db, familyId, today = dateKey()) {
+export function generateDue(db, familyId, today = dateKey(), tz = null) {
   const bills = db.prepare('SELECT * FROM budget_recurring WHERE family_id = ? AND active = 1 AND auto_create = 1').all(familyId);
   if (!bills.length) return [];
   const created = [];
@@ -264,7 +265,8 @@ export function generateDue(db, familyId, today = dateKey()) {
   db.exec('SAVEPOINT budget_gen');
   try {
     for (const bill of bills) {
-      const since = (bill.generate_from || bill.created_at || '').slice(0, 10);
+      // The day the bill was created, in the same zone as `today` (created_at is a UTC instant).
+      const since = tz && bill.created_at ? dateIn(tz, new Date(bill.created_at)) : (bill.created_at || '').slice(0, 10);
       let month = bill.start_month > earliest ? bill.start_month : earliest;
       for (; month <= current; month = addMonths(month, 1)) {
         if (bill.end_month && month > bill.end_month) break;

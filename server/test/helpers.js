@@ -27,6 +27,10 @@ export async function startServer(options = {}) {
   const server = await new Promise((resolve) => {
     const s = app.listen(0, '127.0.0.1', () => resolve(s));
   });
+  // The client (undici) shares this process: if it stalls ≥5 s between requests (long sync seed, a loaded
+  // machine), the server's keep-alive timer fires as the next request reuses the idle socket → ECONNRESET.
+  // Let only the client close idle sockets (close() still ends every connection).
+  server.keepAliveTimeout = 0;
   const base = `http://127.0.0.1:${server.address().port}`;
   return {
     app,

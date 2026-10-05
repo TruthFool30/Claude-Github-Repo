@@ -214,12 +214,16 @@ describe('transactions', () => {
     const dom = new Date().getDate();
     const bill = await h.admin.agent.post('/api/budget/recurring', { description: 'Rent', amount: 10, day_of_month: dom });
     assert.equal(bill.body.status, 'due_today');
-    const d = new Date();
-    d.setDate(d.getDate() - 1);
-    const yesterday = dateKey(d);
-    const list = (await h.admin.agent.get(`/api/budget/recurring?month=${month}&today=${yesterday}`)).body;
-    assert.equal(list.find((b) => b.id === bill.body.id).status, 'upcoming');
-    assert.equal((await h.admin.agent.get(`/api/budget/badge?today=${yesterday}`)).body.bills_due, 0);
+    // A client a day behind (or, late in the UTC day, ahead): the server only accepts a ?today within ~36 h
+    // of now, and the test's local "yesterday" falls outside that in a US evening (UTC is already tomorrow).
+    const hoursIn = (Date.now() - Date.parse(`${today}T00:00:00Z`)) / 3600e3;
+    const behind = hoursIn <= 24;
+    const d = new Date(`${today}T12:00:00Z`);
+    d.setUTCDate(d.getUTCDate() + (behind ? -1 : 1));
+    const other = d.toISOString().slice(0, 10);
+    const list = (await h.admin.agent.get(`/api/budget/recurring?month=${month}&today=${other}`)).body;
+    assert.equal(list.find((b) => b.id === bill.body.id).status, behind ? 'upcoming' : 'overdue');
+    if (behind) assert.equal((await h.admin.agent.get(`/api/budget/badge?today=${other}`)).body.bills_due, 0);
     // A far-off "today" is ignored (falls back to the family's day).
     assert.equal((await h.admin.agent.get(`/api/budget/recurring?month=${month}&today=2001-01-01`)).body.find((b) => b.id === bill.body.id).status, 'due_today');
     // Without ?today the user's X-Timezone decides (UTC+14 is often already "tomorrow").
@@ -395,6 +399,10 @@ describe('recurring bills', () => {
     assert.equal(undo.body.status, 'skipped');
     sweep(srv.ctx);
     assert.equal((await h.admin.agent.get(`/api/budget/transactions?month=${month}&recurring_id=${created.body.id}`)).body.length, 0);
+    // ...but undoing an early payment (not due yet) just makes it upcoming again, so it still auto-pays on the day.
+    const next = addMonths(month, 1);
+    assert.equal((await h.admin.agent.post(`/api/budget/recurring/${created.body.id}/pay`, { month: next })).body.status, 'paid');
+    assert.equal((await h.admin.agent.del(`/api/budget/recurring/${created.body.id}/runs/${next}`)).body.status, 'upcoming');
 
     // Engine: generates each due month since creation, never before it.
     const fid = h.family.id;
@@ -402,6 +410,14 @@ describe('recurring bills', () => {
     const later = generateDue(srv.db, fid, dueDate(nextMonth, 31));
     assert.equal(later.length, 1, 'next month generates once due');
     assert.equal(generateDue(srv.db, fid, dueDate(nextMonth, 31)).length, 0);
+
+    // "Created on its due day" is judged in the family's zone: 8 pm in Chicago on Mar 10 is already Mar 11 in UTC.
+    const evening = (await household('Evening')).family.id;
+    srv.db.prepare(
+      `INSERT INTO budget_recurring (family_id, kind, description, amount_cents, day_of_month, auto_create, start_month, created_at)
+       VALUES (?, 'expense', 'Gym', 3000, 10, 1, '2026-03', '2026-03-11T01:00:00.000Z')`,
+    ).run(evening);
+    assert.equal(generateDue(srv.db, evening, '2026-03-10', 'America/Chicago').length, 1);
   });
 
   test('bills are family-scoped and due-today reminders are sent once', async () => {
@@ -508,10 +524,13 @@ describe('seed + dashboard', () => {
     const { familyId } = await seedDemo(srv.ctx, srv.app.locals.modules, quiet);
     const db = srv.db;
     const count = (sql, ...a) => db.prepare(sql).get(...a).n;
+    // The demo family's month/day (its own zone), not the test process's.
+    const familyDay = srv.ctx.time.todayForFamily(familyId);
+    const month = monthOf(familyDay);
     const prev = addMonths(month, -1);
     assert.ok(count("SELECT COUNT(*) AS n FROM budget_transactions WHERE family_id = ? AND date LIKE ? || '%'", familyId, prev) >= 25);
     // The seed never invents future-dated rows, so early in a month the current month is still sparse.
-    const dayOfMonth = Number(srv.ctx.time.todayForFamily(familyId).slice(8, 10));
+    const dayOfMonth = Number(familyDay.slice(8, 10));
     assert.ok(count("SELECT COUNT(*) AS n FROM budget_transactions WHERE family_id = ? AND date LIKE ? || '%'", familyId, month) >= Math.min(15, dayOfMonth));
     assert.ok(count('SELECT COUNT(*) AS n FROM budget_recurring WHERE family_id = ?', familyId) >= 8);
     assert.ok(count('SELECT COUNT(*) AS n FROM budget_goals WHERE family_id = ?', familyId) >= 4);
