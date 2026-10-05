@@ -211,6 +211,66 @@ try {
   );
   ok('add money to a goal → Sam sees the new total live');
 
+  // Automatic monthly contributions: the seeded Tahoe goal has them on...
+  await A.keyboard.press('Escape');
+  await A.locator('div', { has: A.getByRole('button', { name: 'Open goal Summer trip to Lake Tahoe' }) }).last().getByText(/^Auto ·/).waitFor();
+  ok('seeded goal shows its "Auto" badge with the next amount');
+  // ...and turning them on for LEGO (no target date yet) explains, previews and contributes this month right away.
+  const goalsApi = async () => (await (await A.request.get(`${BASE}/api/budget/goals`)).json());
+  const lego = (await goalsApi()).find((g) => g.name === 'LEGO space shuttle');
+  assert.equal(lego.auto_monthly, false);
+  await A.getByRole('button', { name: 'Open goal LEGO space shuttle' }).click();
+  await A.getByRole('dialog').getByRole('button', { name: 'Goal actions' }).click();
+  await A.getByRole('menuitem', { name: 'Edit goal' }).click();
+  const gform = A.getByRole('dialog', { name: 'Edit goal' });
+  const autoSwitch = gform.getByRole('switch', { name: /^Contribute automatically each month/ });
+  assert.ok(await autoSwitch.isDisabled(), 'needs a target date first');
+  await gform.getByText('Set a target date first').waitFor();
+  const ym = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+  const now = new Date();
+  const due = `${ym(new Date(now.getFullYear(), now.getMonth() + 3, 1))}-15`; // this month + 3 more = 4 contributions
+  await gform.getByRole('textbox', { name: 'Target date' }).fill(due);
+  await autoSwitch.click();
+  const perMonth = Math.ceil(Math.round((lego.target - lego.saved) * 100) / 4) / 100;
+  const usd = (n) => `$${n.toFixed(2)}`;
+  await gform.getByText(`≈ ${usd(perMonth)}/month`, { exact: false }).waitFor();
+  await gform.getByText('first one this month, as soon as you save', { exact: false }).waitFor();
+  await gform.getByRole('button', { name: 'Save' }).click();
+  await A.getByText(`${usd(perMonth)} put aside for`, { exact: false }).waitFor();
+  const legoAfter = (await goalsApi()).find((g) => g.id === lego.id);
+  assert.equal(legoAfter.auto_monthly, true);
+  assert.equal(Math.round(legoAfter.saved * 100), Math.round((lego.saved + perMonth) * 100));
+  ok(`turn on automatic contributions: explained without a date, preview ≈ ${usd(perMonth)}/month, first one made on save`);
+  const dlgLego = A.getByRole('dialog', { name: /LEGO space shuttle/ });
+  await dlgLego.getByText('Saving automatically: next', { exact: false }).waitFor();
+  const autoRow = dlgLego.locator('li', { hasText: 'Monthly contribution' });
+  await autoRow.getByText(/^Automatic ·/).waitFor();
+  await autoRow.getByText(`+${usd(perMonth)}`).waitFor();
+  await A.keyboard.press('Escape');
+  await A.locator('div', { has: A.getByRole('button', { name: 'Open goal LEGO space shuttle' }) }).last().getByText(/^Auto ·/).waitFor();
+  // The sweep (and saving again) doesn't add a second one this month.
+  await A.request.patch(`${BASE}/api/budget/goals/${lego.id}`, { data: { name: 'LEGO space shuttle' } });
+  const legoDetail = await (await A.request.get(`${BASE}/api/budget/goals/${lego.id}`)).json();
+  assert.equal(legoDetail.entries.filter((e) => e.source === 'auto').length, 1);
+  ok('auto entry labelled in the history, card shows the Auto badge, no second contribution this month');
+  // Off and on again in the same month: the preview promises next month, not a second one now.
+  await A.request.patch(`${BASE}/api/budget/goals/${lego.id}`, { data: { auto_monthly: false } });
+  await A.reload();
+  await A.getByRole('button', { name: 'Open goal LEGO space shuttle' }).click();
+  await A.getByRole('dialog').getByRole('button', { name: 'Goal actions' }).click();
+  await A.getByRole('menuitem', { name: 'Edit goal' }).click();
+  const again = A.getByRole('dialog', { name: 'Edit goal' });
+  const againSwitch = again.getByRole('switch', { name: 'Contribute automatically each month', exact: true });
+  await againSwitch.click();
+  const hint = await again.locator(`[id="${await againSwitch.getAttribute('aria-describedby')}"]`).innerText();
+  assert.match(hint, /first on \w+ 1\b/, hint);
+  await again.getByRole('button', { name: 'Save' }).click();
+  await A.getByText('Goal updated').first().waitFor();
+  const legoAgain = await (await A.request.get(`${BASE}/api/budget/goals/${lego.id}`)).json();
+  assert.equal(legoAgain.entries.filter((e) => e.source === 'auto').length, 1);
+  await A.keyboard.press('Escape');
+  ok('switched off and on again this month: preview says "first on <1st of next month>", nothing extra added');
+
   // ---- categories ----------------------------------------------------------------------------
   await A.goto(`${BASE}/budget`);
   await A.getByRole('button', { name: 'Budget options' }).click();

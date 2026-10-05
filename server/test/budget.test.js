@@ -2,8 +2,8 @@ import { test, before, after, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { startServer, familyFixture, registerUser, PNG_1X1, collectEvents } from './helpers.js';
 import { seedDemo } from '../src/seed.js';
-import { sweep } from '../src/modules/budget.js';
-import { addMonths, billStatus, dateKey, dueDate, generateDue, monthOf, toCents } from '../src/modules/budget/lib.js';
+import { autoContribute, sweep } from '../src/modules/budget.js';
+import { addMonths, autoAmount, billStatus, dateKey, dueDate, generateDue, monthLabel, monthOf, toCents } from '../src/modules/budget/lib.js';
 
 let srv;
 before(async () => { srv = await startServer(); });
@@ -526,6 +526,224 @@ describe('goals and allowances', () => {
     assert.equal((await h.admin.agent.get('/api/budget/allowances')).body.length, 1);
     assert.equal((await h.admin.agent.del(`/api/budget/allowances/${h.child.user.id}`)).status, 200);
     assert.equal((await h.admin.agent.post(`/api/budget/allowances/${h.child.user.id}/pay`)).status, 404);
+  });
+});
+
+describe('automatic monthly goal contributions', () => {
+  test('amount: what is left ÷ months remaining (inclusive), rounded up, never above what is left', () => {
+    assert.equal(autoAmount(1160_00, '2026-10', '2027-06-20'), 12889); // 9 months: 128.888… → 128.89
+    assert.equal(autoAmount(1200_00, '2026-10', '2027-09-30'), 100_00); // 12 months, exact
+    assert.equal(autoAmount(100, '2026-10', '2026-12-01'), 34); // 33.3… → 34 cents
+    assert.equal(autoAmount(5, '2026-10', '2027-10-01'), 1); // a cent left over 13 months still gets paid
+    assert.equal(autoAmount(123_45, '2027-06', '2027-06-30'), 123_45); // last month: everything left
+    assert.equal(autoAmount(100_00, '2026-12', '2027-01-05'), 50_00); // across a year boundary
+    assert.equal(autoAmount(100_00, '2027-07', '2027-06-30'), 0); // target month passed: stop
+    assert.equal(autoAmount(0, '2026-10', '2027-06-30'), 0);
+    assert.equal(autoAmount(-5_00, '2026-10', '2027-06-30'), 0);
+    assert.equal(autoAmount(100_00, '2026-10', null), 0);
+    for (let left = 1; left < 5000; left += 7) {
+      for (const target of ['2026-10-31', '2026-11-01', '2027-03-15', '2028-12-31']) {
+        // Paying it every month reaches the goal exactly in the target month, never overshooting.
+        let rest = left;
+        for (let m = '2026-10'; m <= target.slice(0, 7); m = addMonths(m, 1)) {
+          const c = autoAmount(rest, m, target);
+          assert.ok(c >= 1 && c <= rest, `${left} ${m} ${target} → ${c}`);
+          rest -= c;
+          if (!rest) break;
+        }
+        assert.equal(rest, 0);
+      }
+    }
+  });
+
+  test('once per month, recalculated, deleted entries stay deleted, stops when reached', async () => {
+    const h = await household('Auto goals');
+    const fid = h.family.id;
+    const m0 = monthOf(srv.ctx.time.todayForFamily(fid));
+    const month = (n) => `${addMonths(m0, n)}-01`;
+    const entries = async (id) => (await h.admin.agent.get(`/api/budget/goals/${id}`)).body;
+    // Turned on when created: this month's contribution is made right away (12 months → $100).
+    const g = await h.admin.agent.post('/api/budget/goals', { name: 'Laptop', emoji: '💻', target: 1200, target_date: dueDate(addMonths(m0, 11), 15), auto_monthly: true });
+    assert.equal(g.status, 201);
+    assert.equal(g.body.auto_monthly, true);
+    assert.equal(g.body.saved, 100);
+    assert.equal(g.body.auto_last_month, m0);
+    let d = await entries(g.body.id);
+    assert.equal(d.entries.length, 1);
+    assert.equal(d.entries[0].source, 'auto');
+    assert.equal(d.entries[0].note, `Monthly contribution · ${monthLabel(m0, 'short')}`);
+    // Sweeps, saves and calls again this month don't add more.
+    sweep(srv.ctx);
+    sweep(srv.ctx);
+    assert.equal(autoContribute(srv.ctx, fid, `${m0}-28`), 0);
+    assert.equal((await h.admin.agent.patch(`/api/budget/goals/${g.body.id}`, { name: 'New laptop' })).body.saved, 100);
+    assert.equal((await entries(g.body.id)).entries.length, 1);
+
+    // Next month: 1100 left over 11 months.
+    sweep(srv.ctx, month(1));
+    sweep(srv.ctx, month(1));
+    assert.equal((await entries(g.body.id)).saved, 200);
+    // A withdrawal changes the next amount: 1050 left over 10 months → 105.
+    await h.admin.agent.post(`/api/budget/goals/${g.body.id}/entries`, { amount: -50 });
+    sweep(srv.ctx, month(2));
+    d = await entries(g.body.id);
+    assert.equal(d.saved, 255);
+    assert.equal(d.auto_last_month, addMonths(m0, 2));
+    // Deleting an automatic entry is respected: that month isn't re-created.
+    const auto2 = d.entries.find((e) => e.note === `Monthly contribution · ${monthLabel(addMonths(m0, 2), 'short')}`);
+    assert.equal((await h.admin.agent.del(`/api/budget/goals/${g.body.id}/entries/${auto2.id}`)).body.saved, 150);
+    sweep(srv.ctx, month(2));
+    assert.equal(autoContribute(srv.ctx, fid, month(2)), 0);
+    assert.equal((await entries(g.body.id)).saved, 150);
+    // No backfill: jumping to the target month pays only that month — everything left — and completes the goal.
+    sweep(srv.ctx, month(11));
+    d = await entries(g.body.id);
+    assert.equal(d.saved, 1200);
+    assert.ok(d.completed_at);
+    assert.equal(d.entries.filter((e) => e.source === 'auto').length, 3);
+    assert.ok((await h.child.agent.get('/api/notifications')).body.items.some((x) => x.title === 'Goal reached: New laptop 🎉'));
+    assert.ok((await h.admin.agent.get('/api/activity?module=budget')).body.some((a) => a.verb === 'goal_reached' && a.entity_id === g.body.id));
+    sweep(srv.ctx, month(12));
+    assert.equal((await entries(g.body.id)).entries.length, 4);
+
+    // Past its target month: nothing more is contributed.
+    const late = await h.admin.agent.post('/api/budget/goals', { name: 'Late', target: 300, target_date: `${m0}-20` });
+    // (Synchronous from here, so the startup sweep can't slip in this month's contribution.)
+    srv.db.prepare('UPDATE budget_goals SET auto_monthly = 1 WHERE id = ?').run(late.body.id);
+    assert.equal(autoContribute(srv.ctx, fid, month(1)), 0);
+    sweep(srv.ctx, month(1));
+    const saved = () => srv.db.prepare('SELECT COALESCE(SUM(amount_cents), 0) AS c FROM budget_goal_entries WHERE goal_id = ?').get(late.body.id).c;
+    assert.equal(saved(), 0);
+    // ...while in its last month the rest arrives in one go.
+    assert.equal(autoContribute(srv.ctx, fid, `${m0}-20`), 1);
+    assert.equal(saved(), 300_00);
+  });
+
+  test('the family hears about it once a month: one summary for grown-ups (and owners)', async () => {
+    const h = await household('Auto summary');
+    const fid = h.family.id;
+    const m0 = monthOf(srv.ctx.time.todayForFamily(fid));
+    const date = dueDate(addMonths(m0, 3), 1); // 4 months
+    const a = await h.admin.agent.post('/api/budget/goals', { name: 'Holiday', emoji: '🏖️', target: 920, target_date: date });
+    const b = await h.admin.agent.post('/api/budget/goals', { name: 'Bike', target: 480, target_date: date, owner_id: h.child.user.id });
+    const summaries = async (who) => (await who.agent.get('/api/notifications')).body.items.filter((x) => /automatically$/.test(x.title));
+    // Switching it on contributes this month right away, logged like a normal deposit by whoever did it
+    // (so parents see a kid's too) — no automatic summary for that.
+    assert.equal((await h.admin.agent.patch(`/api/budget/goals/${a.body.id}`, { auto_monthly: true })).body.saved, 230);
+    assert.equal((await h.child.agent.patch(`/api/budget/goals/${b.body.id}`, { auto_monthly: true })).body.saved, 120);
+    const act = (await h.member.agent.get('/api/activity?module=budget')).body;
+    assert.ok(act.some((x) => x.verb === 'saved' && x.user?.id === h.admin.user.id && x.summary === 'added $230.00 to 🏖️ Holiday'));
+    assert.ok(act.some((x) => x.verb === 'saved' && x.user?.id === h.child.user.id && x.summary === 'added $120.00 to Bike'));
+    assert.equal((await summaries(h.member)).length, 0);
+    // Next month's sweep: one summary covering both goals, sent once however often the sweep runs.
+    const next = `${addMonths(m0, 1)}-01`;
+    sweep(srv.ctx, next);
+    sweep(srv.ctx, next);
+    sweep(srv.ctx, `${addMonths(m0, 1)}-17`);
+    const n = await summaries(h.member);
+    assert.equal(n.length, 1);
+    assert.equal(n[0].title, 'Saved $350.00 automatically');
+    assert.equal(n[0].body, '🏖️ Holiday $230.00 · Bike $120.00');
+    assert.equal((await summaries(h.admin)).length, 1);
+    assert.equal((await summaries(h.child)).length, 1, 'owners of goals in the summary are told');
+    const wall = (await h.member.agent.get('/api/activity?module=budget')).body.filter((x) => x.verb === 'auto_saved');
+    assert.equal(wall.length, 1);
+    assert.equal(wall[0].summary, 'saved $350.00 automatically: 🏖️ Holiday $230.00 · Bike $120.00');
+    assert.equal(wall[0].user, null);
+    // A kid with no automatic goal of their own doesn't see the family's savings summary on the Wall.
+    const solo = await household('Auto solo');
+    await solo.admin.agent.post('/api/budget/goals', { name: 'Car', target: 100, target_date: date, auto_monthly: true });
+    sweep(srv.ctx, next);
+    assert.equal((await solo.member.agent.get('/api/activity?module=budget')).body.filter((x) => x.verb === 'auto_saved').length, 1);
+    assert.equal((await solo.child.agent.get('/api/activity?module=budget')).body.filter((x) => x.verb === 'auto_saved').length, 0);
+    assert.equal((await summaries(solo.child)).length, 0);
+  });
+
+  test('a reached goal that dips below its target mid-month waits for the 1st', async () => {
+    const h = await household('Auto midmonth');
+    const fid = h.family.id;
+    const m0 = monthOf(srv.ctx.time.todayForFamily(fid));
+    const month = (n, day = '01') => `${addMonths(m0, n)}-${day}`;
+    const date = dueDate(addMonths(m0, 3), 10);
+    const autoEntries = async (id) => (await h.admin.agent.get(`/api/budget/goals/${id}`)).body.entries.filter((e) => e.source === 'auto');
+    // Reached when created: this month is claimed with nothing added.
+    const g = await h.admin.agent.post('/api/budget/goals', { name: 'Reached', target: 100, saved: 100, target_date: date, auto_monthly: true });
+    assert.ok(g.body.completed_at);
+    assert.equal(g.body.auto_last_month, m0);
+    // Reached before next month's 1st: the 1st claims that month without an entry...
+    sweep(srv.ctx, month(1));
+    // ...so a withdrawal on the 5th doesn't trigger a top-up that month.
+    await h.admin.agent.post(`/api/budget/goals/${g.body.id}/entries`, { amount: -50 });
+    sweep(srv.ctx, month(1, '05'));
+    assert.equal(autoContribute(srv.ctx, fid, month(1, '20')), 0);
+    assert.equal((await autoEntries(g.body.id)).length, 0);
+    // The 1st after that: 50 left over 2 months.
+    sweep(srv.ctx, month(2));
+    assert.deepEqual((await autoEntries(g.body.id)).map((e) => e.amount), [25]);
+
+    // Same when a deposit on a reached goal is deleted mid-month.
+    const d = await h.admin.agent.post('/api/budget/goals', { name: 'Dip', target: 100, target_date: date, auto_monthly: true });
+    assert.equal(d.body.saved, 25); // 4 months
+    const dep = await h.admin.agent.post(`/api/budget/goals/${d.body.id}/entries`, { amount: 75 });
+    assert.ok(dep.body.completed_at);
+    sweep(srv.ctx, month(1));
+    await h.admin.agent.del(`/api/budget/goals/${d.body.id}/entries/${dep.body.entries[0].id}`);
+    sweep(srv.ctx, month(1, '12'));
+    assert.equal((await autoEntries(d.body.id)).length, 1);
+    sweep(srv.ctx, month(2));
+    assert.deepEqual((await autoEntries(d.body.id)).map((e) => e.amount), [37.5, 25]); // 75 left over 2 months
+  });
+
+  test('permissions and validation', async () => {
+    const h = await household('Auto perms');
+    const m0 = monthOf(srv.ctx.time.todayForFamily(h.family.id));
+    const date = dueDate(addMonths(m0, 5), 10);
+    // Needs a target date — on create, and it can't be removed while the option is on.
+    assert.equal((await h.admin.agent.post('/api/budget/goals', { name: 'X', target: 50, auto_monthly: true })).status, 400);
+    const fam = await h.admin.agent.post('/api/budget/goals', { name: 'Family', target: 600, target_date: date, auto_monthly: true });
+    assert.equal(fam.status, 201);
+    const cleared = await h.admin.agent.patch(`/api/budget/goals/${fam.body.id}`, { target_date: null });
+    assert.equal(cleared.status, 400);
+    assert.match(cleared.body.error, /target date/);
+    const off = await h.admin.agent.patch(`/api/budget/goals/${fam.body.id}`, { target_date: null, auto_monthly: false });
+    assert.equal(off.status, 200);
+    assert.equal(off.body.auto_monthly, false);
+    // Kids: only their own goals (whoever can edit the goal can toggle it).
+    assert.equal((await h.child.agent.patch(`/api/budget/goals/${fam.body.id}`, { target_date: date, auto_monthly: true })).status, 403);
+    const own = await h.child.agent.post('/api/budget/goals', { name: 'Skates', target: 60, target_date: date, auto_monthly: true });
+    assert.equal(own.status, 201);
+    assert.equal(own.body.saved, 10);
+    const offAgain = (await h.child.agent.patch(`/api/budget/goals/${own.body.id}`, { auto_monthly: false })).body;
+    assert.equal(offAgain.auto_monthly, false);
+    assert.equal(offAgain.auto_last_month, m0, 'still reported while off, so the form knows this month is done');
+    assert.equal((await h.member.agent.patch(`/api/budget/goals/${own.body.id}`, { auto_monthly: true })).body.auto_monthly, true);
+    // Turning it back on in a month that already had its contribution doesn't add another.
+    assert.equal((await h.child.agent.get(`/api/budget/goals/${own.body.id}`)).body.saved, 10);
+    const other = await household('Auto other');
+    assert.equal((await other.admin.agent.patch(`/api/budget/goals/${own.body.id}`, { auto_monthly: false })).status, 404);
+  });
+
+  test("the month turns over at midnight on the 1st in the family's time zone", async () => {
+    // 10:30 UTC on Oct 31 is already 00:30 on Nov 1 in Kiritimati (UTC+14), but 05:30 on Oct 31 in Chicago.
+    // (A past date, so the startup sweep's real-month contribution can't be confused with these.)
+    const instant = new Date('2025-10-31T10:30:00Z');
+    const families = [];
+    for (const zone of ['Pacific/Kiritimati', 'America/Chicago']) {
+      const h = await household(`Auto ${zone}`);
+      srv.db.prepare('UPDATE users SET timezone = ? WHERE id IN (?, ?, ?)').run(zone, h.admin.user.id, h.member.user.id, h.child.user.id);
+      const g = await h.admin.agent.post('/api/budget/goals', { name: 'Trip', target: 1000, target_date: '2027-08-15' });
+      srv.db.prepare('UPDATE budget_goals SET auto_monthly = 1 WHERE id = ?').run(g.body.id);
+      const today = srv.ctx.time.dateIn(srv.ctx.time.familyTz(h.family.id), instant);
+      autoContribute(srv.ctx, h.family.id, today);
+      families.push({ h, g, today });
+    }
+    const [kiri, chicago] = families;
+    assert.equal(kiri.today, '2025-11-01');
+    assert.equal(chicago.today, '2025-10-31');
+    const auto = async ({ h, g }) => (await h.admin.agent.get(`/api/budget/goals/${g.body.id}`)).body.entries
+      .filter((e) => e.note.endsWith('2025')).map((e) => [e.note, e.amount]);
+    assert.deepEqual(await auto(kiri), [['Monthly contribution · Nov 2025', 45.46]]); // 22 months left
+    assert.deepEqual(await auto(chicago), [['Monthly contribution · Oct 2025', 43.48]]); // 23 months left
   });
 });
 

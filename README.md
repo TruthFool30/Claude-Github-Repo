@@ -9,7 +9,8 @@ FamilyWall. One place for everything a household shares:
 - **Messages** — family and group chat
 - **Photos** — shared albums
 - **Meals** — recipes and a weekly meal plan
-- **Budget** — shared spending and expenses
+- **Budget** — shared spending, monthly bills and savings goals (each goal can top itself up
+  automatically every month to hit its target date)
 - **Locator** — places and check-ins on a map
 - **Contacts & Docs** — important contacts and a document vault
 

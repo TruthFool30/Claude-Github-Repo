@@ -85,7 +85,7 @@ export interface GoalEntry {
   id: number;
   amount: number;
   note: string | null;
-  source: 'manual' | 'allowance';
+  source: 'manual' | 'allowance' | 'auto';
   user_id: number | null;
   created_at: string;
 }
@@ -104,6 +104,10 @@ export interface Goal {
   created_at: string;
   entry_count: number;
   last_entry_at: string | null;
+  /** Contributes (what's left ÷ months to the target date) on the 1st of every month. */
+  auto_monthly: boolean;
+  /** Latest month that got an automatic contribution. */
+  auto_last_month: string | null;
   entries?: GoalEntry[];
 }
 
@@ -254,6 +258,26 @@ export function useMonthParam(): [string, (m: string) => void] {
       { replace: true },
     );
   return [month, setMonth];
+}
+
+/** Monthly auto-contribution for `month` (mirrors the server's autoAmount): left ÷ months to the target month, rounded up to the cent. */
+export function autoAmount(left: number, month: string, targetDate: string) {
+  const [y, m] = month.split('-').map(Number);
+  const [ty, tm] = targetDate.split('-').map(Number);
+  const months = (ty - y) * 12 + tm - m + 1;
+  const cents = Math.round(left * 100);
+  return months < 1 || cents <= 0 ? 0 : Math.ceil(cents / months) / 100;
+}
+
+/** The goal's next automatic contribution: this month (if it hasn't had one) or the 1st of next month; null when there is none. */
+export function nextAuto(g: Pick<Goal, 'target' | 'saved' | 'target_date' | 'completed_at' | 'auto_last_month'>) {
+  if (g.completed_at || !g.target_date) return null;
+  // ponytail: the browser's month stands in for the family's (the server uses the family's time zone);
+  // they differ only for a few hours around midnight on the 1st for someone away from home.
+  const now = currentMonth();
+  const month = g.auto_last_month && g.auto_last_month >= now ? addMonths(now, 1) : now;
+  const amount = autoAmount(g.target - g.saved, month, g.target_date);
+  return amount > 0 ? { month, amount, thisMonth: month === now } : null;
 }
 
 /** The locale's decimal separator ("." or ","). */

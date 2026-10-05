@@ -114,9 +114,22 @@ export function requestToday(ctx, req) {
 
 export const isValidDate = (s) => isDate(s) && inRange(s);
 
-export function monthLabel(month) {
+export function monthLabel(month, style = 'long') {
   const [y, m] = month.split('-').map(Number);
-  return new Date(y, m - 1, 1).toLocaleString('en-US', { month: 'long', year: 'numeric' });
+  return new Date(y, m - 1, 1).toLocaleString('en-US', { month: style, year: 'numeric' });
+}
+
+/**
+ * Automatic monthly contribution (cents) for `month`: what's left ÷ months remaining (this month
+ * through the target date's month, inclusive), rounded up so the goal is reached on time. Never
+ * more than what's left (ceil(left / n) ≤ left for n ≥ 1); 0 once the target month has passed.
+ */
+export function autoAmount(leftCents, month, targetDate) {
+  if (!targetDate || leftCents <= 0) return 0;
+  const [y, m] = month.split('-').map(Number);
+  const [ty, tm] = targetDate.split('-').map(Number);
+  const months = (ty - y) * 12 + tm - m + 1;
+  return months < 1 ? 0 : Math.ceil(leftCents / months);
 }
 
 export function money(cents, currency = 'USD') {

@@ -1,6 +1,8 @@
 // Demo data for the Rivera family: ~6 months of realistic spending (richest in the last 2),
 // monthly limits, recurring bills (auto + manual), savings goals and kids' allowances.
-import { addMonths, dateKey, daysInMonth, dueDate, ensureDefaults, familyToday, generateDue, monthOf, recordBillPayment } from './lib.js';
+import {
+  addMonths, autoAmount, dateKey, daysInMonth, dueDate, ensureDefaults, familyToday, generateDue, money, monthLabel, monthOf, recordBillPayment,
+} from './lib.js';
 
 /** Small deterministic PRNG so the demo looks the same on every seed. */
 function rng(seed) {
@@ -69,6 +71,8 @@ export async function seed(ctx, { familyId, users }) {
     return t.toISOString().slice(0, 10);
   };
 
+  let autoAt;
+  let autoCents;
   db.exec('BEGIN');
   try {
     // ---- recurring bills -------------------------------------------------------------------
@@ -212,7 +216,7 @@ export async function seed(ctx, { familyId, users }) {
       return id;
     };
     const nextYear = Number(thisMonth.slice(0, 4)) + 1;
-    goal('Summer trip to Lake Tahoe', '🏕️', '#0090FF', 3000, null, `${nextYear}-06-20`, alex, [
+    const tahoe = goal('Summer trip to Lake Tahoe', '🏕️', '#0090FF', 3000, null, `${nextYear}-06-20`, alex, [
       [800_00, 'Starting balance', 'manual', alex, 140], [300_00, 'May savings', 'manual', alex, 120], [250_00, null, 'manual', sam, 90],
       [300_00, 'Freelance bonus', 'manual', sam, 60], [190_00, null, 'manual', alex, 25],
     ]);
@@ -230,6 +234,16 @@ export async function seed(ctx, { familyId, users }) {
       [5_00, 'Weekly allowance', 'allowance', sam, 16], [10_00, 'Helped wash the car', 'manual', leo, 12], [5_00, 'Weekly allowance', 'allowance', sam, 9],
       [5_00, 'Weekly allowance', 'allowance', sam, 2],
     ]);
+    // Tahoe saves automatically: this month's contribution was made by the first sweep after
+    // midnight on the 1st, family time (00:05 local, never in the future).
+    const local = Date.UTC(Number(thisMonth.slice(0, 4)), Number(thisMonth.slice(5)) - 1, 1, 0, 5);
+    const offset = ctx.time.offsetMinutes(ctx.time.familyTz(familyId), new Date(local));
+    autoAt = new Date(Math.min(Date.now(), local - offset * 60_000)).toISOString();
+    const tahoeSaved = db.prepare('SELECT SUM(amount_cents) AS c FROM budget_goal_entries WHERE goal_id = ?').get(tahoe).c;
+    autoCents = autoAmount(3000_00 - tahoeSaved, thisMonth, `${nextYear}-06-20`);
+    db.prepare('UPDATE budget_goals SET auto_monthly = 1 WHERE id = ?').run(tahoe);
+    db.prepare('INSERT INTO budget_goal_runs (goal_id, family_id, month, created_at) VALUES (?, ?, ?, ?)').run(tahoe, familyId, thisMonth, autoAt);
+    insertEntry.run(tahoe, familyId, autoCents, `Monthly contribution · ${monthLabel(thisMonth, 'short')}`, 'auto', null, autoAt);
     const done = goal('New couch', '🛋️', '#8E4EC6', 900, null, null, sam, [[500_00, null, 'manual', sam, 140], [400_00, null, 'manual', alex, 70]]);
     db.prepare('UPDATE budget_goals SET completed_at = ? WHERE id = ?').run(ago(70), done);
 
@@ -253,4 +267,8 @@ export async function seed(ctx, { familyId, users }) {
   log(sam.id, 'paid', `paid Leo's piano lessons · $120.00`, '/budget/bills', 12);
   log(alex.id, 'saved', 'added $190.00 to 🏕️ Summer trip to Lake Tahoe', '/budget/goals', 6);
   log(alex.id, 'allowance', "paid Mia's allowance · $10.00 → New bike", '/budget/goals', 2);
+  ctx.logActivity({
+    familyId, module: 'budget', verb: 'auto_saved', summary: `saved ${money(autoCents)} automatically: 🏕️ Summer trip to Lake Tahoe ${money(autoCents)}`,
+    link: '/budget/goals', createdAt: autoAt, audience: [alex.id, sam.id],
+  });
 }

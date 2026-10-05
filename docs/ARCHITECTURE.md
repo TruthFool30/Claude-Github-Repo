@@ -567,6 +567,11 @@ server validates it and remembers it per user (`users.timezone`). Use `ctx.time`
 - `ctx.time.dateIn(tz, date?)`, `ctx.time.offsetMinutes(tz, date?)`, `ctx.time.isValidTz(tz)`.
 - The core `/api/dashboard` runs module `dashboard(ctx, req)` hooks with the same `req`, so
   `ctx.time.today(req)` is correct there too.
+- Example: budget's 10-minute sweep runs auto bills and automatic goal contributions with the
+  family's day, so a family in Pacific/Kiritimati starts November while one in Chicago is still in
+  October. Activity rows written by such jobs have no `user_id`; list their verbs in `SYSTEM_VERBS`
+  (`wall/ActivityCard.tsx`) so the Wall shows the summary as a sentence with the module icon instead
+  of "A former member <summary>".
 
 ### Hiding the mobile bottom bar
 
