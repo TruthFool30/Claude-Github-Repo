@@ -917,8 +917,10 @@ export function router(ctx) {
       if (!run) throw httpError(404, 'Nothing recorded for that month');
       if (run.transaction_id) db.prepare(`UPDATE budget_transactions SET deleted_at = ${ISO_NOW} WHERE id = ? AND deleted_at IS NULL`).run(run.transaction_id);
       db.prepare('DELETE FROM budget_recurring_runs WHERE recurring_id = ? AND month = ?').run(bill.id, month);
-      // An auto bill already due would be re-created by the next sweep, so undoing its payment means "skipped".
-      if (bill.auto_create && run.status === 'paid' && dueDate(month, bill.day_of_month) <= requestToday(ctx, req)) {
+      // An auto bill already due (for this member or for the family's sweep) would be re-created by the
+      // next sweep, so undoing its payment means "skipped".
+      const due = dueDate(month, bill.day_of_month);
+      if (bill.auto_create && run.status === 'paid' && (due <= requestToday(ctx, req) || due <= familyToday(ctx, req.family.id))) {
         db.prepare(`INSERT INTO budget_recurring_runs (recurring_id, family_id, month, status) VALUES (?, ?, ?, 'skipped')`).run(bill.id, req.family.id, month);
       }
     });

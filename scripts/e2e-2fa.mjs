@@ -10,6 +10,9 @@ import fs from 'node:fs';
 import { chromium } from 'playwright';
 import { base32Decode, hotp, timeStep } from '../server/src/totp.js';
 
+// Run Node and the browser in the demo family's time zone (seed.js DEMO_TZ), so "today" matches the server.
+process.env.TZ ||= process.env.HEARTH_DEMO_TZ || 'America/Chicago';
+
 const BASE = process.env.BASE || 'http://localhost:4013';
 const SHOTS = process.env.SHOTS || 'screenshots/2fa';
 fs.mkdirSync(SHOTS, { recursive: true });

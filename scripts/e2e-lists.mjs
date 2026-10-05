@@ -7,6 +7,9 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 
+// Run Node and the browser in the demo family's time zone (seed.js DEMO_TZ), so "today" matches the server.
+process.env.TZ ||= process.env.HEARTH_DEMO_TZ || 'America/Chicago';
+
 const BASE = process.env.BASE || 'http://localhost:4203';
 const SHOTS = process.env.SHOTS || path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'data', 'e2e-lists');
 fs.mkdirSync(SHOTS, { recursive: true });

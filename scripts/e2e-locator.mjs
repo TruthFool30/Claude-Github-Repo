@@ -5,6 +5,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+// Run Node and the browser in the demo family's time zone (seed.js DEMO_TZ), so "today" matches the server.
+process.env.TZ ||= process.env.HEARTH_DEMO_TZ || 'America/Chicago';
+
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const { chromium } = await import(path.join(root, 'node_modules/playwright/index.mjs'));
 

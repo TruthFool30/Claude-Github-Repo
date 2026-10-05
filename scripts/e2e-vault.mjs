@@ -6,6 +6,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { chromium } from 'playwright';
 
+// Run Node and the browser in the demo family's time zone (seed.js DEMO_TZ), so "today" matches the server.
+process.env.TZ ||= process.env.HEARTH_DEMO_TZ || 'America/Chicago';
+
 const BASE = process.env.BASE || 'http://localhost:4209';
 const SHOTS = process.env.SHOTS || path.join(os.tmpdir(), 'vault-shots');
 const NO_SHOTS = process.env.NO_SHOTS === '1';

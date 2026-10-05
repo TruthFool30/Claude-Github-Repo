@@ -399,6 +399,18 @@ describe('recurring bills', () => {
     assert.equal(undo.body.status, 'skipped');
     sweep(srv.ctx);
     assert.equal((await h.admin.agent.get(`/api/budget/transactions?month=${month}&recurring_id=${created.body.id}`)).body.length, 0);
+    // A member whose day is behind the family's (travelling) undoes it on the due day: still skipped,
+    // because the family's sweep already counts it as due.
+    assert.equal((await h.admin.agent.post(`/api/budget/recurring/${created.body.id}/pay`, { month })).body.status, 'paid');
+    const famToday = srv.ctx.time.todayForFamily(h.family.id);
+    const behind = new Date(`${famToday}T12:00:00Z`);
+    behind.setUTCDate(behind.getUTCDate() - 1);
+    const behindDay = behind.toISOString().slice(0, 10);
+    if (dueDate(month, dom) === famToday && Math.abs(behind - Date.now()) <= 36 * 3600e3) {
+      assert.equal((await h.admin.agent.del(`/api/budget/recurring/${created.body.id}/runs/${month}?today=${behindDay}`)).body.status, 'skipped');
+      sweep(srv.ctx);
+      assert.equal((await h.admin.agent.get(`/api/budget/transactions?month=${month}&recurring_id=${created.body.id}`)).body.length, 0);
+    }
     // ...but undoing an early payment (not due yet) just makes it upcoming again, so it still auto-pays on the day.
     const next = addMonths(month, 1);
     assert.equal((await h.admin.agent.post(`/api/budget/recurring/${created.body.id}/pay`, { month: next })).body.status, 'paid');
