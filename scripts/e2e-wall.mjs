@@ -6,6 +6,9 @@ import path from 'node:path';
 import assert from 'node:assert/strict';
 import { chromium } from 'playwright';
 
+// Run Node and the browser in the demo family's time zone (seed.js DEMO_TZ), so "today" matches the server.
+process.env.TZ ||= process.env.HEARTH_DEMO_TZ || 'America/Chicago';
+
 const BASE = process.env.BASE || 'http://localhost:4201';
 const SHOTS = process.env.SHOTS || '/tmp/wall-shots';
 fs.mkdirSync(SHOTS, { recursive: true });

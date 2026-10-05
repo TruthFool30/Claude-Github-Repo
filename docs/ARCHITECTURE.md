@@ -137,6 +137,12 @@ POST /api/auth/logout
 GET  /api/auth/me                    -> {user, families:[{id,name,role,...}], active_family_id}  (signed out: 200 {user:null, families:[], active_family_id:null})
 PATCH /api/auth/me {name,color,birthday,phone,email?,password?,current_password?}  (email or password change requires current_password)
 POST /api/auth/me/avatar (multipart file) -> {user}
+POST /api/auth/login/2fa {ticket, code}   -> {user, families}  (second step, see "Two-factor login" below)
+POST /api/auth/2fa/setup {password}       -> {secret, otpauth_uri, qr_svg}  (pending until enabled, max 15 min)
+DELETE /api/auth/2fa/setup                -> {ok}  (cancel: forget the pending secret)
+POST /api/auth/2fa/enable {code}          -> {...me, recovery_codes}  (signs out the user's other sessions)
+POST /api/auth/2fa/recovery-codes {code}  -> {...me, recovery_codes}  (replaces all old codes)
+POST /api/auth/2fa/disable {password, code} -> me
 POST /api/families {name}            -> family (creator becomes admin, becomes active)
 POST /api/families/join {invite_code} -> family
 POST /api/families/:id/activate      -> sets the session's DEFAULT family (used by tabs/requests without X-Family-Id)
@@ -165,6 +171,23 @@ the header the session's default family is used. So two tabs can safely work in 
 lookups are rate-limited (429 `{error}` + `Retry-After`; login counts only FAILED attempts, per IP
 and per email+IP, so nobody can lock another user out); set `HEARTH_RATE_LIMITS=off` on scripted
 test instances if needed. Client IPs come from `req.ip`, governed by `TRUST_PROXY` (default `loopback`).
+
+**Two-factor login (TOTP).** RFC 6238 codes (SHA1, 6 digits, 30 s, ±1 step) from any
+authenticator app, implemented with `node:crypto` in `server/src/totp.js`; the QR code is rendered
+server-side as SVG (`qrcode`). Columns on `users`: `totp_secret` / `totp_pending` (sealed with
+`ctx.box`), `totp_last_step` (codes at or before it are refused, so a code can't be replayed) and
+`totp_recovery` (JSON array of sha256 hashes of the 10 one-time recovery codes, `abcd-efgh-jkmn`).
+When an account has 2FA on, a correct password makes `POST /api/auth/login` answer
+`200 {two_factor_required: true, ticket}` instead of creating a session; the ticket lives 5 minutes in
+memory (single process), is single-use and dies after 5 wrong codes (then `401 {code:'TWO_FACTOR_EXPIRED'}`).
+`code` may be a TOTP or a recovery code everywhere except `enable` (recovery codes are consumed). Wrong codes
+on every code endpoint (`login/2fa`, `enable`, `disable`, `recovery-codes`) and wrong passwords on the 2FA
+endpoints count against the same `login-ip` / `login-email` failure budget as wrong passwords (a correct
+password alone doesn't reset it), plus a per-account `code-user` budget (20 per 15 min, any IP) → 429.
+A wrong password there answers `400 {error, field:'password'}`. A pending setup secret is sealed together
+with its issue time and refused after 15 minutes. `/api/auth/me` (and every response built like it:
+login, register, PATCH /me) carries `two_factor_enabled` and `recovery_codes_left` for the signed-in user only;
+`publicUser()` never includes them. Admin escape hatch: `npm run reset-2fa -- someone@example.com`.
 
 Optional module exports: `search(ctx, familyId, q)` (see above) and `dashboard(ctx, req)` returning a
 small object the Wall can show (e.g. calendar returns today's events). The foundation exposes
@@ -240,7 +263,9 @@ Sam (member, sam@hearth.test), Mia (child, mia@hearth.test), Leo (child, leo@hea
 password `hearth123`. Each module exports an optional `seed(ctx, { familyId, users })` that adds
 realistic demo content (events this week, a grocery list, a family chat, recipes, a meal plan,
 budget transactions for the last 2 months, places, contacts…). Seeding is idempotent-ish: it
-recreates the demo family from scratch.
+recreates the demo family from scratch. The Riveras live in Austin: the seed stores `America/Chicago`
+(`DEMO_TZ`; override with `HEARTH_DEMO_TZ`) as the demo users' zone unless a browser already reported
+one, so seeds use `ctx.time.familyTz` / `todayForFamily` for the family's "today", never the server's.
 
 ---
 
@@ -330,6 +355,14 @@ export function router(ctx) {
     `publicUser(row)` — strip secrets. (`purge()` from `../purge.js` runs its own transaction and
     throws if called inside `tx()`.)
   - `rateLimit(rule, req => key)` — middleware using a rule from `DEFAULT_LIMITS` in `app.js`.
+  - `box` — encryption at rest (AES-256-GCM, one instance key; `secretbox.js`). `box.seal(str)` →
+    `'enc:v1:…'` (null stays null, never double-seals), `box.open(v)` (plaintext passes through, so
+    legacy rows keep working); `box.sealBuffer(buf)` / `box.openBuffer(buf)` for files;
+    `box.isSealed(v)` / `box.isSealedBuffer(buf)`. Seal sensitive columns/files on write and open them
+    on read; sealed values can't be searched or sorted in SQL, so keep what listings need plaintext.
+    Refuse user input that already looks sealed (it would be *opened* on read). Startup checks the
+    key against a canary in `app_meta` and refuses to run with the wrong one. Used by the vault
+    (see `modules/vault.js`).
 - **Errors**: `throw httpError(status, 'Message')` (or `ctx.httpError`) anywhere in a handler, or
   `res.status(4xx).json({ error })`. Unknown errors → 500 `{ error: 'Something went wrong on our side' }`.
 - **Timestamps**: core tables store ISO-8601 UTC (`2026-09-29T07:41:00.123Z`). Use `ISO_NOW` as the
@@ -534,6 +567,11 @@ server validates it and remembers it per user (`users.timezone`). Use `ctx.time`
 - `ctx.time.dateIn(tz, date?)`, `ctx.time.offsetMinutes(tz, date?)`, `ctx.time.isValidTz(tz)`.
 - The core `/api/dashboard` runs module `dashboard(ctx, req)` hooks with the same `req`, so
   `ctx.time.today(req)` is correct there too.
+- Example: budget's 10-minute sweep runs auto bills and automatic goal contributions with the
+  family's day, so a family in Pacific/Kiritimati starts November while one in Chicago is still in
+  October. Activity rows written by such jobs have no `user_id`; list their verbs in `SYSTEM_VERBS`
+  (`wall/ActivityCard.tsx`) so the Wall shows the summary as a sentence with the module icon instead
+  of "A former member <summary>".
 
 ### Hiding the mobile bottom bar
 

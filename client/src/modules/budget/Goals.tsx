@@ -1,8 +1,8 @@
 // Savings goals (family + kids) and kids' allowances.
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useId, useState, type FormEvent } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { useSearchParams } from 'react-router';
-import { Banknote, CalendarDays, HandCoins, Minus, Pencil, PiggyBank, Plus, Settings2, Trash2, Trophy } from 'lucide-react';
+import { Banknote, CalendarClock, CalendarDays, HandCoins, Minus, Pencil, PiggyBank, Plus, Repeat, Settings2, Trash2, Trophy } from 'lucide-react';
 import { api, errorMessage } from '../../lib/api';
 import { useAuth, useMember } from '../../lib/auth';
 import { cn } from '../../lib/cn';
@@ -10,9 +10,11 @@ import { firstName, fmtDate, fmtRelative, plural, toDate } from '../../lib/forma
 import type { Member } from '../../lib/types';
 import {
   Avatar, Badge, Button, Card, ColorPicker, EmptyState, Fab, Field, IconButton, Input, Menu, MemberPicker, Modal, SegmentedControl, Select,
-  Skeleton, SkeletonCard, toast, useConfirm,
+  Skeleton, SkeletonCard, Switch, toast, useConfirm,
 } from '../../ui';
-import { amountToInput, keys, localDay, parseAmount, useAllowances, useCanManage, useGoal, useGoals, useMoney, type Allowance, type Goal } from './api';
+import {
+  amountToInput, currentMonth, keys, localDay, monthLabel, nextAuto, parseAmount, useAllowances, useCanManage, useGoal, useGoals, useMoney, type Allowance, type Goal,
+} from './api';
 import { MoneyInput, Progress, Ring } from './shared';
 import mod from './index';
 
@@ -23,6 +25,24 @@ function monthsUntil(date: string | null) {
   if (!d) return null;
   const now = new Date();
   return Math.max(0, (d.getFullYear() - now.getFullYear()) * 12 + d.getMonth() - now.getMonth());
+}
+
+/** Target month already over (and not reached): automatic contributions have stopped. */
+const pastDate = (g: Goal) => !g.completed_at && !!g.target_date && g.target_date.slice(0, 7) < currentMonth();
+
+/** "this month" / "on Nov 1" for a next-contribution month. */
+const whenLabel = (n: { month: string; thisMonth: boolean }) => (n.thisMonth ? 'this month' : `on ${fmtDate(`${n.month}-01`, 'MMM d')}`);
+
+function AutoBadge({ g }: { g: Goal }) {
+  const { fmt } = useMoney();
+  const next = g.auto_monthly ? nextAuto(g) : null;
+  if (!next) return null;
+  return (
+    <Badge tone="primary" className="max-w-full">
+      <Repeat size={11} aria-hidden /><span className="sr-only">Saves automatically: next</span>
+      <span aria-hidden>Auto ·</span> {fmt(next.amount)} {whenLabel(next)}
+    </Badge>
+  );
 }
 
 export function useCanEditGoal() {
@@ -37,8 +57,9 @@ export function GoalCard({ g, onOpen, compact }: { g: Goal; onOpen: (g: Goal) =>
   const ratio = g.target > 0 ? g.saved / g.target : 0;
   const left = Math.max(0, g.target - g.saved);
   const months = monthsUntil(g.target_date);
-  const perMonth = months && left > 0 ? left / months : null;
+  const perMonth = months && left > 0 && !g.auto_monthly ? left / months : null;
   const done = !!g.completed_at;
+  const past = pastDate(g);
   return (
     <Card interactive padding={compact ? 'sm' : 'md'} onClick={() => onOpen(g)} className="group relative overflow-hidden">
       <button type="button" className="absolute inset-0 z-10 rounded-2xl focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-ring" aria-label={`Open goal ${g.name}`} onClick={(e) => { e.stopPropagation(); onOpen(g); }} />
@@ -58,6 +79,9 @@ export function GoalCard({ g, onOpen, compact }: { g: Goal; onOpen: (g: Goal) =>
           <div className="mt-0.5 truncate whitespace-nowrap text-[13px] text-muted tabular">
             <span className="font-semibold text-fg">{fmt(g.saved)}</span> of {fmt(g.target)}
           </div>
+          {compact && !done && (g.auto_monthly || past) && (
+            <div className="mt-1 flex">{past ? <Badge tone="warning"><CalendarClock size={11} aria-hidden />Past its date</Badge> : <AutoBadge g={g} />}</div>
+          )}
           {!compact && (
             <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted">
               {owner ? (
@@ -65,9 +89,12 @@ export function GoalCard({ g, onOpen, compact }: { g: Goal; onOpen: (g: Goal) =>
               ) : (
                 <span>Family goal</span>
               )}
-              {g.target_date && !done && (
-                <span className="inline-flex items-center gap-1"><CalendarDays size={12} />by {fmtDate(g.target_date, 'MMM yyyy')}{perMonth ? ` · ${fmt(perMonth)}/mo` : ''}</span>
-              )}
+              {g.target_date && !done && (past ? (
+                <span className="inline-flex items-center gap-1 font-medium text-warning-soft-fg"><CalendarClock size={12} aria-hidden />Past its date · {fmtDate(g.target_date, 'MMM yyyy')}</span>
+              ) : (
+                <span className="inline-flex items-center gap-1"><CalendarDays size={12} aria-hidden />by {fmtDate(g.target_date, 'MMM yyyy')}{perMonth ? ` · ${fmt(perMonth)}/mo` : ''}</span>
+              ))}
+              {!done && <AutoBadge g={g} />}
             </div>
           )}
         </div>
@@ -77,10 +104,11 @@ export function GoalCard({ g, onOpen, compact }: { g: Goal; onOpen: (g: Goal) =>
 }
 
 export function GoalForm({ open, onClose, editing }: { open: boolean; onClose: () => void; editing?: Goal | null }) {
+  const hintId = useId();
   const qc = useQueryClient();
   const { user } = useAuth();
   const canManage = useCanManage();
-  const { currency } = useMoney();
+  const { currency, fmt } = useMoney();
   const [name, setName] = useState('');
   const [emoji, setEmoji] = useState('🎯');
   const [color, setColor] = useState('#12A594');
@@ -88,6 +116,7 @@ export function GoalForm({ open, onClose, editing }: { open: boolean; onClose: (
   const [saved, setSaved] = useState('');
   const [owner, setOwner] = useState<number | null>(null);
   const [date, setDate] = useState('');
+  const [auto, setAuto] = useState(false);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
 
@@ -100,8 +129,24 @@ export function GoalForm({ open, onClose, editing }: { open: boolean; onClose: (
     setSaved('');
     setOwner(editing ? editing.owner_id : canManage ? null : user?.id ?? null);
     setDate(editing?.target_date ?? '');
+    setAuto(editing?.auto_monthly ?? false);
     setErrors({});
   }, [open, editing, canManage, user?.id]);
+
+  // Live preview of the monthly amount (the server makes this month's contribution as soon as it's saved).
+  const preview = date ? nextAuto({
+    target: parseAmount(target) ?? 0, saved: editing ? editing.saved : parseAmount(saved) ?? 0, target_date: date, completed_at: null,
+    auto_last_month: editing?.auto_last_month ?? null,
+  }) : null;
+  const autoPreview = !date
+    ? "Set a target date first: the amount is what's left, spread over the months until then."
+    : date.slice(0, 7) < currentMonth()
+      ? 'The target date has passed, so nothing would be added.'
+      : !preview
+        ? (parseAmount(target) ? 'Already at the target.' : 'Enter a target to see the monthly amount.')
+        : `≈ ${fmt(preview.amount)}/month until ${fmtDate(date, 'MMM yyyy')}, ${editing?.auto_monthly
+          ? `next ${whenLabel(preview)}`
+          : `first ${preview.thisMonth ? 'one this month, as soon as you save' : whenLabel(preview)}`}. Adjusts itself when money is added or taken out.`;
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
@@ -114,12 +159,17 @@ export function GoalForm({ open, onClose, editing }: { open: boolean; onClose: (
     if (Object.keys(errs).length) return;
     setBusy(true);
     try {
-      const body: Record<string, unknown> = { name: name.trim(), emoji, color, target: t, owner_id: owner, target_date: date || null };
+      const body: Record<string, unknown> = { name: name.trim(), emoji, color, target: t, owner_id: owner, target_date: date || null, auto_monthly: auto && !!date };
       if (!editing && saved) body.saved = parseAmount(saved);
-      if (editing) await api.patch(`/budget/goals/${editing.id}`, body);
-      else await api.post('/budget/goals', body);
+      const res = editing ? await api.patch<Goal>(`/budget/goals/${editing.id}`, body) : await api.post<Goal>('/budget/goals', body);
       qc.invalidateQueries({ queryKey: keys.all });
-      toast.success(editing ? 'Goal updated' : 'Goal created — happy saving!');
+      // This month's automatic contribution, if saving just made one: the month became claimed and the newest entry is automatic.
+      const made = res.entries?.[0];
+      // (an older automatic entry from a previous month doesn't count; created_at is UTC, so a contribution made in the
+      // first hours of a month east of UTC may skip the toast — never the other way round)
+      const fresh = made?.source === 'auto' && !!res.auto_last_month && res.auto_last_month !== editing?.auto_last_month
+        && made.created_at.slice(0, 7) === res.auto_last_month;
+      toast.success(editing ? 'Goal updated' : 'Goal created — happy saving!', fresh ? { description: `${fmt(made.amount)} put aside for ${monthLabel(currentMonth())}` } : undefined);
       onClose();
     } catch (err) {
       toast.error(errorMessage(err));
@@ -170,6 +220,10 @@ export function GoalForm({ open, onClose, editing }: { open: boolean; onClose: (
           <Field label="Target date" hint="Optional">
             <Input type="date" value={date} min="1970-01-01" max="2100-12-31" onChange={(e) => setDate(e.target.value)} />
           </Field>
+        </div>
+        <div className="rounded-2xl border border-border p-3.5">
+          <Switch checked={auto && !!date} onChange={setAuto} disabled={!date} label="Contribute automatically each month" aria-describedby={hintId} />
+          <p id={hintId} className="mt-1 pr-16 text-xs text-muted">{autoPreview}</p>
         </div>
         {canManage && (
           <Field label="Whose goal?" hint="Leave empty for a family goal">
@@ -291,6 +345,7 @@ function GoalDetail({ id, onClose }: { id: number | null; onClose: () => void })
   };
 
   const ratio = g && g.target > 0 ? g.saved / g.target : 0;
+  const next = g?.auto_monthly ? nextAuto(g) : null;
   return (
     <>
       <Modal
@@ -326,6 +381,17 @@ function GoalDetail({ id, onClose }: { id: number | null; onClose: () => void })
                     <span>{fmt(Math.max(0, g.target - g.saved))} to go{g.target_date ? ` · by ${fmtDate(g.target_date, 'MMM d, yyyy')}` : ''}</span>
                   )}
                 </div>
+                {!g.completed_at && (pastDate(g) ? (
+                  <p className="mt-2 flex items-start gap-1.5 text-xs font-medium text-warning-soft-fg">
+                    <CalendarClock size={13} className="mt-px shrink-0" aria-hidden />
+                    {g.auto_monthly ? 'Past its date, so automatic contributions have stopped. Pick a later date to keep going.' : 'Past its target date.'}
+                  </p>
+                ) : next && (
+                  <p className="mt-2 flex items-start gap-1.5 text-xs font-medium text-primary-soft-fg">
+                    <Repeat size={13} className="mt-px shrink-0" aria-hidden />
+                    Saving automatically: next {fmt(next.amount)} {whenLabel(next)}, recalculated each month.
+                  </p>
+                ))}
               </div>
               {editable && (
                 <Menu
@@ -347,11 +413,13 @@ function GoalDetail({ id, onClose }: { id: number | null; onClose: () => void })
                     const m = who(e.user_id);
                     return (
                       <li key={e.id} className="group flex items-center gap-3 px-3 py-2.5">
-                        {m ? <Avatar user={m} size="sm" /> : <span className="size-8" />}
+                        {e.source === 'auto' ? (
+                          <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-primary-soft text-primary-soft-fg" aria-hidden><Repeat size={15} /></span>
+                        ) : m ? <Avatar user={m} size="sm" /> : <span className="size-8" />}
                         <div className="min-w-0 flex-1">
                           <div className="truncate text-sm font-medium text-fg">{e.note || (e.amount > 0 ? 'Deposit' : 'Withdrawal')}</div>
                           <div className="text-xs text-muted">
-                            {m ? firstName(m.name) : 'Someone'} · {fmtRelative(e.created_at)}{e.source === 'allowance' ? ' · allowance' : ''}
+                            {e.source === 'auto' ? 'Automatic' : m ? firstName(m.name) : 'Someone'} · {fmtRelative(e.created_at)}{e.source === 'allowance' ? ' · allowance' : ''}
                           </div>
                         </div>
                         <span className={cn('text-sm font-semibold tabular', e.amount > 0 ? 'text-success-soft-fg' : 'text-fg')}>

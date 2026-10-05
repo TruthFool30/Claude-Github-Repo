@@ -1,7 +1,6 @@
 // Demo content for the Rivera family: contacts, folders, generated documents (real PDFs, SVG
 // "scans", text/CSV files — no network) and info cards.
-import path from 'node:path';
-import { extOf, moveIntoVault } from './files.js';
+import { extOf, writeVaultFile } from './files.js';
 
 // ---- tiny file generators -------------------------------------------------------------------
 
@@ -172,7 +171,7 @@ export async function seedVault(ctx, { familyId, users }) {
     { folder: 'school', file: `School calendar ${year}-${String(year + 1).slice(2)}.pdf`, name: `School calendar ${year}–${String(year + 1).slice(2)}`, by: alex, at: 40,
       buf: makePdf({ title: 'Lincoln Elementary', subtitle: `School year calendar ${year}-${year + 1}`, color: blue, lines: [{ text: 'Key dates', bold: true, size: 14 }, { rule: true }, 'Sep 2 - First day of school', 'Oct 13 - Staff development day (no school)', 'Nov 11 - Veterans Day (no school)', 'Nov 24-28 - Thanksgiving break', 'Dec 21 - Jan 4 - Winter break', 'Feb 16 - Presidents Day', 'Mar 30 - Apr 3 - Spring break', 'Jun 11 - Last day of school (early release 12:30pm)'] }) },
     { folder: 'school', file: 'Field trip permission - Science Museum.pdf', name: 'Field trip permission – Science Museum', by: sam, at: 6,
-      buf: makePdf({ title: 'Field Trip Permission', subtitle: 'Grade 6 · California Science Museum', color: blue, lines: ['Date: next Friday, 8:30am - 2:45pm', 'Cost: $15 (includes bus and planetarium show)', 'Bring: packed lunch, water bottle, comfortable shoes', '', { text: 'Signed: Sam Rivera (parent)', bold: true }] }) },
+      buf: makePdf({ title: 'Field Trip Permission', subtitle: 'Grade 6 · Science Museum', color: blue, lines: ['Date: next Friday, 8:30am - 2:45pm', 'Cost: $15 (includes bus and planetarium show)', 'Bring: packed lunch, water bottle, comfortable shoes', '', { text: 'Signed: Sam Rivera (parent)', bold: true }] }) },
     { folder: 'school', file: 'School supply list.txt', name: 'School supply list', by: sam, at: 40,
       buf: Buffer.from(`Lincoln Elementary — supply lists\n\nMia (Grade 6)\n- 4 composition notebooks\n- Scientific calculator (TI-30XS)\n- Colored pencils (24)\n- 2 packs of loose-leaf paper\n- Earbuds for the Chromebook\n\nLeo (Grade 3)\n- 24 #2 pencils\n- Crayons (24) and glue sticks\n- Safety scissors\n- 2 boxes of tissues for the classroom\n- Pencil pouch\n`) },
     { folder: 'insurance', file: 'Home insurance policy.pdf', name: 'Home insurance policy', by: alex, at: 58, expires: inDays(210), adults: 1,
@@ -202,11 +201,10 @@ export async function seedVault(ctx, { familyId, users }) {
   const docIds = {};
   for (const d of docs) {
     const ext = extOf(d.file);
-    const url = ctx.storeFile(familyId, d.buf, `.${ext}`);
-    const key = moveIntoVault(ctx.uploadDir, familyId, path.join(ctx.uploadDir, url.slice('/uploads/'.length)));
+    const key = writeVaultFile(ctx.uploadDir, familyId, ctx.box, d.buf, ext);
     const at = ago(d.at, 2);
     docIds[d.file] = Number(insDoc.run(familyId, d.folder ? folders[d.folder] : null, d.name, d.file, ext, MIME[ext] ?? 'application/octet-stream', d.buf.length, key,
-      d.by.id, d.private ?? 0, d.adults ?? 0, d.notes ?? null, d.expires ?? null, at, at).lastInsertRowid);
+      d.by.id, d.private ?? 0, d.adults ?? 0, ctx.box.seal(d.notes ?? null), d.expires ?? null, at, at).lastInsertRowid);
   }
   // Pretend the car-insurance reminder already went out, so a fresh seed doesn't immediately
   // notify; Alex's passport reminder is left for the sweep to deliver.
@@ -227,7 +225,8 @@ export async function seedVault(ctx, { familyId, users }) {
   const noteIds = {};
   for (const n of notes) {
     const at = ago(n.at);
-    noteIds[n.title] = Number(insNote.run(familyId, n.title, n.kind, JSON.stringify(n.fields.map(([label, value, secret]) => ({ label, value, secret }))), n.body ?? null,
+    const fields = JSON.stringify(n.fields.map(([label, value, secret]) => ({ label, value, secret })));
+    noteIds[n.title] = Number(insNote.run(familyId, n.title, n.kind, ctx.box.seal(fields), ctx.box.seal(n.body ?? null),
       n.private ?? 0, n.adults ?? 0, n.by.id, at, at).lastInsertRowid);
   }
 

@@ -21,7 +21,7 @@
 import { Router } from 'express';
 import { ISO_NOW } from '../db.js';
 import { hydrateActivity, activityVisibleSql } from '../activity.js';
-import { cleanStr, httpError, toId } from '../util.js';
+import { cleanStr, firstName, httpError, toId } from '../util.js';
 import { MAX_COMMENT_CHARS, MAX_PHOTOS, MAX_POST_CHARS, MOODS, REACTIONS } from './wall/constants.js';
 import { seedWall } from './wall/seed.js';
 
@@ -60,6 +60,7 @@ const INDEXES = [
   'CREATE INDEX IF NOT EXISTS wall_posts_family_created ON wall_posts(family_id, created_at DESC, id DESC)',
   'CREATE INDEX IF NOT EXISTS wall_post_photos_post ON wall_post_photos(post_id, position)',
   'CREATE INDEX IF NOT EXISTS wall_comments_post ON wall_comments(post_id, created_at)',
+  'CREATE INDEX IF NOT EXISTS wall_comments_parent ON wall_comments(parent_id)',
 ];
 
 export const migrations = [
@@ -120,7 +121,6 @@ const snippet = (s, n = 90) => {
   const t = String(s ?? '').replace(/\s+/g, ' ').trim();
   return t.length > n ? `${t.slice(0, n - 1)}…` : t;
 };
-const firstName = (n) => String(n ?? '').trim().split(/\s+/)[0] ?? '';
 
 /** Load the full post objects (author, photos, reactions, comments) for a set of rows. */
 export function hydratePosts(ctx, rows) {
@@ -188,7 +188,7 @@ export function mentionedMembers(db, familyId, text) {
   const ids = new Set();
   for (const t of tags) {
     for (const m of members) {
-      if (firstName(m.name).toLowerCase() === t || (m.nickname && m.nickname.toLowerCase() === t)) ids.add(m.id);
+      if (firstName(m.name, '').toLowerCase() === t || (m.nickname && m.nickname.toLowerCase() === t)) ids.add(m.id);
     }
   }
   return [...ids];
@@ -348,7 +348,7 @@ export function router(ctx) {
       summary: n ? `shared ${n === 1 ? 'a photo' : `${n} photos`}` : 'shared a post',
       link: `/home/post/${post.id}`,
     });
-    const who = firstName(req.user.name);
+    const who = firstName(req.user.name, '');
     const mentioned = mentionedMembers(db, fid, body).filter((id) => id !== req.user.id);
     if (mentioned.length) {
       ctx.notify({ familyId: fid, userIds: mentioned, module: 'wall', title: `${who} mentioned you in a post`, body: snippet(body), link: `/home/post/${post.id}`, excludeUserId: req.user.id });
@@ -389,7 +389,7 @@ export function router(ctx) {
     ctx.broadcast(fid, 'wall.post.updated', post);
     const newlyMentioned = mentionedMembers(db, fid, body).filter((id) => !mentionedMembers(db, fid, row.body).includes(id));
     if (newlyMentioned.length) {
-      ctx.notify({ familyId: fid, userIds: newlyMentioned, module: 'wall', title: `${firstName(req.user.name)} mentioned you in a post`, body: snippet(body), link: `/home/post/${row.id}`, excludeUserId: req.user.id });
+      ctx.notify({ familyId: fid, userIds: newlyMentioned, module: 'wall', title: `${firstName(req.user.name, '')} mentioned you in a post`, body: snippet(body), link: `/home/post/${row.id}`, excludeUserId: req.user.id });
     }
     res.json(post);
   });
@@ -410,10 +410,8 @@ export function router(ctx) {
     });
     for (const p of photos) ctx.removeFile(p.url);
     ctx.broadcast(fid, 'wall.post.deleted', { id: row.id });
-    // Let affected bells drop the removed notifications right away.
-    const byUser = new Map();
-    for (const n of staleNotes) byUser.set(n.user_id, [...(byUser.get(n.user_id) ?? []), n.id]);
-    for (const [userId, ids] of byUser) ctx.sendToUsers([userId], 'notification.removed', { ids }, fid);
+    // Let affected bells drop the removed notifications right away (rows already deleted above).
+    ctx.removeNotifications(fid, staleNotes);
     res.json({ ok: true });
   });
 
@@ -427,7 +425,7 @@ export function router(ctx) {
     const post = loadPost(row.id);
     ctx.broadcast(fid, 'wall.post.pinned', post);
     if (pinned && row.user_id && row.user_id !== req.user.id) {
-      ctx.notify({ familyId: fid, userIds: [row.user_id], module: 'wall', title: `${firstName(req.user.name)} pinned your post`, body: snippet(row.body) || null, link: `/home/post/${row.id}`, excludeUserId: req.user.id });
+      ctx.notify({ familyId: fid, userIds: [row.user_id], module: 'wall', title: `${firstName(req.user.name, '')} pinned your post`, body: snippet(row.body) || null, link: `/home/post/${row.id}`, excludeUserId: req.user.id });
     }
     res.json(post);
   });
@@ -446,7 +444,7 @@ export function router(ctx) {
     const post = loadPost(row.id);
     ctx.broadcast(fid, 'wall.reaction.updated', { post_id: row.id, reactions: post.reactions });
     if (!prev && row.user_id && row.user_id !== req.user.id) {
-      ctx.notify({ familyId: fid, userIds: [row.user_id], module: 'wall', title: `${firstName(req.user.name)} reacted ${emoji} to your post`, body: snippet(row.body) || null, link: `/home/post/${row.id}`, excludeUserId: req.user.id });
+      ctx.notify({ familyId: fid, userIds: [row.user_id], module: 'wall', title: `${firstName(req.user.name, '')} reacted ${emoji} to your post`, body: snippet(row.body) || null, link: `/home/post/${row.id}`, excludeUserId: req.user.id });
     }
     res.json(post);
   });
@@ -477,7 +475,7 @@ export function router(ctx) {
     touch(row.id);
     const comment = loadPost(row.id).comments.find((c) => c.id === Number(lastInsertRowid));
     ctx.broadcast(fid, 'wall.comment.created', { post_id: row.id, comment });
-    const who = firstName(req.user.name);
+    const who = firstName(req.user.name, '');
     const link = `/home/post/${row.id}`;
     const mentioned = mentionedMembers(db, fid, body);
     const notified = new Set([req.user.id]);
@@ -545,7 +543,7 @@ export function search(ctx, familyId, q) {
     .all(familyId, like);
   const day = (iso) => new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
   return [
-    ...posts.map((p) => ({ title: snippet(p.body, 70), subtitle: `Post by ${firstName(p.author) || 'a former member'} · ${day(p.created_at)}`, link: `/home/post/${p.id}` })),
-    ...comments.map((c) => ({ title: snippet(c.body, 70), subtitle: `Comment by ${firstName(c.author) || 'a former member'}`, link: `/home/post/${c.post_id}` })),
+    ...posts.map((p) => ({ title: snippet(p.body, 70), subtitle: `Post by ${firstName(p.author, 'a former member')} · ${day(p.created_at)}`, link: `/home/post/${p.id}` })),
+    ...comments.map((c) => ({ title: snippet(c.body, 70), subtitle: `Comment by ${firstName(c.author, 'a former member')}`, link: `/home/post/${c.post_id}` })),
   ].slice(0, 8);
 }

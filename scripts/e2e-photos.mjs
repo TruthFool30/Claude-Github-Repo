@@ -9,6 +9,9 @@ import { chromium } from 'playwright';
 import { encodePng } from '../server/src/modules/photos/png.js';
 import { renderScene, PRESETS } from '../server/src/modules/photos/scenes.js';
 
+// Run Node and the browser in the demo family's time zone (seed.js DEMO_TZ), so "today" matches the server.
+process.env.TZ ||= process.env.HEARTH_DEMO_TZ || 'America/Chicago';
+
 const BASE = process.env.BASE || 'http://localhost:4205';
 const SHOTS = process.env.SHOTS || path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'e2e-shots', 'photos');
 fs.mkdirSync(SHOTS, { recursive: true });

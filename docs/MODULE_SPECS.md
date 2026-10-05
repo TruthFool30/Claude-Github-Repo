@@ -76,6 +76,24 @@ server tests, and Wall activity entries for meaningful actions.
   filters (category, member, search) and month navigation. Recurring monthly bills (template that
   auto-generates each month, or "mark paid"). Currency from family settings (`fmtMoney`).
 - Kids' allowance / savings goals (goal name, target, saved, progress). Seed: 2 months of data.
+- Automatic monthly contributions (opt-in per goal, needs a target date; whoever can edit the goal can
+  toggle it). Goal API fields: `auto_monthly` (bool, accepted on POST/PATCH `/api/budget/goals`; 400
+  without a target date) and read-only `auto_last_month` (`YYYY-MM`, the latest month already handled,
+  returned whether or not the option is on). Amount: `ceil(left_cents / months)` where `months` counts
+  the current month through the target date's month inclusive — the last month pays everything left,
+  never more; a target date earlier in the current month still counts, so everything left is added
+  then. Nothing after the target month (the UI shows "Past its date").
+  Once per goal per month (`budget_goal_runs`, PK `(goal_id, month)`): on the 1st in the family's time
+  zone (first 10-minute sweep after midnight) every auto goal whose target month hasn't passed claims
+  the month — reached goals and zero amounts too — and only goals still short of their target get an
+  entry (`source: 'auto'`, note "Monthly contribution · Oct 2026"). So a deleted automatic entry
+  isn't re-created, and a reached goal that dips below target mid-month waits for the next 1st. Past
+  months are not backfilled. Creating a goal with the option on, or switching it on, handles the
+  current month right away (if not claimed yet) and is logged like a normal deposit by that person.
+  Reaching the target this way fires the usual "goal reached" activity + notification. Each sweep that
+  adds money sends one summary ("Saved $350.00 automatically: …", verb `auto_saved`, no actor) to
+  adults plus the owners of the goals in it, as a notification and an audience-limited Wall entry.
+  Not done: counting contributions as spending; yearly refilling goals.
 
 ## locator
 - Map (react-leaflet, OSM tiles) with member pins (avatar in member color) at their last shared

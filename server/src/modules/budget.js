@@ -3,9 +3,9 @@
 // savings goals and kids' allowances. See docs/MODULE_SPECS.md ("budget").
 import { Router } from 'express';
 import { ISO_NOW } from '../db.js';
-import { cleanStr, httpError, isColor, toId } from '../util.js';
+import { cleanStr, firstName, httpError, isColor, toId } from '../util.js';
 import {
-  BILL_SELECT, ICONS, KINDS, TX_SELECT, addMonths, billOut, billStatus, canManage, categoryOut, dateKey, dueDate,
+  BILL_SELECT, ICONS, KINDS, TX_SELECT, addMonths, autoAmount, billOut, billStatus, canManage, categoryOut, dateKey, dueDate,
   ensureDefaults, familyToday, fromCents, generateDue, isValidDate, monthEnd, monthLabel, monthOf, monthStart, money, parseMonth,
   recordBillPayment, requestToday, toCents, txOut, upgradeMeta,
 } from './budget/lib.js';
@@ -109,6 +109,17 @@ export const migrations = [
      last_paid_at TEXT,
      created_at TEXT NOT NULL DEFAULT ${ISO_NOW},
      UNIQUE (family_id, member_id))`,
+  `CREATE INDEX IF NOT EXISTS idx_budget_runs_tx ON budget_recurring_runs(transaction_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_budget_runs_family_month ON budget_recurring_runs(family_id, month)`,
+  `CREATE INDEX IF NOT EXISTS idx_budget_goals_family ON budget_goals(family_id)`,
+  // Automatic monthly contributions: opt-in per goal, one run row per goal per (family-local) month.
+  'ALTER TABLE budget_goals ADD COLUMN auto_monthly INTEGER NOT NULL DEFAULT 0',
+  `CREATE TABLE IF NOT EXISTS budget_goal_runs (
+     goal_id INTEGER NOT NULL REFERENCES budget_goals(id) ON DELETE CASCADE,
+     family_id INTEGER NOT NULL REFERENCES families(id) ON DELETE CASCADE,
+     month TEXT NOT NULL,
+     created_at TEXT NOT NULL DEFAULT ${ISO_NOW},
+     PRIMARY KEY (goal_id, month))`,
 ];
 
 // --------------------------------------------------------------------------------------------
@@ -125,7 +136,6 @@ function assertMember(db, familyId, userId, field = 'Member') {
 }
 const adultIds = (db, familyId) => memberIds(db, familyId).filter((m) => m.role !== 'child').map((m) => m.user_id);
 const allIds = (db, familyId) => memberIds(db, familyId).map((m) => m.user_id);
-const firstName = (n) => String(n || '').trim().split(/\s+/)[0] || 'Someone';
 
 function requireManager(req, what = 'do that') {
   if (!canManage(req)) throw httpError(403, `Ask a parent to ${what}`);
@@ -155,26 +165,32 @@ function loadGoal(db, familyId, id) {
   return row;
 }
 
-function goalSaved(db, goalId) {
-  return db.prepare('SELECT COALESCE(SUM(amount_cents), 0) AS s FROM budget_goal_entries WHERE goal_id = ?').get(goalId).s;
-}
+/** Entry totals per goal: on goal rows from GOALS_SELECT, or `goalStats(db, id)` for a single one. */
+const GOAL_STATS = 'COALESCE(SUM(e.amount_cents), 0) AS saved_cents, COUNT(e.id) AS entry_count, MAX(e.created_at) AS last_entry_at';
+// auto_last_month: the latest month claimed by automatic contributions (the client works out the next one from it).
+const LAST_RUN = (id) => `(SELECT MAX(month) FROM budget_goal_runs r WHERE r.goal_id = ${id}) AS auto_last_month`;
+const GOALS_SELECT = `SELECT g.*, ${GOAL_STATS}, ${LAST_RUN('g.id')} FROM budget_goals g LEFT JOIN budget_goal_entries e ON e.goal_id = g.id`;
+const goalStats = (db, goalId) => db.prepare(`SELECT ${GOAL_STATS}, ${LAST_RUN('$id')} FROM budget_goal_entries e WHERE e.goal_id = $id`).get({ id: goalId });
+const goalSaved = (db, goalId) => goalStats(db, goalId).saved_cents;
 
 function goalOut(db, row, { entries = false } = {}) {
-  const saved = goalSaved(db, row.id);
+  const stats = row.entry_count === undefined ? goalStats(db, row.id) : row;
   const out = {
     id: row.id,
     name: row.name,
     emoji: row.emoji,
     color: row.color,
     target: fromCents(row.target_cents),
-    saved: fromCents(saved),
+    saved: fromCents(stats.saved_cents),
     owner_id: row.owner_id,
     target_date: row.target_date,
     completed_at: row.completed_at,
     created_by: row.created_by,
     created_at: row.created_at,
-    entry_count: db.prepare('SELECT COUNT(*) AS n FROM budget_goal_entries WHERE goal_id = ?').get(row.id).n,
-    last_entry_at: db.prepare('SELECT MAX(created_at) AS m FROM budget_goal_entries WHERE goal_id = ?').get(row.id).m,
+    entry_count: stats.entry_count,
+    last_entry_at: stats.last_entry_at,
+    auto_monthly: !!row.auto_monthly,
+    auto_last_month: stats.auto_last_month,
   };
   if (entries) {
     out.entries = db
@@ -272,49 +288,27 @@ function canEditTx(req, row) {
 function buildSummary(db, familyId, month) {
   const start = monthStart(month);
   const end = monthEnd(month);
-  const totals = { income: 0, spent: 0 };
-  for (const r of db
-    .prepare(
-      `SELECT kind, SUM(amount_cents) AS s, COUNT(*) AS n FROM budget_transactions
-       WHERE family_id = ? AND deleted_at IS NULL AND date BETWEEN ? AND ? GROUP BY kind`,
-    )
-    .all(familyId, start, end)) {
-    if (r.kind === 'income') totals.income = r.s;
-    else totals.spent = r.s;
-  }
-  const count = db
-    .prepare('SELECT COUNT(*) AS n FROM budget_transactions WHERE family_id = ? AND deleted_at IS NULL AND date BETWEEN ? AND ?')
-    .get(familyId, start, end).n;
-
   const catRows = db.prepare('SELECT * FROM budget_categories WHERE family_id = ? ORDER BY sort, id').all(familyId);
-  const agg = new Map(
-    db
-      .prepare(
-        `SELECT category_id, SUM(amount_cents) AS s, COUNT(*) AS n FROM budget_transactions
-         WHERE family_id = ? AND deleted_at IS NULL AND date BETWEEN ? AND ? GROUP BY category_id, kind`,
-      )
-      .all(familyId, start, end)
-      .map((r) => [r.category_id ?? 0, r]),
-  );
-  const uncategorized = db
+  const catAgg = db
     .prepare(
-      `SELECT kind, SUM(amount_cents) AS s, COUNT(*) AS n FROM budget_transactions
-       WHERE family_id = ? AND deleted_at IS NULL AND category_id IS NULL AND date BETWEEN ? AND ? GROUP BY kind`,
+      `SELECT category_id, kind, SUM(amount_cents) AS s, COUNT(*) AS n FROM budget_transactions
+       WHERE family_id = ? AND deleted_at IS NULL AND date BETWEEN ? AND ? GROUP BY category_id, kind`,
     )
     .all(familyId, start, end);
+  const totals = { income: 0, spent: 0 };
+  let count = 0;
+  for (const r of catAgg) {
+    if (r.kind === 'income') totals.income += r.s;
+    else totals.spent += r.s;
+    count += r.n;
+  }
+  const agg = new Map(catAgg.map((r) => [r.category_id ?? 0, r]));
+  const uncategorized = catAgg.filter((r) => r.category_id === null);
 
   const categories = catRows.map((c) => {
     const a = agg.get(c.id);
     return { ...categoryOut(c), total: fromCents(a?.s ?? 0), count: a?.n ?? 0 };
   });
-
-  const prevMonth = addMonths(month, -1);
-  const prev = db
-    .prepare(
-      `SELECT COALESCE(SUM(CASE WHEN kind='expense' THEN amount_cents END), 0) AS spent
-       FROM budget_transactions WHERE family_id = ? AND deleted_at IS NULL AND date BETWEEN ? AND ?`,
-    )
-    .get(familyId, monthStart(prevMonth), monthEnd(prevMonth));
 
   const firstTrend = addMonths(month, -5);
   const trendRows = db
@@ -332,6 +326,8 @@ function buildSummary(db, familyId, month) {
       spent: fromCents(trendRows.find((r) => r.m === m && r.kind === 'expense')?.s ?? 0),
     });
   }
+  const prevMonth = addMonths(month, -1);
+  const prevSpent = trendRows.find((r) => r.m === prevMonth && r.kind === 'expense')?.s ?? 0;
 
   const byMember = db
     .prepare(
@@ -359,7 +355,7 @@ function buildSummary(db, familyId, month) {
       income: fromCents(totals.income),
       spent: fromCents(totals.spent),
       balance: fromCents(totals.income - totals.spent),
-      prev_spent: fromCents(prev.spent),
+      prev_spent: fromCents(prevSpent),
       budgeted: fromCents(totalLimit),
       count,
     },
@@ -478,14 +474,111 @@ function allowanceOut(row) {
   };
 }
 
-/** Periodic housekeeping: auto bills, due-today reminders, purge of soft-deleted transactions. */
+/** Add (positive) or withdraw (negative) money. */
+function addEntry(db, req, goal, cents, note, source) {
+  const before = goalSaved(db, goal.id);
+  if (before + cents < 0) throw httpError(400, `You can't take out more than ${money(before, req.family.currency)}`);
+  const { lastInsertRowid } = db
+    .prepare('INSERT INTO budget_goal_entries (goal_id, family_id, amount_cents, note, source, user_id) VALUES (?, ?, ?, ?, ?, ?)')
+    .run(goal.id, req.family.id, cents, note, source, req.user.id);
+  const after = before + cents;
+  let reached = false;
+  if (after >= goal.target_cents && !goal.completed_at) {
+    db.prepare(`UPDATE budget_goals SET completed_at = ${ISO_NOW} WHERE id = ?`).run(goal.id);
+    reached = true;
+  } else if (after < goal.target_cents && goal.completed_at) {
+    db.prepare('UPDATE budget_goals SET completed_at = NULL WHERE id = ?').run(goal.id);
+  }
+  return { entryId: Number(lastInsertRowid), reached };
+}
+
+function afterEntry(ctx, req, goal, cents, reached) {
+  const { db } = ctx;
+  const out = goalOut(db, loadGoal(db, req.family.id, goal.id), { entries: true });
+  ctx.broadcast(req.family.id, 'budget.goal.updated', out);
+  const label = `${goal.emoji ? `${goal.emoji} ` : ''}${goal.name}`;
+  if (reached) {
+    ctx.logActivity({
+      familyId: req.family.id, userId: req.user.id, module: 'budget', verb: 'goal_reached', entityId: goal.id,
+      summary: `reached the savings goal ${label} 🎉`, link: `/budget/goals?goal=${goal.id}`,
+    });
+    ctx.notify({
+      familyId: req.family.id, userIds: allIds(db, req.family.id), module: 'budget',
+      title: `Goal reached: ${goal.name} 🎉`, body: `${money(goal.target_cents, req.family.currency)} saved — time to celebrate!`,
+      link: `/budget/goals?goal=${goal.id}`, excludeUserId: req.user.id,
+    });
+  } else if (cents > 0) {
+    ctx.logActivity({
+      familyId: req.family.id, userId: req.user.id, module: 'budget', verb: 'saved', entityId: goal.id,
+      summary: `added ${money(cents, req.family.currency)} to ${label}`, link: `/budget/goals?goal=${goal.id}`,
+    });
+    if (goal.owner_id && goal.owner_id !== req.user.id) {
+      ctx.notify({
+        familyId: req.family.id, userIds: [goal.owner_id], module: 'budget',
+        title: `${firstName(req.user.name)} added ${money(cents, req.family.currency)} to ${goal.name}`,
+        body: `${Math.min(100, Math.round((out.saved / out.target) * 100))}% of the way there`,
+        link: `/budget/goals?goal=${goal.id}`, excludeUserId: req.user.id,
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * Automatic monthly goal contributions for the family's month of `today` (all auto goals, or just
+ * `goalId`). Every auto goal whose target month hasn't passed claims the month in budget_goal_runs
+ * (PK goal_id+month) — reached goals and zero amounts too — and only gets an entry when money is
+ * still needed. So it happens once per goal per month: repeated or concurrent sweeps never double
+ * up, a deleted entry isn't re-created, and a reached goal that dips below target mid-month waits
+ * for the 1st. A target date earlier this month still counts: everything left is added now.
+ * With `req` (a person switching the option on) the entry is theirs and is logged like a normal
+ * deposit; otherwise (the sweep) the family gets one summary of everything this run added.
+ * Returns the number of contributions made.
+ * ponytail: only the current month — months the server was down for are not backfilled.
+ */
+export function autoContribute(ctx, familyId, today, { goalId = null, req = null } = {}) {
+  const { db } = ctx;
+  const month = monthOf(today);
+  const goals = db
+    .prepare(`SELECT * FROM budget_goals WHERE family_id = ? AND auto_monthly = 1 AND target_date >= ?${goalId ? ' AND id = ?' : ''}`)
+    .all(familyId, monthStart(month), ...(goalId ? [goalId] : []));
+  if (!goals.length) return 0;
+  const family = db.prepare('SELECT currency FROM families WHERE id = ?').get(familyId);
+  const by = req ?? { family: { id: familyId, currency: family?.currency ?? 'USD' }, user: { id: null } }; // null user = Hearth
+  const done = [];
+  for (const goal of goals) {
+    const made = ctx.tx(db, () => {
+      if (!db.prepare('INSERT OR IGNORE INTO budget_goal_runs (goal_id, family_id, month) VALUES (?, ?, ?)').run(goal.id, familyId, month).changes) return null;
+      const cents = goal.completed_at ? 0 : autoAmount(goal.target_cents - goalSaved(db, goal.id), month, goal.target_date);
+      return cents > 0 ? { cents, ...addEntry(db, by, goal, cents, `Monthly contribution · ${monthLabel(month, 'short')}`, 'auto') } : null;
+    });
+    if (!made) continue;
+    afterEntry(ctx, by, goal, req ? made.cents : 0, made.reached); // goal.updated + the usual "goal reached" celebration
+    done.push({ goal, cents: made.cents });
+  }
+  if (done.length && !req) {
+    const fmt = (c) => money(c, by.family.currency);
+    const total = fmt(done.reduce((s, d) => s + d.cents, 0));
+    const parts = done.map(({ goal, cents }) => `${goal.emoji ? `${goal.emoji} ` : ''}${goal.name} ${fmt(cents)}`).join(' · ');
+    // Grown-ups plus the kids whose own goals got money (the Wall row is limited to the same people).
+    const audience = [...new Set([...adultIds(db, familyId), ...done.map((d) => d.goal.owner_id).filter(Boolean)])];
+    ctx.logActivity({ familyId, module: 'budget', verb: 'auto_saved', summary: `saved ${total} automatically: ${parts}`, link: '/budget/goals', audience });
+    ctx.notify({ familyId, userIds: audience, module: 'budget', title: `Saved ${total} automatically`, body: parts, link: '/budget/goals' });
+  }
+  return done.length;
+}
+
+/** Periodic housekeeping: auto bills, auto goal contributions, due-today reminders, purge of soft-deleted transactions. */
 export function sweep(ctx, todayOverride = null) {
   const { db } = ctx;
-  const families = db.prepare('SELECT DISTINCT family_id FROM budget_recurring WHERE active = 1').all().map((r) => r.family_id);
+  const families = db
+    .prepare('SELECT family_id FROM budget_recurring WHERE active = 1 UNION SELECT family_id FROM budget_goals WHERE auto_monthly = 1')
+    .all().map((r) => r.family_id);
   for (const familyId of families) {
     // Each family's own calendar day (from the time zone its members' browsers report).
     const today = todayOverride ?? familyToday(ctx, familyId);
-    const created = generateDue(db, familyId, today);
+    autoContribute(ctx, familyId, today);
+    const created = generateDue(db, familyId, today, ctx.time.familyTz(familyId));
     if (created.length) ctx.broadcast(familyId, 'budget.transaction.created', { ids: created, auto: true });
     // Reminders for manual bills due today.
     const month = monthOf(today);
@@ -540,7 +633,7 @@ export function router(ctx) {
     const familyId = req.family.id;
     ensureDefaults(db, familyId);
     const today = requestToday(ctx, req);
-    const created = generateDue(db, familyId, today);
+    const created = generateDue(db, familyId, today, ctx.time.tz(req));
     if (created.length) ctx.broadcast(familyId, 'budget.transaction.created', { ids: created, auto: true });
     return today;
   };
@@ -838,7 +931,7 @@ export function router(ctx) {
       .run(req.family.id, f.kind, f.description, f.amount_cents, f.category_id, f.day_of_month, f.paid_by, f.auto_create, f.start_month, f.end_month, f.notes, req.user.id);
     const id = Number(lastInsertRowid);
     const today = requestToday(ctx, req);
-    const created = generateDue(db, req.family.id, today);
+    const created = generateDue(db, req.family.id, today, ctx.time.tz(req));
     const bill = billForMonth(req, id, monthOf(today), today);
     emit(req, 'bill.created', bill);
     if (created.length) emit(req, 'transaction.created', { ids: created, auto: true });
@@ -856,7 +949,7 @@ export function router(ctx) {
     const f = parseBillBody(db, req, req.body ?? {}, existing);
     updateRow(db, 'budget_recurring', existing.id, f);
     const today = requestToday(ctx, req);
-    generateDue(db, req.family.id, today);
+    generateDue(db, req.family.id, today, ctx.time.tz(req));
     const bill = billForMonth(req, existing.id, parseMonth(req.query.month ?? req.body?.month, monthOf(today)), today);
     emit(req, 'bill.updated', bill);
     res.json(bill);
@@ -933,8 +1026,10 @@ export function router(ctx) {
       if (!run) throw httpError(404, 'Nothing recorded for that month');
       if (run.transaction_id) db.prepare(`UPDATE budget_transactions SET deleted_at = ${ISO_NOW} WHERE id = ? AND deleted_at IS NULL`).run(run.transaction_id);
       db.prepare('DELETE FROM budget_recurring_runs WHERE recurring_id = ? AND month = ?').run(bill.id, month);
-      // An auto bill would be re-created by the next sweep, so undoing its payment means "skipped".
-      if (bill.auto_create && run.status === 'paid') {
+      // An auto bill already due (for this member or for the family's sweep) would be re-created by the
+      // next sweep, so undoing its payment means "skipped".
+      const due = dueDate(month, bill.day_of_month);
+      if (bill.auto_create && run.status === 'paid' && (due <= requestToday(ctx, req) || due <= familyToday(ctx, req.family.id))) {
         db.prepare(`INSERT INTO budget_recurring_runs (recurring_id, family_id, month, status) VALUES (?, ?, ?, 'skipped')`).run(bill.id, req.family.id, month);
       }
     });
@@ -948,7 +1043,7 @@ export function router(ctx) {
 
   r.get('/goals', (req, res) => {
     const rows = db
-      .prepare('SELECT * FROM budget_goals WHERE family_id = ? ORDER BY (completed_at IS NOT NULL), created_at DESC, id DESC')
+      .prepare(`${GOALS_SELECT} WHERE g.family_id = ? GROUP BY g.id ORDER BY (g.completed_at IS NOT NULL), g.created_at DESC, g.id DESC`)
       .all(req.family.id);
     res.json(rows.map((g) => goalOut(db, g)));
   });
@@ -987,6 +1082,10 @@ export function router(ctx) {
       else if (!isValidDate(d)) throw httpError(400, 'Target date must be a valid YYYY-MM-DD date between 1970 and 2100');
       else out.target_date = d;
     }
+    if (!existing || has('auto_monthly')) out.auto_monthly = body.auto_monthly ? 1 : 0;
+    // The monthly amount is spread over the months until the target date, so it needs one.
+    const date = out.target_date !== undefined ? out.target_date : existing?.target_date;
+    if (!date && (out.auto_monthly ?? existing?.auto_monthly)) throw httpError(400, 'Set a target date to contribute automatically each month');
     return out;
   };
 
@@ -998,8 +1097,8 @@ export function router(ctx) {
       ? toCents(body.saved, { field: 'Already saved' }) : 0;
     const id = ctx.tx(db, () => {
       const { lastInsertRowid } = db
-        .prepare('INSERT INTO budget_goals (family_id, name, emoji, color, target_cents, owner_id, target_date, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-        .run(req.family.id, f.name, f.emoji, f.color, f.target_cents, f.owner_id, f.target_date, req.user.id);
+        .prepare('INSERT INTO budget_goals (family_id, name, emoji, color, target_cents, owner_id, target_date, auto_monthly, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(req.family.id, f.name, f.emoji, f.color, f.target_cents, f.owner_id, f.target_date, f.auto_monthly, req.user.id);
       if (initial) {
         db.prepare("INSERT INTO budget_goal_entries (goal_id, family_id, amount_cents, note, source, user_id) VALUES (?, ?, ?, 'Starting balance', 'manual', ?)")
           .run(lastInsertRowid, req.family.id, initial, req.user.id);
@@ -1007,8 +1106,6 @@ export function router(ctx) {
       }
       return Number(lastInsertRowid);
     });
-    const goal = goalOut(db, loadGoal(db, req.family.id, id));
-    emit(req, 'goal.created', goal);
     ctx.logActivity({
       familyId: req.family.id, userId: req.user.id, module: 'budget', verb: 'goal', entityId: id,
       summary: `started saving for ${f.emoji ? `${f.emoji} ` : ''}${f.name} · ${money(f.target_cents, req.family.currency)}`,
@@ -1021,6 +1118,10 @@ export function router(ctx) {
         link: `/budget/goals?goal=${id}`, excludeUserId: req.user.id,
       });
     }
+    // This month's automatic contribution is made right away (later months: the sweep on the 1st).
+    if (f.auto_monthly) autoContribute(ctx, req.family.id, familyToday(ctx, req.family.id), { goalId: id, req });
+    const goal = goalOut(db, loadGoal(db, req.family.id, id), { entries: true });
+    emit(req, 'goal.created', goal);
     res.status(201).json(goal);
   });
 
@@ -1034,7 +1135,9 @@ export function router(ctx) {
     const target = f.target_cents ?? existing.target_cents;
     if (saved >= target && !existing.completed_at) db.prepare(`UPDATE budget_goals SET completed_at = ${ISO_NOW} WHERE id = ?`).run(existing.id);
     if (saved < target && existing.completed_at) db.prepare('UPDATE budget_goals SET completed_at = NULL WHERE id = ?').run(existing.id);
-    const goal = goalOut(db, loadGoal(db, req.family.id, existing.id));
+    // Switching it on makes this month's contribution right away (if the month isn't claimed yet).
+    if (f.auto_monthly && !existing.auto_monthly) autoContribute(ctx, req.family.id, familyToday(ctx, req.family.id), { goalId: existing.id, req });
+    const goal = goalOut(db, loadGoal(db, req.family.id, existing.id), { entries: true });
     emit(req, 'goal.updated', goal);
     res.json(goal);
   });
@@ -1047,62 +1150,13 @@ export function router(ctx) {
     res.json({ ok: true });
   });
 
-  /** Add (positive) or withdraw (negative) money. */
-  const addEntry = (req, goal, cents, note, source) => {
-    const before = goalSaved(db, goal.id);
-    if (before + cents < 0) throw httpError(400, `You can't take out more than ${money(before, req.family.currency)}`);
-    const { lastInsertRowid } = db
-      .prepare('INSERT INTO budget_goal_entries (goal_id, family_id, amount_cents, note, source, user_id) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(goal.id, req.family.id, cents, note, source, req.user.id);
-    const after = before + cents;
-    let reached = false;
-    if (after >= goal.target_cents && !goal.completed_at) {
-      db.prepare(`UPDATE budget_goals SET completed_at = ${ISO_NOW} WHERE id = ?`).run(goal.id);
-      reached = true;
-    } else if (after < goal.target_cents && goal.completed_at) {
-      db.prepare('UPDATE budget_goals SET completed_at = NULL WHERE id = ?').run(goal.id);
-    }
-    return { entryId: Number(lastInsertRowid), reached };
-  };
-
-  const afterEntry = (req, goal, cents, reached) => {
-    const out = goalOut(db, loadGoal(db, req.family.id, goal.id), { entries: true });
-    emit(req, 'goal.updated', out);
-    const label = `${goal.emoji ? `${goal.emoji} ` : ''}${goal.name}`;
-    if (reached) {
-      ctx.logActivity({
-        familyId: req.family.id, userId: req.user.id, module: 'budget', verb: 'goal_reached', entityId: goal.id,
-        summary: `reached the savings goal ${label} 🎉`, link: `/budget/goals?goal=${goal.id}`,
-      });
-      ctx.notify({
-        familyId: req.family.id, userIds: allIds(db, req.family.id), module: 'budget',
-        title: `Goal reached: ${goal.name} 🎉`, body: `${money(goal.target_cents, req.family.currency)} saved — time to celebrate!`,
-        link: `/budget/goals?goal=${goal.id}`, excludeUserId: req.user.id,
-      });
-    } else if (cents > 0) {
-      ctx.logActivity({
-        familyId: req.family.id, userId: req.user.id, module: 'budget', verb: 'saved', entityId: goal.id,
-        summary: `added ${money(cents, req.family.currency)} to ${label}`, link: `/budget/goals?goal=${goal.id}`,
-      });
-      if (goal.owner_id && goal.owner_id !== req.user.id) {
-        ctx.notify({
-          familyId: req.family.id, userIds: [goal.owner_id], module: 'budget',
-          title: `${firstName(req.user.name)} added ${money(cents, req.family.currency)} to ${goal.name}`,
-          body: `${Math.min(100, Math.round((out.saved / out.target) * 100))}% of the way there`,
-          link: `/budget/goals?goal=${goal.id}`, excludeUserId: req.user.id,
-        });
-      }
-    }
-    return out;
-  };
-
   r.post('/goals/:id/entries', (req, res) => {
     const goal = loadGoal(db, req.family.id, toId(req.params.id));
     const cents = toCents(req.body?.amount, { allowNegative: true });
     if (!canEditGoal(req, goal)) throw httpError(403, 'You can only add to your own goals');
     const note = cleanStr(req.body?.note, { field: 'Note', max: 140 });
-    const { reached } = ctx.tx(db, () => addEntry(req, goal, cents, note, 'manual'));
-    res.status(201).json(afterEntry(req, goal, cents, reached));
+    const { reached } = ctx.tx(db, () => addEntry(db, req, goal, cents, note, 'manual'));
+    res.status(201).json(afterEntry(ctx, req, goal, cents, reached));
   });
 
   r.delete('/goals/:id/entries/:entryId', (req, res) => {
@@ -1179,13 +1233,13 @@ export function router(ctx) {
           ).run(req.family.id, allowance.amount_cents, kidsCat?.id ?? null, `Allowance — ${firstName(kid.name)}`, requestToday(ctx, req), req.user.id, req.user.id).lastInsertRowid,
         );
       }
-      if (goal) reached = addEntry(req, goal, allowance.amount_cents, `${allowance.frequency === 'weekly' ? 'Weekly' : 'Monthly'} allowance`, 'allowance').reached;
+      if (goal) reached = addEntry(db, req, goal, allowance.amount_cents, `${allowance.frequency === 'weekly' ? 'Weekly' : 'Monthly'} allowance`, 'allowance').reached;
       db.prepare(`UPDATE budget_allowances SET last_paid_at = ${ISO_NOW} WHERE id = ?`).run(allowance.id);
     });
     const row = allowanceOut(db.prepare('SELECT * FROM budget_allowances WHERE id = ?').get(allowance.id));
     emit(req, 'allowance.paid', row);
     if (txId) emit(req, 'transaction.created', txOut(loadTx(db, req.family.id, txId)));
-    if (goal) afterEntry(req, goal, 0, reached);
+    if (goal) afterEntry(ctx, req, goal, 0, reached);
     ctx.logActivity({
       familyId: req.family.id, userId: req.user.id, module: 'budget', verb: 'allowance', entityId: allowance.id,
       summary: `paid ${firstName(kid.name)}'s allowance · ${money(allowance.amount_cents, req.family.currency)}${goal ? ` → ${goal.name}` : ''}`,
@@ -1249,9 +1303,10 @@ export function dashboard(ctx, req) {
       .filter((b) => ['overdue', 'due_today', 'upcoming'].includes(b.status) && b.kind === 'expense')
       .slice(0, 5)
       .map((b) => ({ id: b.id, description: b.description, amount: b.amount, due_date: b.due_date, status: b.status })),
+    // Ties (seeded goals share a timestamp) keep the order they always had: oldest id first.
     goals: db
-      .prepare('SELECT * FROM budget_goals WHERE family_id = ? AND completed_at IS NULL ORDER BY created_at DESC LIMIT 3')
+      .prepare(`${GOALS_SELECT} WHERE g.family_id = ? AND g.completed_at IS NULL GROUP BY g.id ORDER BY g.created_at DESC, g.id LIMIT 3`)
       .all(req.family.id)
-      .map((g) => ({ id: g.id, name: g.name, emoji: g.emoji, target: fromCents(g.target_cents), saved: fromCents(goalSaved(db, g.id)) })),
+      .map((g) => ({ id: g.id, name: g.name, emoji: g.emoji, target: fromCents(g.target_cents), saved: fromCents(g.saved_cents) })),
   };
 }

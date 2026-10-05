@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { useNavigate, useParams } from 'react-router';
 import { useQueryClient } from '@tanstack/react-query';
-import { Check, Copy, Eye, EyeOff, KeyRound, Lock, LockOpen, Pencil, Plus, ShieldCheck, Trash2, X } from 'lucide-react';
+import { Check, Copy, Eye, EyeOff, KeyRound, Lock, LockOpen, Pencil, Plus, ShieldCheck, Trash2, TriangleAlert, X } from 'lucide-react';
 import { api, errorMessage } from '../../lib/api';
 import { useMember } from '../../lib/auth';
 import { cn } from '../../lib/cn';
@@ -215,6 +215,7 @@ function NoteCard({ note, revealed, highlighted, onReveal, onHide, onEdit, onDel
         )}
       </div>
 
+      {note.unreadable && <p role="status" className="mx-4 flex items-center gap-2 rounded-xl bg-warning-soft px-3 py-2 text-[13px] font-medium text-warning-soft-fg"><TriangleAlert size={15} aria-hidden /> Contents can't be decrypted</p>}
       {fields.length > 0 && (
         <dl className="mx-4 divide-y divide-border rounded-xl border border-border bg-surface-2/50">
           {fields.map((f, i) => {
@@ -293,6 +294,7 @@ interface FieldDraft { label: string; value: string; secret: boolean; show: bool
 function NoteFormModal({ target, onClose, onSaved }: { target: VaultNote | { kind: NoteKind } | null; onClose: () => void; onSaved: (n: VaultNote) => void }) {
   const qc = useQueryClient();
   const existing = target && 'id' in target ? target : null;
+  const locked = !!existing?.unreadable; // contents can't be decrypted: only title/type/visibility are editable
   const [loading, setLoading] = useState(false);
   const [kind, setKind] = useState<NoteKind>('other');
   const [title, setTitle] = useState('');
@@ -350,11 +352,11 @@ function NoteFormModal({ target, onClose, onSaved }: { target: VaultNote | { kin
     if (!title.trim()) return setError('Give the card a title');
     const bad = clean.find((f) => !f.label.trim() || !f.value.trim());
     if (bad) return setError(bad.label.trim() ? `“${bad.label}” needs a value` : 'Every field needs a label');
-    if (!clean.length && !body.trim()) return setError('Add at least one field or some text');
+    if (!locked && !clean.length && !body.trim()) return setError('Add at least one field or some text');
     setSaving(true);
     setError('');
     try {
-      const payload: Record<string, unknown> = { title, kind, body, fields: clean.map(({ label, value, secret }) => ({ label, value, secret })) };
+      const payload: Record<string, unknown> = locked ? { title, kind } : { title, kind, body, fields: clean.map(({ label, value, secret }) => ({ label, value, secret })) };
       if (!existing || existing.is_owner) payload.visibility = visibility;
       const saved = existing ? await api.patch<VaultNote>(`/vault/notes/${existing.id}`, payload) : await api.post<VaultNote>('/vault/notes', payload);
       qc.setQueryData<VaultNote[]>(keys.notes, (old) => (old ? (existing ? old.map((n) => (n.id === saved.id ? saved : n)) : [saved, ...old]) : old));
@@ -411,6 +413,11 @@ function NoteFormModal({ target, onClose, onSaved }: { target: VaultNote | { kin
           <Field label="Title" required>
             <Input value={title} onChange={(e) => { setTitle(e.target.value); setTitleTouched(true); }} maxLength={80} placeholder="e.g. Home Wi-Fi" />
           </Field>
+          {locked ? (
+            <p role="status" className="flex items-center gap-2 rounded-xl bg-warning-soft px-3 py-2 text-sm font-medium text-warning-soft-fg">
+              <TriangleAlert size={16} aria-hidden /> This card's fields and notes can't be decrypted. Restore the encryption key to edit them.
+            </p>
+          ) : (<>
           <fieldset className="flex flex-col gap-2">
             <legend className="mb-1.5 text-[13px] font-semibold text-fg">Fields</legend>
             {fields.map((f, i) => (
@@ -446,6 +453,7 @@ function NoteFormModal({ target, onClose, onSaved }: { target: VaultNote | { kin
           <Field label="Notes" hint="Always visible on the card — don't put passwords here.">
             <Textarea rows={2} autoGrow value={body} onChange={(e) => setBody(e.target.value)} maxLength={2000} />
           </Field>
+          </>)}
           {(!existing || existing.is_owner) && (
             <div className="rounded-2xl border border-border p-3">
               <VisibilityPicker value={visibility} onChange={setVisibility} allowAdults={role === 'admin' || role === 'member'} what="this card" />

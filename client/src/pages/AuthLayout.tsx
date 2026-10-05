@@ -16,7 +16,7 @@ const dot = (c: string, label: string) => (
 export function AuthLayout({ children, title, subtitle }: { children: ReactNode; title: ReactNode; subtitle?: ReactNode }) {
   return (
     <div className="flex min-h-dvh bg-bg">
-      <div className="relative flex flex-1 flex-col overflow-hidden">
+      <div className="relative flex flex-1 flex-col overflow-clip">
         <div
           aria-hidden
           className="pointer-events-none absolute -top-40 left-1/2 h-80 w-[36rem] -translate-x-1/2 rounded-full opacity-60 blur-3xl lg:hidden"

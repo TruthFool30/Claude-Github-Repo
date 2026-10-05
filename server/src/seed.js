@@ -5,14 +5,16 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { hashPassword } from './auth.js';
-import { createContext } from './app.js';
+import { KEY_ERROR, createContext, defaultKeyFile, openBox } from './app.js';
 import { config } from './config.js';
 import { openDb } from './db.js';
 import { purge } from './purge.js';
+import { isValidTz } from './time.js';
 import { modules as defaultModules, validateModules } from './modules/index.js';
 
 export const DEMO_PASSWORD = 'hearth123';
 export const DEMO_INVITE_CODE = 'HRTH-2026';
+export const DEMO_TZ = 'America/Chicago'; // the Riveras live in Austin (see the locator seed)
 export const DEMO_USERS = [
   { key: 'alex', name: 'Alex Rivera', email: 'alex@hearth.test', role: 'admin', color: '#5B5BD6', birthday: '1986-04-12', phone: '+1 555 0101' },
   { key: 'sam', name: 'Sam Rivera', email: 'sam@hearth.test', role: 'member', color: '#D6409F', birthday: '1988-09-03', phone: '+1 555 0102' },
@@ -34,7 +36,7 @@ export async function seedDemo(ctx, modules = defaultModules, { log = console.lo
   const users = {};
   const hash = hashPassword(DEMO_PASSWORD);
   const insertUser = db.prepare('INSERT INTO users (email, password_hash, name, color, birthday, phone) VALUES (?, ?, ?, ?, ?, ?)');
-  const resetUser = db.prepare('UPDATE users SET password_hash = ?, name = ?, color = ?, birthday = ?, phone = ?, avatar_url = NULL WHERE id = ?');
+  const resetUser = db.prepare('UPDATE users SET password_hash = ?, name = ?, color = ?, birthday = ?, phone = ?, avatar_url = NULL, totp_secret = NULL, totp_pending = NULL, totp_last_step = NULL, totp_recovery = NULL WHERE id = ?');
   for (const u of DEMO_USERS) {
     const existing = db.prepare('SELECT id FROM users WHERE email = ?').get(u.email);
     let id;
@@ -47,6 +49,12 @@ export async function seedDemo(ctx, modules = defaultModules, { log = console.lo
     }
     users[u.key] = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
   }
+  // The demo family's zone, so seeds and background jobs (bill sweeps, reminders) agree on its "today"
+  // instead of using the server's (usually UTC). HEARTH_DEMO_TZ wins, else a zone a browser already reported.
+  const demoTz = isValidTz(process.env.HEARTH_DEMO_TZ) ? process.env.HEARTH_DEMO_TZ : null;
+  const setTz = db.prepare('UPDATE users SET timezone = COALESCE(?, timezone, ?) WHERE id = ?');
+  const known = Object.values(users).map((u) => u.timezone).find(isValidTz);
+  for (const u of Object.values(users)) setTz.run(demoTz, known ?? DEMO_TZ, u.id);
   const { lastInsertRowid: fid } = db
     .prepare("INSERT INTO families (name, invite_code, currency, created_by, created_at) VALUES ('Rivera Family', ?, 'USD', ?, ?)")
     .run(DEMO_INVITE_CODE, users.alex.id, new Date(Date.now() - 90 * 864e5).toISOString());
@@ -80,6 +88,12 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   fs.mkdirSync(config.uploadDir, { recursive: true });
   const db = openDb(config.dbPath, defaultModules);
   const ctx = createContext({ db, uploadDir: config.uploadDir });
+  try {
+    ctx.box = openBox(db, defaultKeyFile(config.dbPath)); // same key as the server (vault data is sealed)
+  } catch (err) {
+    console.error(err.code === KEY_ERROR ? `Can't seed: ${err.message}` : err);
+    process.exit(1);
+  }
   console.log(`Seeding demo data into ${config.dbPath}`);
   const { familyId } = await seedDemo(ctx);
   ctx.hub.close();

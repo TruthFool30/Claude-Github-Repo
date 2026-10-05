@@ -17,6 +17,7 @@
     "start": "npm run start -w server",
     "test": "npm test -w server",
     "seed": "npm run seed -w server",
+    "reset-2fa": "npm run reset-2fa -w server --",
     "typecheck": "tsc --noEmit -p client",
     "e2e": "node scripts/e2e-foundation.mjs"
   },

@@ -6,6 +6,9 @@
 import assert from 'node:assert/strict';
 import { chromium, request } from 'playwright';
 
+// Run Node and the browser in the demo family's time zone (seed.js DEMO_TZ), so "today" matches the server.
+process.env.TZ ||= process.env.HEARTH_DEMO_TZ || 'America/Chicago';
+
 const BASE = process.env.BASE || 'http://localhost:4012';
 const browser = await chromium.launch({ executablePath: process.env.CHROMIUM || '/opt/pw-browsers/chromium' });
 const pageErrors = [];
@@ -224,10 +227,14 @@ await check('join link flows', async () => {
   await n.page.getByRole('button', { name: 'Join Rivera Family' }).click();
   await n.page.waitForURL('**/home');
   // leave again so the demo family stays at 4 members
-  const api = n.page.request;
+  // Close the page first (its live stream would reconnect and log an expected 403), then leave with
+  // the same session cookie.
+  const state = await n.ctx.storageState();
+  await n.ctx.close();
+  const api = await request.newContext({ storageState: state });
   const me = await (await api.get(`${BASE}/api/auth/me`)).json();
   await api.delete(`${BASE}/api/family/members/${me.user.id}`, { headers: { 'X-Family-Id': String(me.active_family_id) } });
-  await n.ctx.close();
+  await api.dispose();
 });
 
 // 6. Invite code hidden from non-admins.
@@ -265,7 +272,15 @@ await check('leave family via UI -> next family, one toast', async () => {
   try {
     await page.goto(`${BASE}/home`);
     await page.getByRole('button', { name: new RegExp(name) }).first().click();
-    await page.getByRole('menuitem', { name: /Rivera Family/ }).click();
+    // Wait for the switch to finish (server default saved + this tab's family stored) before reloading.
+    await Promise.all([
+      page.waitForResponse((r) => r.url().includes('/activate') && r.ok()),
+      page.getByRole('menuitem', { name: /Rivera Family/ }).click(),
+    ]);
+    await page.waitForFunction((id) => {
+      const v = sessionStorage.getItem('hearth-tab-family');
+      return v && v !== String(id);
+    }, side.id);
     await page.goto(`${BASE}/family`);
     await page.waitForSelector('main h2');
     await page.getByRole('button', { name: /^Leave Rivera Family$/ }).click();

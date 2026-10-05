@@ -12,7 +12,7 @@ import { createApp } from '../src/app.js';
 /** Rate limits are effectively disabled in tests unless a test passes its own `limits`. */
 const RELAXED = { max: 1e9, windowMs: 60_000 };
 export const TEST_LIMITS = {
-  'login-ip': RELAXED, 'login-email': RELAXED, 'register-ip': RELAXED, 'join-ip': RELAXED, 'invite-ip': RELAXED,
+  'login-ip': RELAXED, 'login-email': RELAXED, 'register-ip': RELAXED, 'join-ip': RELAXED, 'invite-ip': RELAXED, 'code-user': RELAXED,
 };
 
 export async function startServer(options = {}) {
@@ -27,6 +27,10 @@ export async function startServer(options = {}) {
   const server = await new Promise((resolve) => {
     const s = app.listen(0, '127.0.0.1', () => resolve(s));
   });
+  // The client (undici) shares this process: if it stalls ≥5 s between requests (long sync seed, a loaded
+  // machine), the server's keep-alive timer fires as the next request reuses the idle socket → ECONNRESET.
+  // Let only the client close idle sockets (close() still ends every connection).
+  server.keepAliveTimeout = 0;
   const base = `http://127.0.0.1:${server.address().port}`;
   return {
     app,

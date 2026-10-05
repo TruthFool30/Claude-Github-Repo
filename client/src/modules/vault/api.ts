@@ -64,6 +64,8 @@ export interface VaultDoc {
   adults_only: boolean;
   visibility: Visibility;
   notes: string | null;
+  /** The encrypted notes can't be decrypted (wrong key / damaged): shown empty and not editable. */
+  unreadable?: boolean;
   expires_on: string | null;
   created_at: string;
   updated_at: string;
@@ -87,6 +89,8 @@ export interface VaultNote {
   kind: NoteKind;
   fields: NoteField[];
   body: string | null;
+  /** The encrypted fields/body can't be decrypted (wrong key / damaged): shown empty and not editable. */
+  unreadable?: boolean;
   is_private: boolean;
   adults_only: boolean;
   visibility: Visibility;

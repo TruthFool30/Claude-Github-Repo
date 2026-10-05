@@ -1,6 +1,6 @@
 // Data access + JSON shaping for the messages module.
 // Every function takes the DatabaseSync handle and is scoped by family / participant.
-import { httpError } from '../../util.js';
+import { firstName, httpError } from '../../util.js';
 import { isManagedEmail } from '../../auth.js';
 
 export const KINDS = ['family', 'direct', 'group'];
@@ -25,8 +25,6 @@ export function isHiddenFor(db, messageId, viewerId) {
 
 /** Public URL of an attachment: served by the module after a participant check. */
 export const attachmentUrl = (id, familyId) => `/api/messages/attachments/${id}?family_id=${familyId}`;
-
-const firstName = (name) => String(name ?? '').trim().split(/\s+/)[0] ?? '';
 
 /** Current family members (id, name, color, avatar_url, role, nickname, managed). */
 export function familyMembers(db, familyId) {
@@ -163,19 +161,18 @@ export function syncRejoined(db, familyId) {
   }
 }
 
+const PARTICIPANTS_SQL = `SELECT p.conversation_id, u.id, u.name, u.color, u.avatar_url, u.email, m.role, m.nickname, p.last_read_id, p.joined_at
+   FROM msg_participants p
+   JOIN users u ON u.id = p.user_id
+   JOIN memberships m ON m.user_id = p.user_id AND m.family_id = ?`;
+const participantOut = ({ conversation_id, email, ...u }) => ({ ...u, managed: !email || isManagedEmail(email) });
+
 /** Participants of a conversation who are still members of its family. */
 export function participants(db, conversationId, familyId) {
   return db
-    .prepare(
-      `SELECT u.id, u.name, u.color, u.avatar_url, u.email, m.role, m.nickname, p.last_read_id, p.joined_at
-         FROM msg_participants p
-         JOIN users u ON u.id = p.user_id
-         JOIN memberships m ON m.user_id = p.user_id AND m.family_id = ?
-        WHERE p.conversation_id = ?
-        ORDER BY p.joined_at, u.id`,
-    )
+    .prepare(`${PARTICIPANTS_SQL} WHERE p.conversation_id = ? ORDER BY p.joined_at, u.id`)
     .all(familyId, conversationId)
-    .map(({ email, ...u }) => ({ ...u, managed: !email || isManagedEmail(email) }));
+    .map(participantOut);
 }
 
 export const participantIds = (db, conversationId, familyId) => participants(db, conversationId, familyId).map((p) => p.id);
@@ -198,6 +195,11 @@ export function titleFor(conv, people, viewerId) {
   return other ? other.name : 'Former member';
 }
 
+/** SQL: unread text messages from others for participant row `p` (shared by the list and unreadSummary). */
+const UNREAD_SQL = `(SELECT COUNT(*) FROM msg_messages m
+  WHERE m.conversation_id = p.conversation_id AND m.id > p.last_read_id AND m.kind = 'text'
+    AND m.deleted_at IS NULL AND (m.user_id IS NULL OR m.user_id != p.user_id))`;
+
 function unreadFor(db, conversationId, userId, lastReadId) {
   return db
     .prepare(
@@ -210,24 +212,26 @@ function unreadFor(db, conversationId, userId, lastReadId) {
 
 function lastMessage(db, conversationId, viewerId) {
   const m = db
-    .prepare(`SELECT * FROM msg_messages m WHERE m.conversation_id = ? AND ${NOT_HIDDEN} ORDER BY m.id DESC LIMIT 1`)
+    .prepare(
+      `SELECT m.*, (SELECT COUNT(*) FROM msg_attachments a WHERE a.message_id = m.id) AS n_attachments
+         FROM msg_messages m WHERE m.conversation_id = ? AND ${NOT_HIDDEN} ORDER BY m.id DESC LIMIT 1`,
+    )
     .get(conversationId, viewerId ?? 0);
   if (!m) return null;
-  const photos = db.prepare('SELECT COUNT(*) AS n FROM msg_attachments WHERE message_id = ?').get(m.id).n;
   return {
     id: m.id,
     user_id: m.user_id,
     kind: m.kind,
     body: m.deleted_at ? '' : snippet(m.body, 140),
     deleted: !!m.deleted_at,
-    attachments: photos,
+    attachments: m.n_attachments,
     created_at: m.created_at,
   };
 }
 
-/** Full conversation summary for one viewer. */
-export function shapeConversation(db, conv, viewerId, meRow) {
-  const people = participants(db, conv.id, conv.family_id);
+/** Full conversation summary for one viewer (`pre` = { people, unread } when already loaded in bulk). */
+export function shapeConversation(db, conv, viewerId, meRow, pre) {
+  const people = pre?.people ?? participants(db, conv.id, conv.family_id);
   const me = meRow ?? db.prepare('SELECT * FROM msg_participants WHERE conversation_id = ? AND user_id = ?').get(conv.id, viewerId);
   return {
     id: conv.id,
@@ -241,7 +245,7 @@ export function shapeConversation(db, conv, viewerId, meRow) {
     last_activity_at: conv.last_activity_at,
     participants: people,
     last_message: lastMessage(db, conv.id, viewerId),
-    unread: me ? unreadFor(db, conv.id, viewerId, me.last_read_id) : 0,
+    unread: pre ? pre.unread : me ? unreadFor(db, conv.id, viewerId, me.last_read_id) : 0,
     last_read_id: me?.last_read_id ?? 0,
     muted: !!me?.muted,
   };
@@ -252,15 +256,26 @@ export function listConversations(db, familyId, userId) {
   ensureFamilyConversation(db, familyId);
   const rows = db
     .prepare(
-      `SELECT c.*, p.last_read_id AS p_last_read_id, p.muted AS p_muted
+      `SELECT c.*, p.last_read_id AS p_last_read_id, p.muted AS p_muted, ${UNREAD_SQL} AS p_unread
          FROM msg_conversations c
          JOIN msg_participants p ON p.conversation_id = c.id AND p.user_id = ?
         WHERE c.family_id = ?
         ORDER BY c.last_activity_at DESC, c.id DESC`,
     )
     .all(userId, familyId);
-  return rows.map(({ p_last_read_id, p_muted, ...c }) =>
-    shapeConversation(db, c, userId, { last_read_id: p_last_read_id, muted: p_muted }),
+  // Everyone in all of these conversations at once (same order as participants()).
+  const people = new Map(rows.map((r) => [r.id, []]));
+  for (const p of db
+    .prepare(
+      `${PARTICIPANTS_SQL} JOIN msg_conversations c ON c.id = p.conversation_id
+        WHERE c.family_id = ? AND EXISTS (SELECT 1 FROM msg_participants me WHERE me.conversation_id = p.conversation_id AND me.user_id = ?)
+        ORDER BY p.joined_at, u.id`,
+    )
+    .all(familyId, familyId, userId)) {
+    people.get(p.conversation_id)?.push(participantOut(p));
+  }
+  return rows.map(({ p_last_read_id, p_muted, p_unread, ...c }) =>
+    shapeConversation(db, c, userId, { last_read_id: p_last_read_id, muted: p_muted }, { people: people.get(c.id), unread: p_unread }),
   );
 }
 
@@ -269,10 +284,7 @@ export function unreadSummary(db, familyId, userId) {
   ensureFamilyConversation(db, familyId);
   const rows = db
     .prepare(
-      `SELECT p.conversation_id AS id, p.muted,
-              (SELECT COUNT(*) FROM msg_messages m
-                WHERE m.conversation_id = p.conversation_id AND m.id > p.last_read_id AND m.kind = 'text'
-                  AND m.deleted_at IS NULL AND (m.user_id IS NULL OR m.user_id != p.user_id)) AS n
+      `SELECT p.conversation_id AS id, p.muted, ${UNREAD_SQL} AS n
          FROM msg_participants p JOIN msg_conversations c ON c.id = p.conversation_id
         WHERE p.user_id = ? AND c.family_id = ?`,
     )
@@ -374,7 +386,7 @@ export function mentionedIds(body, people) {
   if (!text.includes('@')) return [];
   const out = new Set();
   for (const p of people) {
-    const names = [firstName(p.name), p.nickname, p.name].filter(Boolean).map((n) => n.toLowerCase());
+    const names = [firstName(p.name, ''), p.nickname, p.name].filter(Boolean).map((n) => n.toLowerCase());
     for (const n of names) {
       const re = new RegExp(`(^|[^\\p{L}\\p{N}_])@${n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\p{L}\\p{N}_])`, 'u');
       if (re.test(text)) out.add(p.id);
