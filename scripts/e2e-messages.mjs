@@ -35,7 +35,7 @@ const assert = (cond, msg) => {
 async function session(email, { width = 1280, height = 800, theme = 'light' } = {}) {
   const mobile = width < 600;
   const ctx = await browser.newContext({ viewport: { width, height }, isMobile: mobile, hasTouch: mobile });
-  await ctx.addInitScript((t) => localStorage.setItem('hearth-theme', t), theme);
+  await ctx.addInitScript((t) => window.localStorage?.setItem('hearth-theme', t), theme);
   const page = await ctx.newPage();
   page.on('pageerror', (e) => errors.push(`${email}: ${e.message}`));
   page.on('console', (m) => {

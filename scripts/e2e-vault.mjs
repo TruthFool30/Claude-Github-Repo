@@ -25,7 +25,9 @@ function ok(cond, msg) {
 
 async function session(email, { width = 1280, height = 800, mobile = false, theme = 'light' } = {}) {
   const ctx = await browser.newContext({ viewport: { width, height }, isMobile: mobile, hasTouch: mobile, deviceScaleFactor: mobile ? 2 : 1 });
-  await ctx.addInitScript((t) => localStorage.setItem('hearth-theme', t), theme);
+  // Runs in every frame — including the built-in PDF viewer's inner frames, which have no localStorage
+  // (window.localStorage is null there), so guard it rather than throw a pageerror into the run.
+  await ctx.addInitScript((t) => window.localStorage?.setItem('hearth-theme', t), theme);
   const page = await ctx.newPage();
   page.on('console', (m) => { if (m.type() === 'error') errors.push(`[${email}] ${m.text()}`); });
   page.on('pageerror', (e) => errors.push(`[${email}] pageerror ${e.message}`));
@@ -249,6 +251,7 @@ if (!NO_SHOTS) {
       const n = (s) => `${vp.tag}-${theme}-${s}`;
       await page.goto(`${BASE}/vault/contacts`);
       await page.getByRole('heading', { name: 'Emergency' }).waitFor();
+      ok(await page.evaluate(() => document.documentElement.classList.contains('dark')) === (theme === 'dark'), `${vp.tag} ${theme}: theme from the init script applied`);
       await settle(page, 700);
       await shot(page, n('01-contacts'));
       await page.locator('a[href^="/vault/contacts/"]', { hasText: "Dr. Priya Patel" }).last().click();

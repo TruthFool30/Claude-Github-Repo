@@ -2,12 +2,13 @@
 import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useSearchParams } from 'react-router';
 import { api, qs } from '../../lib/api';
+import type { Visibility } from '../../ui';
 import { useAuth } from '../../lib/auth';
 import { fmtMoney, toDateKey } from '../../lib/format';
 
 export type Kind = 'expense' | 'income';
 /** Who can see a transaction: everyone, adults only, or only its creator. */
-export type TxVisibility = 'family' | 'adults' | 'private';
+export type TxVisibility = Visibility;
 
 export interface CategoryRef {
   id: number;
@@ -43,6 +44,10 @@ export interface Transaction {
   import_id: number | null;
   /** "DBS ••4821" for imported rows. */
   import_label: string | null;
+  /** Clean merchant name for imported rows (null for manual ones); the raw bank text stays in `description`. */
+  merchant?: string | null;
+  /** Money moved between the family's own accounts: listed, but never counted as income or spending. */
+  transfer?: boolean;
   /** Running balance from the statement (imported rows only). */
   balance: number | null;
 }
@@ -149,6 +154,8 @@ export interface PreviewRow {
   category_source: 'rule' | 'learned' | 'none';
   duplicate: boolean;
   recurring_group: string | null;
+  /** Server's guess that this is a move between own accounts (older servers: absent = false). */
+  transfer?: boolean;
 }
 
 export interface RecurringSuggestion {
@@ -181,7 +188,7 @@ export interface ImportPreview {
 
 export interface CommitBody {
   visibility: 'adults' | 'private';
-  rows: Array<{ row_id: string; category_id: number | null; include: boolean }>;
+  rows: Array<{ row_id: string; category_id: number | null; include: boolean; transfer: boolean }>;
   bills: Array<{ group: string; description?: string; amount?: number; day_of_month?: number; category_id?: number | null }>;
 }
 
@@ -216,8 +223,10 @@ export interface Insights {
   avg_income: number;
   avg_spending: number;
   avg_surplus: number;
-  balances: Array<{ account_label: string; balance: number; as_of: string }>;
-  categories: Array<{ category_id: number | null; name: string; icon: string; color: string; avg: number; this_month: number; change_pct: number | null }>;
+  /** `stale`: the newest statement of that account (ending `statement_to`) had no closing balance. */
+  balances: Array<{ account_label: string; balance: number; as_of: string; stale?: boolean; statement_to?: string }>;
+  /** `avg_to_date`: the average pro-rated to today's day of month (what `change_pct` compares with). */
+  categories: Array<{ category_id: number | null; name: string; icon: string; color: string; avg: number; avg_to_date?: number; this_month: number; change_pct: number | null }>;
   merchants: Array<{ merchant: string; total: number; count: number }>;
   spikes: Array<{ category_id: number | null; name: string; this_month: number; avg: number; change_pct: number }>;
   recurring: { total_monthly: number; bills: Array<{ id: number; description: string; amount: number }> };
@@ -228,7 +237,11 @@ export interface Insights {
     shortfall: number;
     items: Array<{ id: number; name: string; emoji: string | null; monthly: number; target_date: string | null; auto_monthly: boolean }>;
     undated: number;
+    /** Alternatives, best first; `remaining_gap` is what's still short after the first one. */
     suggestions: string[];
+    remaining_gap?: number;
+    /** Active goals whose target date has passed. */
+    overdue?: Array<{ id: number; name: string; emoji: string | null; target_date: string; left: number }>;
   };
 }
 

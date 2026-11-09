@@ -26,6 +26,8 @@ ENV NODE_ENV=production \
 COPY --from=build /app/package.json /app/package-lock.json ./
 COPY --from=build /app/server/package.json server/package.json
 COPY --from=build /app/node_modules node_modules
+# pdf.js's optional native canvas is only for rendering; the statement parser never loads it.
+RUN rm -rf node_modules/@napi-rs/canvas node_modules/@napi-rs/canvas-*
 COPY server/src server/src
 COPY shared shared
 COPY --from=build /app/client/dist client/dist

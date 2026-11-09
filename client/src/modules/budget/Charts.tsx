@@ -90,11 +90,13 @@ export function SpendingDonut({ slices, total, fmt }: { slices: Slice[]; total: 
 }
 
 export function TrendChart({
-  trend, month, fmt, onSelect, partialMonth,
+  trend, month, fmt, onSelect, partialMonth, netLabel = 'Balance',
 }: {
   trend: Summary['trend']; month: string; fmt: (n: number, o?: { compact?: boolean }) => string; onSelect?: (m: string) => void;
   /** Insights: every month at full strength except this one (still in progress), drawn faded + dashed. */
   partialMonth?: string;
+  /** Tooltip label for income − spending ("Surplus" on Insights). */
+  netLabel?: string;
 }) {
   const data = trend.map((t) => ({ ...t, label: monthLabel(t.month, 'short') + (t.month === partialMonth ? '*' : '') }));
   const opacity = (m: string) => (partialMonth ? (m === partialMonth ? 0.35 : 1) : m === month ? 1 : 0.45);
@@ -122,7 +124,7 @@ export function TrendChart({
                     <div className="mb-1 font-semibold text-fg">{monthLabel(d.month)}{d.month === partialMonth ? ' (so far)' : ''}</div>
                     <div className="flex items-center gap-2 text-muted"><span className="size-2 rounded-sm" style={{ backgroundColor: INCOME_COLOR }} />Income <span className="ml-auto pl-4 font-semibold text-fg tabular">{fmt(d.income)}</span></div>
                     <div className="flex items-center gap-2 text-muted"><span className="size-2 rounded-sm" style={{ backgroundColor: SPENT_COLOR }} />Spent <span className="ml-auto pl-4 font-semibold text-fg tabular">{fmt(d.spent)}</span></div>
-                    <div className="mt-1 border-t border-border pt-1 text-muted">Balance <span className="float-right pl-4 font-semibold text-fg tabular">{fmt(d.income - d.spent)}</span></div>
+                    <div className="mt-1 border-t border-border pt-1 text-muted">{netLabel} <span className="float-right pl-4 font-semibold text-fg tabular">{fmt(d.income - d.spent)}</span></div>
                   </TipBox>
                 );
               }}

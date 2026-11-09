@@ -3,19 +3,19 @@
 import { memo, useEffect, useMemo, useRef, useState, type DragEvent, type FormEvent } from 'react';
 import { Link } from 'react-router';
 import {
-  ArrowLeft, ArrowRight, CalendarClock, Check, CircleAlert, FileUp, History, KeyRound, Landmark, Lock, Repeat, ShieldAlert, Sparkles, Undo2, Upload, Wand2,
+  ArrowLeft, ArrowLeftRight, ArrowRight, CalendarClock, Check, CircleAlert, FileUp, History, KeyRound, Landmark, Lock, Repeat, ShieldAlert, Sparkles, Undo2, Upload, Wand2,
 } from 'lucide-react';
 import { ApiError, api, errorMessage } from '../../lib/api';
 import { useMember } from '../../lib/auth';
 import { cn } from '../../lib/cn';
 import { firstName, fmtDate, fmtDay, fmtRelative, plural } from '../../lib/format';
 import { useHideBottomNav } from '../../lib/shell';
-import { Badge, Button, Card, CardHeader, Checkbox, EmptyState, Field, Input, PageHeader, SegmentedControl, Select, SkeletonList, Switch, buttonClass, toast, useConfirm } from '../../ui';
+import { Badge, Button, Card, CardHeader, Checkbox, EmptyState, Field, Input, PageHeader, SegmentedControl, Select, SkeletonList, Switch, buttonClass, toast, useConfirm, VisibilityBadge, VisibilityPicker } from '../../ui';
 import {
   BANK_LABEL, amountToInput, importLabel, parseAmount, previewImport, useCategories, useImports, useInvalidateAfterImport, useMoney,
   type Category, type CommitBody, type CommitResult, type ImportErrorCode, type ImportOut, type ImportPreview, type PreviewRow,
 } from './api';
-import { Amount, MoneyInput, VisibilityBadge, VisibilityChoice } from './shared';
+import { Amount, MoneyInput } from './shared';
 import mod from './index';
 
 const MAX_BYTES = 10 * 1024 * 1024; // CONTRACT: the preview endpoint's own 10 MB limit
@@ -24,7 +24,7 @@ const PAGE = 60; // review rows rendered per "Show more"
 const EXPORT_TIP = 'Download your transaction history as CSV from DBS digibank or UOB Personal Internet Banking and upload that instead.';
 
 type Step = 'upload' | 'review' | 'recurring' | 'visibility' | 'done';
-type Choice = { category_id: number | null; include: boolean };
+type Choice = { category_id: number | null; include: boolean; transfer: boolean };
 type BillDraft = { on: boolean; amount: string; day: string; category_id: number | null };
 type Filter = 'all' | 'uncat' | 'dup' | 'income';
 
@@ -42,6 +42,8 @@ export default function ImportPage() {
   const [visibility, setVisibility] = useState<'adults' | 'private'>('adults');
   const [result, setResult] = useState<CommitResult | null>(null);
   const [committing, setCommitting] = useState(false);
+  const initialChoices = useRef<Record<string, Choice>>({});
+  const confirm = useConfirm();
   const invalidate = useInvalidateAfterImport();
   const top = useRef<HTMLDivElement>(null);
   useHideBottomNav(step === 'review' || step === 'recurring' || step === 'visibility');
@@ -54,7 +56,9 @@ export default function ImportPage() {
 
   const onPreview = (p: ImportPreview) => {
     setPreview(p);
-    setChoices(Object.fromEntries(p.rows.map((r) => [r.row_id, { category_id: r.category_id, include: !r.duplicate }])));
+    const initial = Object.fromEntries(p.rows.map((r) => [r.row_id, { category_id: r.category_id, include: !r.duplicate, transfer: !!r.transfer }]));
+    initialChoices.current = initial;
+    setChoices(initial);
     setBills(Object.fromEntries(p.recurring.map((b) => [b.group, { on: !b.existing_bill_id, amount: amountToInput(b.amount), day: String(b.day_of_month), category_id: b.category_id }])));
     setVisibility('adults');
     go('review');
@@ -64,6 +68,16 @@ export default function ImportPage() {
     setPreview(null);
     setResult(null);
     go('upload');
+  };
+
+  /** "Start over" throws the review away: ask first when something was changed. */
+  const startOver = async () => {
+    const dirty = Object.entries(choices).some(([id, c]) => {
+      const o = initialChoices.current[id];
+      return !o || o.category_id !== c.category_id || o.include !== c.include || o.transfer !== c.transfer;
+    });
+    if (dirty && !(await confirm({ title: 'Start over?', message: 'Your category and selection changes for this statement will be lost.', confirmLabel: 'Start over', danger: true }))) return;
+    reset();
   };
 
   const commit = async () => {
@@ -126,12 +140,12 @@ export default function ImportPage() {
         </div>
       )}
       {step === 'review' && preview && (
-        <ReviewStep preview={preview} choices={choices} setChoices={setChoices} onBack={reset} onNext={() => go(preview.recurring.length ? 'recurring' : 'visibility')} />
+        <ReviewStep preview={preview} choices={choices} setChoices={setChoices} onBack={startOver} onNext={() => go(preview.recurring.length ? 'recurring' : 'visibility')} />
       )}
       {step === 'recurring' && preview && <RecurringStep preview={preview} bills={bills} setBills={setBills} onBack={() => go('review')} onNext={() => go('visibility')} />}
       {step === 'visibility' && preview && (
         <Card className="mx-auto flex max-w-xl flex-col gap-5">
-          <VisibilityChoice value={visibility} onChange={setVisibility} options={['adults', 'private'] as const} what="these transactions" />
+          <VisibilityPicker stacked value={visibility} onChange={setVisibility} options={['adults', 'private'] as const} what="these transactions" />
           <p className="text-xs text-muted">
             Children never see imported transactions. You can change who sees a single transaction later from its edit screen.
           </p>
@@ -273,6 +287,14 @@ function UploadStep({ onPreview }: { onPreview: (p: ImportPreview) => void }) {
         <Lock size={13} className="shrink-0" aria-hidden />
         The file is read on your Hearth server and never stored — only the transactions you choose are saved.
       </p>
+      <div className="rounded-2xl bg-surface-2/70 px-4 py-3 text-[13px] text-muted">
+        <p className="font-semibold text-fg">Where to get a statement</p>
+        <ul className="mt-1 list-disc space-y-0.5 pl-5">
+          <li><b className="font-medium text-fg">DBS / POSB digibank:</b> Accounts → Transaction History → Download CSV (or save the monthly e-statement PDF)</li>
+          <li><b className="font-medium text-fg">UOB Personal Internet Banking:</b> Account → Transaction History → Export, choose CSV</li>
+        </ul>
+        <p className="mt-1 text-xs">Excel works as .xlsx; the old .xls format isn't supported — export CSV instead.</p>
+      </div>
 
       {needPassword && file && (
         <form onSubmit={unlock} className="flex flex-col gap-3 rounded-2xl border border-border bg-surface-2/60 p-4">
@@ -323,7 +345,7 @@ function ReviewStep({
   const { fmt } = useMoney();
   const { data: categories = [] } = useCategories();
   const [filter, setFilter] = useState<Filter>('all');
-  // Rows the "Uncategorised" filter matched when it was picked: categorising one keeps it on screen.
+  // Rows the "Uncategorized" filter matched when it was picked: categorizing one keeps it on screen.
   const [uncatIds, setUncatIds] = useState<Set<string>>(new Set());
   const [shown, setShown] = useState(PAGE);
   const [suggest, setSuggest] = useState<{ row_id: string; key: string; category_id: number | null; count: number } | null>(null);
@@ -333,13 +355,13 @@ function ReviewStep({
 
   const counts = useMemo(() => ({
     all: rows.length,
-    uncat: rows.filter((r) => choices[r.row_id]?.category_id == null).length,
+    uncat: rows.filter((r) => choices[r.row_id]?.category_id == null && !choices[r.row_id]?.transfer).length,
     dup: rows.filter((r) => r.duplicate).length,
     income: rows.filter((r) => r.kind === 'income').length,
   }), [rows, choices]);
   const included = rows.filter((r) => choices[r.row_id]?.include);
   const sel = { count: included.length, income: 0, spending: 0 };
-  for (const r of included) r.kind === 'income' ? (sel.income += r.amount) : (sel.spending += r.amount);
+  for (const r of included) if (!choices[r.row_id].transfer) r.kind === 'income' ? (sel.income += r.amount) : (sel.spending += r.amount);
 
   const visible = useMemo(() => rows.filter((r) => {
     if (filter === 'uncat') return uncatIds.has(r.row_id);
@@ -372,12 +394,20 @@ function ReviewStep({
     setSuggest(null);
   };
   const toggle = (r: PreviewRow, include: boolean) => setChoices((c) => ({ ...c, [r.row_id]: { ...c[r.row_id], include } }));
+  const setTransfer = (r: PreviewRow, transfer: boolean) => setChoices((c) => ({ ...c, [r.row_id]: { ...c[r.row_id], transfer } }));
+  /** Bulk include/exclude. "Select all" leaves duplicates alone unless the Duplicates filter is on. */
+  const bulk = (on: boolean, which: (r: PreviewRow) => boolean) => setChoices((c) => {
+    const n = { ...c };
+    for (const r of rows) if (which(r)) n[r.row_id] = { ...n[r.row_id], include: on };
+    return n;
+  });
+  const inView = (r: PreviewRow) => visible.includes(r) && (filter === 'dup' || !r.duplicate);
 
   const catsByKind = useMemo(() => ({
     expense: categories.filter((c) => c.kind === 'expense'),
     income: categories.filter((c) => c.kind === 'income'),
   }), [categories]);
-  const suggestCat = suggest ? categories.find((c) => c.id === suggest.category_id)?.name ?? 'Uncategorised' : '';
+  const suggestCat = suggest ? categories.find((c) => c.id === suggest.category_id)?.name ?? 'Uncategorized' : '';
 
   return (
     <div className="flex flex-col gap-4">
@@ -391,15 +421,21 @@ function ReviewStep({
           onChange={(f) => {
             setFilter(f);
             setShown(PAGE);
-            if (f === 'uncat') setUncatIds(new Set(rows.filter((r) => choices[r.row_id]?.category_id == null).map((r) => r.row_id)));
+            if (f === 'uncat') setUncatIds(new Set(rows.filter((r) => choices[r.row_id]?.category_id == null && !choices[r.row_id]?.transfer).map((r) => r.row_id)));
           }}
           options={[
             { value: 'all', label: `All ${counts.all}` },
-            { value: 'uncat', label: `Uncategorised ${counts.uncat}` },
+            { value: 'uncat', label: `Uncategorized ${counts.uncat}` },
             { value: 'dup', label: `Duplicates ${counts.dup}` },
             { value: 'income', label: `Income ${counts.income}` },
           ]}
         />
+      </div>
+
+      <div className="-mt-1 flex flex-wrap items-center gap-1" role="group" aria-label="Select transactions">
+        <Button size="sm" variant="ghost" onClick={() => bulk(true, inView)}>Select all{filter !== 'all' ? ' shown' : ''}</Button>
+        <Button size="sm" variant="ghost" onClick={() => bulk(false, (r) => visible.includes(r))}>Deselect all{filter !== 'all' ? ' shown' : ''}</Button>
+        {counts.income > 0 && <Button size="sm" variant="ghost" onClick={() => bulk(false, (r) => r.kind === 'income')}>Untick all income</Button>}
       </div>
 
       {!page.length ? (
@@ -419,6 +455,7 @@ function ReviewStep({
                       fmt={fmt}
                       onCategory={setCategory}
                       onToggle={toggle}
+                      onTransfer={setTransfer}
                     />
                     {suggest?.row_id === r.row_id && (
                       <div className="flex flex-wrap items-center gap-2 bg-primary-soft/50 px-4 py-2 text-[13px] text-primary-soft-fg" role="status">
@@ -454,12 +491,13 @@ function ReviewStep({
 }
 
 const ReviewRow = memo(function ReviewRow({
-  r, choice, categories, fmt, onCategory, onToggle,
+  r, choice, categories, fmt, onCategory, onToggle, onTransfer,
 }: {
   r: PreviewRow; choice: Choice; categories: Category[]; fmt: (n: number) => string;
   onCategory: (r: PreviewRow, id: number | null) => void; onToggle: (r: PreviewRow, on: boolean) => void;
+  onTransfer: (r: PreviewRow, on: boolean) => void;
 }) {
-  const uncat = choice.category_id == null;
+  const uncat = choice.category_id == null && !choice.transfer;
   const auto = choice.category_id === r.category_id && r.category_source !== 'none' && !uncat;
   return (
     <div
@@ -474,16 +512,31 @@ const ReviewRow = memo(function ReviewRow({
         <div className="min-w-0 flex-1">
           <div className="flex items-start justify-between gap-3">
             <span className="min-w-0 break-words text-[15px] font-semibold text-fg">{r.description}</span>
-            <Amount kind={r.kind} value={r.amount} fmt={fmt} className="text-[15px] sm:hidden" />
+            <Amount kind={r.kind} value={r.amount} fmt={fmt} className={cn('text-[15px] sm:hidden', choice.transfer && 'text-muted')} />
           </div>
           <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-xs text-muted">
             {r.duplicate && <Badge tone="neutral">Already in Hearth · skipped</Badge>}
             {r.recurring_group && <span className="inline-flex items-center gap-1"><Repeat size={11} aria-hidden />Repeats monthly</span>}
             {r.balance != null && <span className="tabular">Balance {fmt(r.balance)}</span>}
+            <button
+              type="button"
+              aria-pressed={choice.transfer}
+              aria-label="Mark as transfer between my accounts"
+              onClick={() => onTransfer(r, !choice.transfer)}
+              className={cn(
+                'inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-semibold transition focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-ring',
+                choice.transfer ? 'border-primary bg-primary-soft text-primary-soft-fg' : 'border-transparent text-subtle hover:border-border hover:text-fg',
+              )}
+            >
+              <ArrowLeftRight size={11} aria-hidden />{choice.transfer ? 'Transfer between my accounts' : 'Mark as transfer'}
+            </button>
           </div>
         </div>
       </div>
       <div className="flex items-center gap-2 pl-8 sm:pl-0">
+        {choice.transfer ? (
+          <span className="min-w-0 flex-1 text-[13px] text-muted sm:w-[calc(12rem+6.5rem+0.5rem)] sm:flex-none">Not counted as income or spending</span>
+        ) : (<>
         <div className="relative min-w-0 flex-1 sm:w-48 sm:flex-none">
           <Select
             size="sm"
@@ -491,20 +544,21 @@ const ReviewRow = memo(function ReviewRow({
             value={choice.category_id == null ? '' : String(choice.category_id)}
             onChange={(e) => onCategory(r, e.target.value ? Number(e.target.value) : null)}
             className={cn(uncat && choice.include && '[&_select]:border-warning')}
-            options={[{ value: '', label: 'Uncategorised' }, ...categories.map((c) => ({ value: String(c.id), label: c.name }))]}
+            options={[{ value: '', label: 'Uncategorized' }, ...categories.map((c) => ({ value: String(c.id), label: c.name }))]}
           />
         </div>
         {auto ? (
           <span
-            className="inline-flex w-[4.5rem] shrink-0 items-center gap-1 text-[11px] font-medium text-subtle"
-            title={r.category_source === 'learned' ? 'Hearth remembered how you categorised this merchant before' : 'Matched by a built-in rule'}
+            className="inline-flex w-[6.5rem] shrink-0 items-center gap-1 text-[11px] font-medium leading-tight text-subtle"
+            title={r.category_source === 'learned' ? 'Hearth remembered how you categorized this merchant before' : 'Suggested by Hearth from the merchant name'}
           >
-            <Sparkles size={11} aria-hidden />{r.category_source === 'learned' ? 'Learned' : 'Rule'}
+            <Sparkles size={11} className="shrink-0" aria-hidden />{r.category_source === 'learned' ? 'Learned from you' : 'Suggested'}
           </span>
         ) : (
-          <span className="w-[4.5rem] shrink-0 text-[11px] font-medium text-warning-soft-fg">{uncat && choice.include ? 'Pick one' : ''}</span>
+          <span className="w-[6.5rem] shrink-0 text-[11px] font-medium text-warning-soft-fg">{uncat && choice.include ? 'Pick one' : ''}</span>
         )}
-        <Amount kind={r.kind} value={r.amount} fmt={fmt} className="hidden w-28 text-right text-[15px] sm:inline" />
+        </>)}
+        <Amount kind={r.kind} value={r.amount} fmt={fmt} className={cn('hidden w-28 text-right text-[15px] sm:inline', choice.transfer && 'text-muted')} />
       </div>
     </div>
   );
@@ -614,7 +668,7 @@ function RecurringStep({
                   <Select
                     value={d.category_id == null ? '' : String(d.category_id)}
                     onChange={(e) => set(b.group, { category_id: e.target.value ? Number(e.target.value) : null })}
-                    options={[{ value: '', label: 'Uncategorised' }, ...categories.filter((c) => c.kind === b.kind).map((c) => ({ value: String(c.id), label: c.name }))]}
+                    options={[{ value: '', label: 'Uncategorized' }, ...categories.filter((c) => c.kind === b.kind).map((c) => ({ value: String(c.id), label: c.name }))]}
                   />
                 </Field>
               </div>
@@ -645,10 +699,11 @@ const ordinal = (n: number) => `${n}${n % 10 === 1 && n !== 11 ? 'st' : n % 10 =
 
 function ImportSummary({ preview, choices, bills }: { preview: ImportPreview; choices: Record<string, Choice>; bills: number }) {
   const n = preview.rows.filter((r) => choices[r.row_id]?.include).length;
-  const uncat = preview.rows.filter((r) => choices[r.row_id]?.include && choices[r.row_id]?.category_id == null).length;
+  const uncat = preview.rows.filter((r) => choices[r.row_id]?.include && choices[r.row_id]?.category_id == null && !choices[r.row_id]?.transfer).length;
   return (
     <ul className="flex flex-col gap-1 rounded-2xl bg-surface-2/70 px-4 py-3 text-sm text-fg">
       <li><b>{plural(n, 'transaction')}</b> from {preview.account?.label ?? BANK_LABEL[preview.bank]}</li>
+      {preview.rows.some((r) => choices[r.row_id]?.include && choices[r.row_id]?.transfer) && <li className="text-muted">{preview.rows.filter((r) => choices[r.row_id]?.include && choices[r.row_id]?.transfer).length} marked as transfers between your accounts — not counted as income or spending</li>}
       {uncat > 0 && <li className="text-muted">{uncat} without a category — you can sort them later</li>}
       {bills > 0 && <li>{plural(bills, 'monthly bill')} to create</li>}
     </ul>

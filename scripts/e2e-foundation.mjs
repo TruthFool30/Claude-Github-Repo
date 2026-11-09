@@ -20,7 +20,7 @@ async function newPage({ mobile = false, theme = 'light' } = {}) {
     isMobile: mobile,
     hasTouch: mobile,
   });
-  await ctx.addInitScript((t) => localStorage.setItem('hearth-theme', t), theme);
+  await ctx.addInitScript((t) => window.localStorage?.setItem('hearth-theme', t), theme);
   const page = await ctx.newPage();
   page.on('pageerror', (e) => pageErrors.push(e.message));
   page.on('console', (m) => m.type() === 'error' && pageErrors.push(`console: ${m.text()}`));

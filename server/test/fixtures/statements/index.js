@@ -194,6 +194,33 @@ export function pdf(bank, { password = null } = {}) {
   return makePdf(pages, { password });
 }
 
+/** A one-page PDF whose content stream inflates to `bytes` of spaces (decompression bomb). */
+export async function bombPdf(bytes) {
+  const deflate = zlib.createDeflate({ level: 9 });
+  const parts = [];
+  deflate.on('data', (b) => parts.push(b));
+  const done = new Promise((r) => deflate.on('end', r));
+  const chunk = Buffer.alloc(16 * 1024 * 1024, 0x20);
+  for (let left = bytes; left > 0; left -= chunk.length) if (!deflate.write(chunk)) await new Promise((r) => deflate.once('drain', r));
+  deflate.end();
+  await done;
+  const stream = Buffer.concat(parts);
+  const objs = ['<< /Type /Catalog /Pages 2 0 R >>', '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 600 800] /Contents 4 0 R /Resources << >> >>'];
+  const chunks = [Buffer.from('%PDF-1.4\n')];
+  let len = chunks[0].length;
+  const offs = [];
+  const add = (b) => { chunks.push(b); len += b.length; };
+  objs.forEach((o, i) => { offs.push(len); add(Buffer.from(`${i + 1} 0 obj\n${o}\nendobj\n`)); });
+  offs.push(len);
+  add(Buffer.from(`4 0 obj\n<< /Length ${stream.length} /Filter /FlateDecode >>\nstream\n`));
+  add(stream);
+  add(Buffer.from('\nendstream\nendobj\n'));
+  const xref = len;
+  add(Buffer.from(`xref\n0 ${offs.length + 1}\n0000000000 65535 f \n${offs.map((o) => `${String(o).padStart(10, '0')} 00000 n \n`).join('')}trailer\n<< /Size ${offs.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`));
+  return Buffer.concat(chunks);
+}
+
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
   const out = process.argv[2] ? path.resolve(process.argv[2]) : HERE;
   for (const bank of Object.keys(BANKS)) {

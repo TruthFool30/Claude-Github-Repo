@@ -16,6 +16,9 @@
 //   PDF            "Date  Description  Withdrawal(s)  Deposit(s)  Balance" table (DBS/POSB consolidated
 //                  statement with "Balance Brought/Carried Forward", UOB with "BALANCE B/F"), dates
 //                  "01 Nov" (year from "Period: … to …" / "as at …") or "01/11/2026".
+import { fork } from 'node:child_process';
+import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
 import { Worker, isMainThread, parentPort, workerData } from 'node:worker_threads';
 import zlib from 'node:zlib';
 
@@ -42,17 +45,43 @@ export const MESSAGES = {
   EMPTY: 'No transactions were found in this statement.',
   TOO_LARGE: 'That file is too large (max 10 MB).',
   TOO_COMPLEX: 'That file is too large or complex to read.',
+  BUSY: 'Another statement is still being read — try again in a moment.',
   PDF: 'That PDF couldn’t be read. Upload the original e-statement from your bank, or a CSV export.',
 };
 
 // ---- text helpers (shared by the worker and the server) ----------------------------------------
 
-/** Runs of ≥ 8 digits (spaces/dashes allowed between them) → "••" + last 4: account, card and phone numbers. */
+/** Any Unicode decimal digit → its ASCII digit (Nd digits come in runs of whole 0–9 blocks). */
+const asciiDigit = (c) => {
+  let cp = c.codePointAt(0);
+  const end = cp;
+  while (/\p{Nd}/u.test(String.fromCodePoint(cp - 1))) cp--;
+  return String((end - cp) % 10);
+};
+/** NFKC (full-width → ASCII), every decimal digit as 0–9, whitespace collapsed; private-use characters dropped. */
+export const normText = (s) => String(s ?? '').normalize('NFKC').replace(/[-]/g, '')
+  .replace(/(?![0-9])\p{Nd}/gu, asciiDigit).replace(/\s+/g, ' ').trim();
+
+// Amounts ("1,234.56") and dates ("01/11/2026", "2026-11-01") are kept as they are.
+const PROTECTED = /\d{1,3}(?:,\d{3})*\.\d{2}(?![\d.])|\b\d{1,2}\/\d{1,2}\/(?:\d{4}|\d{2})\b(?![/\d])|\b\d{4}-\d{2}-\d{2}\b(?![-\d])/g;
+// ≥ 8 digits with up to 3 separator characters (space . - / _ * dashes) between any two of them.
+const LONG_NUMBER = /\d(?:[\s.\-/_*‐-―−]{0,3}\d){7,}/g;
+const NRIC = /\b[STFGM]\d{7}[A-Z]\b/gi;
+
+/**
+ * Text as stored: normalised (normText), Singapore NRIC/FIN numbers fully masked, and every run of
+ * ≥ 8 digits (account, card and phone numbers, separators allowed) → "••" + its last 4 digits.
+ */
 export function maskDigits(s) {
-  return String(s ?? '').replace(/\d(?:[ -]?\d){7,}/g, (m) => `••${m.replace(/\D/g, '').slice(-4)}`);
+  const kept = [];
+  return normText(s)
+    .replace(NRIC, '•••••••••')
+    .replace(PROTECTED, (m) => String.fromCharCode(0xe000 + Math.min(kept.push(m) - 1, 0x18ff)))
+    .replace(LONG_NUMBER, (m) => `••${m.replace(/\D/g, '').slice(-4)}`)
+    .replace(/[-]/g, (c) => kept[c.charCodeAt(0) - 0xe000] ?? '');
 }
 
-const clean = (s) => maskDigits(String(s ?? '').replace(/\s+/g, ' ').trim()).slice(0, 140);
+const clean = (s) => maskDigits(s).slice(0, 140);
 
 const MONTHS = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
 const pad = (n) => String(n).padStart(2, '0');
@@ -67,7 +96,7 @@ function ymd(y, m, d) {
  * 'YYYY-MM-DD' from "01 Nov 2026", "01-Nov-26", "01/11/2026" (day first, as in Singapore),
  * "2026-11-01", an Excel serial number, or "01 Nov" (year from `end`, the statement's last day).
  */
-export function parseDate(v, end = null) {
+export function parseDate(v, end = null, order = 'dmy') {
   if (typeof v === 'number') {
     if (v < 30000 || v > 80000) return null; // Excel serial (1900 system)
     return new Date(Date.UTC(1899, 11, 30) + Math.floor(v) * 864e5).toISOString().slice(0, 10);
@@ -82,9 +111,22 @@ export function parseDate(v, end = null) {
     const [ey, em] = end.split('-').map(Number);
     return ymd(mon > em ? ey - 1 : ey, mon, Number(m[1]));
   }
-  if ((m = /^(\d{1,2})\/(\d{1,2})\/(\d{4}|\d{2})$/.exec(s))) return ymd(Number(m[3]), Number(m[2]), Number(m[1]));
+  if ((m = /^(\d{1,2})\/(\d{1,2})\/(\d{4}|\d{2})$/.exec(s))) {
+    return order === 'mdy' ? ymd(Number(m[3]), Number(m[1]), Number(m[2])) : ymd(Number(m[3]), Number(m[2]), Number(m[1]));
+  }
   if ((m = /^(\d{4})-(\d{2})-(\d{2})(?:[T ].*)?$/.exec(s))) return ymd(Number(m[1]), Number(m[2]), Number(m[3]));
   return null;
+}
+
+/**
+ * Day/month order of a file's "a/b/yyyy" dates: day first if any first part is > 12, month first
+ * if any second part is > 12, else day first (Singapore banks) — `ambiguous` then.
+ */
+export function dateOrder(values) {
+  const parts = values.map((v) => /^(\d{1,2})\/(\d{1,2})\/(?:\d{4}|\d{2})$/.exec(String(v ?? '').trim())).filter(Boolean);
+  if (parts.some((m) => Number(m[1]) > 12)) return { order: 'dmy', ambiguous: false };
+  if (parts.some((m) => Number(m[2]) > 12)) return { order: 'mdy', ambiguous: false };
+  return { order: 'dmy', ambiguous: parts.some((m) => m[1] !== m[2]) };
 }
 
 /** Signed cents from "1,234.56", "-12.30", "12.30 CR" / "DR", "(12.30)", "S$12.30", or a number; null if not money. */
@@ -103,7 +145,8 @@ export function parseAmount(v) {
 
 const NOISE = new Set(`POS NETS EPS VISA MASTERCARD MC DEBIT CREDIT CARD PURCHASE POINT OF SALE TRANSACTION TRANSFER FAST PAYMENT PAYMENTS
   PAYNOW GIRO IBG ICT MST UMC BILL TO FROM OTHR OTHER INWARD OUTWARD SI STANDING INSTRUCTION REF REFERENCE SGP SG SINGAPORE SGD PTE LTD
-  CO COM WWW THE AND NO ADVICE RECURRING VIA FUND FUNDS NETS QR CONTACTLESS BIZ AT ACCT ACCOUNT AC`.split(/\s+/));
+  CO COM WWW THE AND NO ADVICE RECURRING VIA FUND FUNDS NETS QR CONTACTLESS BIZ AT ACCT ACCOUNT AC RECEIPT FOREIGN AMT AMOUNT
+  EXCHANGE RATE FX USD EUR GBP MYR JPY AUD CNY RMB HKD IDR THB INR KRW TWD CAD CHF NZD PHP VND`.split(/\s+/));
 
 /** Short merchant key ("NETFLIX", "NTUC FAIRPRICE") used for learning, recurring detection and insights. */
 export function merchantKey(desc) {
@@ -155,9 +198,11 @@ export function ruleCategory(desc, kind, cats) {
 const monthIndex = (date) => Number(date.slice(0, 4)) * 12 + Number(date.slice(5, 7)) - 1;
 
 /**
- * Monthly payments: same kind + merchant key, amount within 10% of the latest one seen in the
- * statement, exactly one such payment per month in ≥ 2 consecutive months (a one-month gap is
- * allowed), on roughly the same day (± 7). `items`: { key, kind, amount_cents, date, ref, statement }.
+ * Monthly payments: same kind + merchant key, then grouped by amount (within 10%); a series needs
+ * one payment a month in ≥ 2 consecutive months (a one-month gap is allowed) on roughly the same
+ * day (± 7). When a merchant has the same number (2–3) of such payments every month — two Singtel
+ * plans — they're split by size into fixed-amount series (± 2%, ± 3 days). A merchant paid a
+ * different number of times from month to month is everyday spending, not a bill. `items`: { key, kind, amount_cents, date, ref, statement }.
  * Returns [{ key, kind, amount_cents, day_of_month, months_seen, latest, refs }].
  */
 export function detectRecurring(items) {
@@ -169,24 +214,52 @@ export function detectRecurring(items) {
     groups.get(g).push(it);
   }
   const out = [];
-  for (const list of groups.values()) {
+  const series = (list, tol, dayTol) => {
     const anchor = list.filter((i) => i.statement).sort((a, b) => b.date.localeCompare(a.date))[0];
-    if (!anchor) continue;
-    const near = list.filter((i) => Math.abs(i.amount_cents - anchor.amount_cents) <= anchor.amount_cents * 0.1);
-    const byMonth = new Map();
-    for (const i of near) byMonth.set(monthIndex(i.date), [...(byMonth.get(monthIndex(i.date)) ?? []), i]);
-    if ([...byMonth.values()].some((v) => v.length > 1)) continue; // several a month: everyday spending, not a bill
+    if (!anchor) return;
+    const near = list.filter((i) => Math.abs(i.amount_cents - anchor.amount_cents) <= anchor.amount_cents * tol);
+    const byMonth = new Map(near.map((i) => [monthIndex(i.date), i]));
     const months = [...byMonth.keys()].sort((a, b) => b - a);
     let seen = 1;
     for (let k = 1; k < months.length && months[k - 1] - months[k] <= 2; k++) seen++;
-    if (seen < 2) continue;
-    const members = months.slice(0, seen).map((m) => byMonth.get(m)[0]);
+    if (seen < 2) return;
+    const members = months.slice(0, seen).map((m) => byMonth.get(m));
     const days = members.map((i) => Number(i.date.slice(8, 10)));
-    if (Math.max(...days) - Math.min(...days) > 7 && !days.every((d) => d >= 25 || d <= 3)) continue;
+    if (Math.max(...days) - Math.min(...days) > dayTol && !days.every((d) => d >= 25 || d <= 3)) return;
     out.push({
       key: anchor.key, kind: anchor.kind, amount_cents: anchor.amount_cents, day_of_month: Number(anchor.date.slice(8, 10)),
       months_seen: seen, latest: members[0], refs: members.map((i) => i.ref),
     });
+  };
+  for (const list of groups.values()) {
+    // A merchant paid a different number of times from month to month (over the statement's months)
+    // is everyday spending.
+    const stmt = list.filter((i) => i.statement).map((i) => monthIndex(i.date));
+    const perMonth = new Map();
+    for (const i of list) {
+      const m = monthIndex(i.date);
+      if (m >= Math.min(...stmt) && m <= Math.max(...stmt)) perMonth.set(m, (perMonth.get(m) ?? 0) + 1);
+    }
+    if (new Set(perMonth.values()).size > 1) continue;
+    // Amount clusters: sorted, a new cluster starts more than 10% above the previous amount.
+    const sorted = [...list].sort((a, b) => a.amount_cents - b.amount_cents);
+    const clusters = [];
+    for (const it of sorted) {
+      const last = clusters[clusters.length - 1];
+      if (last && it.amount_cents <= last[last.length - 1].amount_cents * 1.1) last.push(it);
+      else clusters.push([it]);
+    }
+    for (const cluster of clusters) {
+      const byMonth = new Map();
+      for (const i of cluster) byMonth.set(monthIndex(i.date), [...(byMonth.get(monthIndex(i.date)) ?? []), i]);
+      const counts = new Set([...byMonth.values()].map((v) => v.length));
+      if (counts.size === 1 && counts.has(1)) series(cluster, 0.1, 7);
+      else if (counts.size === 1 && [...counts][0] <= 3) {
+        const k = [...counts][0];
+        const ranked = [...byMonth.values()].map((v) => [...v].sort((a, b) => a.amount_cents - b.amount_cents));
+        for (let r = 0; r < k; r++) series(ranked.map((v) => v[r]), 0.02, 3);
+      }
+    }
   }
   return out;
 }
@@ -275,31 +348,54 @@ const xmlText = (s) => s.replace(/&(#x[0-9a-f]+|#\d+|lt|gt|amp|quot|apos);/gi, (
   }
   return { lt: '<', gt: '>', amp: '&', quot: '"', apos: "'" }[e.toLowerCase()];
 });
-const runs = (xml) => [...xml.matchAll(/<t\b[^>]*>([^<]*)<\/t>/g)].map((m) => xmlText(m[1])).join('');
+
+/**
+ * <tag …>inner</tag> and <tag …/> elements, found with indexOf (linear: no regex backtracking on
+ * broken XML). Stops at the first unclosed element. ponytail: no nested same-name tags (xlsx has none).
+ */
+function elements(xml, tag, max = Infinity) {
+  const out = [];
+  const open = `<${tag}`;
+  const close = `</${tag}>`;
+  for (let i = xml.indexOf(open); i >= 0 && out.length < max; i = xml.indexOf(open, i)) {
+    if (!/[\s/>]/.test(xml[i + open.length] ?? '')) { i += open.length; continue; } // <tagname…> of another tag
+    const gt = xml.indexOf('>', i);
+    if (gt < 0 || gt - i > 4096) break;
+    if (xml[gt - 1] === '/') { out.push({ attrs: xml.slice(i + open.length, gt - 1), inner: '' }); i = gt + 1; continue; }
+    const end = xml.indexOf(close, gt);
+    if (end < 0) break;
+    out.push({ attrs: xml.slice(i + open.length, gt), inner: xml.slice(gt + 1, end) });
+    i = end + close.length;
+  }
+  return out;
+}
+const runs = (xml) => elements(xml, 't').map((e) => xmlText(e.inner)).join('');
 
 /** First worksheet of an .xlsx as rows of cells (strings, or numbers for numeric cells). */
 function readXlsx(buf) {
   const meta = unzip(buf, (n) => n === 'xl/workbook.xml' || n === 'xl/_rels/workbook.xml.rels' || n === 'xl/sharedStrings.xml');
   const wb = meta.get('xl/workbook.xml');
   if (!wb) fail('UNSUPPORTED', MESSAGES.UNSUPPORTED);
-  const rid = /<sheet\b[^>]*\br:id="([^"]+)"/.exec(wb)?.[1];
-  const rel = rid && [...(meta.get('xl/_rels/workbook.xml.rels') ?? '').matchAll(/<Relationship\b[^>]*>/g)].map((m) => m[0]).find((t) => t.includes(`Id="${rid}"`));
-  let target = rel ? /Target="([^"]+)"/.exec(rel)?.[1] : 'worksheets/sheet1.xml';
+  const rid = /\br:id="([^"]+)"/.exec(elements(wb, 'sheet', 1)[0]?.attrs ?? '')?.[1];
+  const rel = rid && elements(meta.get('xl/_rels/workbook.xml.rels') ?? '', 'Relationship', 1000).map((e) => e.attrs).find((t) => t.includes(`Id="${rid}"`));
+  let target = (rel && /Target="([^"]+)"/.exec(rel)?.[1]) || 'worksheets/sheet1.xml';
   target = target.startsWith('/') ? target.slice(1) : `xl/${target}`;
   const sheet = unzip(buf, (n) => n === target).get(target);
   if (!sheet) fail('UNSUPPORTED', MESSAGES.UNSUPPORTED);
-  const shared = [...(meta.get('xl/sharedStrings.xml') ?? '').matchAll(/<si>([\s\S]*?)<\/si>/g)].map((m) => runs(m[1]));
+  const shared = elements(meta.get('xl/sharedStrings.xml') ?? '', 'si', 500_001).map((e) => runs(e.inner));
+  if (shared.length > 500_000) fail('TOO_LARGE', MESSAGES.TOO_COMPLEX);
+  const sheetRows = elements(sheet, 'row', MAX_ROWS + 201);
+  if (sheetRows.length > MAX_ROWS + 200) fail('TOO_LARGE', MESSAGES.TOO_COMPLEX);
   const rows = [];
-  for (const rm of sheet.matchAll(/<row\b[^>]*>([\s\S]*?)<\/row>/g)) {
-    if (rows.length > MAX_ROWS + 200) fail('TOO_LARGE', MESSAGES.TOO_COMPLEX);
+  for (const rm of sheetRows) {
     const row = [];
-    for (const cm of rm[1].matchAll(/<c\b([^>]*?)(?:\/>|>([\s\S]*?)<\/c>)/g)) {
-      const ref = /\br="([A-Z]{1,3})\d+"/.exec(cm[1])?.[1];
+    for (const cm of elements(rm.inner, 'c', 200)) {
+      const ref = /\br="([A-Z]{1,3})\d+"/.exec(cm.attrs)?.[1];
       const col = ref ? [...ref].reduce((n, ch) => n * 26 + ch.charCodeAt(0) - 64, 0) - 1 : row.length;
       if (col > 60) continue;
-      const t = /\bt="(\w+)"/.exec(cm[1])?.[1];
-      const inner = cm[2] ?? '';
-      const v = /<v>([^<]*)<\/v>/.exec(inner)?.[1];
+      const t = /\bt="(\w+)"/.exec(cm.attrs)?.[1];
+      const inner = cm.inner;
+      const v = elements(inner, 'v', 1)[0]?.inner;
       if (t === 'inlineStr') row[col] = runs(inner);
       else if (t === 's') row[col] = shared[Number(v)] ?? '';
       else if (t === 'str' || t === 'b' || t === 'e') row[col] = xmlText(v ?? '');
@@ -313,6 +409,8 @@ function readXlsx(buf) {
 // ---- table (CSV / XLSX) statements ---------------------------------------------------------------
 
 const lc = (c) => String(c ?? '').trim().toLowerCase();
+const BALANCE_LINE = /balance b\/f|balance c\/f|brought forward|carried forward|opening balance|closing balance|previous balance/i;
+const HOLDER_LABEL = /^(?:account holder|customer name|account name|name)\s*:?$/i;
 const isHeaderRow = (r) => {
   const h = r.map(lc);
   return h.some((c) => /\bdate\b/.test(c)) && (h.some((c) => /debit|withdraw/.test(c)) && h.some((c) => /credit|deposit/.test(c)) || h.some((c) => /amount/.test(c)));
@@ -361,11 +459,12 @@ function parseTable(rows, format) {
   const balanceCol = find(/balance/);
   const descCols = header.map((c, i) => (/desc|ref|detail|particular|narrat|payee|merchant|remark/.test(c) && i !== dateCol ? i : -1)).filter((i) => i >= 0);
   const period = periodOf(preamble);
+  const { order, ambiguous } = dateOrder(rows.slice(hi + 1).map((r) => r[dateCol]));
   const out = [];
   let skipped = 0;
   for (const r of rows.slice(hi + 1)) {
     if (!r.some((c) => String(c ?? '').trim())) continue;
-    const date = parseDate(r[dateCol]);
+    const date = parseDate(r[dateCol], null, order);
     let cents = null;
     if (amountCol >= 0) cents = parseAmount(r[amountCol]);
     else {
@@ -375,7 +474,9 @@ function parseTable(rows, format) {
       else if (c) cents = Math.abs(c);
     }
     if (!date || !cents) {
-      if (date || cents) skipped++;
+      // Balance-only lines ("BALANCE B/F", opening/closing balance) carry no transaction: skip quietly.
+      const balanceOnly = date && !cents && (BALANCE_LINE.test(r.join(' ')) || (balanceCol >= 0 && parseAmount(r[balanceCol]) != null));
+      if ((date || cents) && !balanceOnly) skipped++;
       continue;
     }
     out.push({
@@ -395,7 +496,15 @@ function parseTable(rows, format) {
   const first = out[0];
   const opening = first?.balance_cents != null ? first.balance_cents + (first.kind === 'income' ? -first.amount_cents : first.amount_cents) : null;
   const warnings = skipped ? [`${skipped} line${skipped === 1 ? '' : 's'} couldn't be read and ${skipped === 1 ? 'was' : 'were'} skipped.`] : [];
-  return { bank, format, last4: accountLast4(preamble), period, opening, closing, rows: out, warnings };
+  // Dates like 03/04/2026 read day first; say so when some then fall outside the statement's dates
+  // (or, with only an end date, over two months before it).
+  const early = period.to && new Date(Date.parse(`${period.to}T12:00:00Z`) - 62 * 864e5).toISOString().slice(0, 10);
+  if (ambiguous && out.some((x) => (period.to && x.date > period.to) || (period.from ? x.date < period.from : early && x.date < early))) {
+    warnings.push('Some dates could be day/month or month/day; they were read day first (DD/MM/YYYY). Check the dates before importing.');
+  }
+  const nameRow = rows.slice(0, hi).find((r) => HOLDER_LABEL.test(String(r[0] ?? '').trim()));
+  const holder = nameRow ? String(nameRow.slice(1).find((c) => String(c).trim()) ?? '') : null;
+  return { bank, format, last4: accountLast4(preamble), period, opening, closing, rows: out, warnings, holder };
 }
 
 // ---- PDF statements -------------------------------------------------------------------------------
@@ -404,6 +513,13 @@ const PDF_DATE = /^(\d{2}\/\d{2}\/\d{4}|\d{1,2} [A-Za-z]{3}(?: \d{4})?)$/;
 const AMOUNT = /^(?:S?\$)?\d{1,3}(?:,\d{3})*\.\d{2}(?:\s?(?:CR|DR))?$/;
 
 async function pdfLines(buf, password) {
+  // pdf.js would load the native @napi-rs/canvas module for rendering; text extraction doesn't need it.
+  const Module = createRequire(import.meta.url)('node:module');
+  const load = Module._load;
+  Module._load = function guarded(request, ...rest) {
+    if (/^@napi-rs\//.test(request)) throw new Error('native modules are disabled in the statement parser');
+    return load.call(this, request, ...rest);
+  };
   const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs');
   const task = pdfjs.getDocument({
     data: new Uint8Array(buf), password: password || undefined, isEvalSupported: false, disableFontFace: true, useSystemFonts: false,
@@ -422,13 +538,19 @@ async function pdfLines(buf, password) {
     for (let p = 1; p <= doc.numPages; p++) {
       const page = await doc.getPage(p);
       const { items } = await page.getTextContent();
+      if (items.length > 20_000) fail('TOO_LARGE', MESSAGES.TOO_COMPLEX);
       const pageLines = [];
+      const byY = new Map(); // y rounded to 2pt → line (the neighbours are checked too: ± 2pt)
       for (const it of items) {
         if (!it.str?.trim()) continue;
         const x = it.transform[4];
         const y = it.transform[5];
-        let line = pageLines.find((l) => Math.abs(l.y - y) <= 2);
-        if (!line) pageLines.push((line = { page: p, y, items: [] }));
+        const k = Math.round(y / 2);
+        let line = [byY.get(k), byY.get(k - 1), byY.get(k + 1)].find((l) => l && Math.abs(l.y - y) <= 2);
+        if (!line) {
+          pageLines.push((line = { page: p, y, items: [] }));
+          byY.set(k, line);
+        }
         line.items.push({ x, r: x + (it.width || it.str.length * 4), s: it.str });
       }
       pageLines.sort((a, b) => b.y - a.y);
@@ -540,7 +662,8 @@ async function parsePdf(buf, password) {
   }
   if (!rows.length && undated) fail('UNSUPPORTED', MESSAGES.UNSUPPORTED);
   for (const r of rows) r.description = clean(r.description);
-  return { bank, format: 'pdf', last4, period, opening, closing: closing ?? rows[rows.length - 1]?.balance_cents ?? null, rows, warnings };
+  const holder = preamble.split('\n').map((t) => /^(?:account holder|customer name|account name|name)\s*:\s*(.+)$/i.exec(t)?.[1]).find(Boolean) ?? null;
+  return { bank, format: 'pdf', last4, period, opening, closing: closing ?? rows[rows.length - 1]?.balance_cents ?? null, rows, warnings, holder };
 }
 
 /** Parse a statement file (Buffer). Throws ImportError with a contract code. */
@@ -556,6 +679,13 @@ export async function parseStatement(buf, { password = null, filename = '' } = {
   else res = parseTable(parseCsv(decodeText(buf)), ext === 'xls' ? 'xls' : 'csv');
   if (!res.rows.length) fail('EMPTY', MESSAGES.EMPTY);
   if (res.rows.length > MAX_ROWS) fail('TOO_LARGE', MESSAGES.TOO_COMPLEX);
+  // The statement holder's own name (self-transfers: "FROM ALEX RIVERA") becomes "(you)"; it's never kept.
+  const words = normText(res.holder ?? '').split(' ').filter((w) => /\p{L}/u.test(w)).slice(0, 6).map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  if (words.join('').length >= 3) {
+    const re = new RegExp(`(?<![\\p{L}\\p{N}])${words.join('[\\s,]+')}(?![\\p{L}\\p{N}])`, 'giu');
+    for (const r of res.rows) r.description = r.description.replace(re, '(you)');
+  }
+  delete res.holder;
   const dates = res.rows.map((r) => r.date).sort();
   return {
     ...res,
@@ -567,40 +697,77 @@ export async function parseStatement(buf, { password = null, filename = '' } = {
 
 let running = 0;
 const waiting = [];
+const busy = new Set(); // owners with a parse queued or running
+const MAX_QUEUE = 4;
+const CHILD_FLAG = 'HEARTH_STATEMENT_PARSER';
+// pdf.js inflates streams into typed arrays outside V8's heap limit, so the parser process's
+// resident memory is capped too; past it the process exits and the OS takes everything back.
+const CHILD_RSS_LIMIT = 320 * 1024 * 1024;
 
 /**
- * Parse in a worker thread: 256 MB heap, 20 s, at most 2 at a time (others wait their turn).
- * The buffer's bytes are moved into the worker and the caller's copy is zeroed.
+ * Parse in a separate, short-lived process (this file, run with HEARTH_STATEMENT_PARSER=1): it has
+ * no environment (no encryption key, …), no output (pdf.js chatter is dropped, never logged), at most
+ * 320 MB resident memory, a 256 MB heap and 20 s; inside it the parsing runs on a worker thread so
+ * the memory watch keeps ticking. At most 2 parses at a time, 4 waiting, and one per `owner` —
+ * anything more is refused right away with code BUSY. The caller's buffer is zeroed.
  */
-export async function parseInWorker(buffer, { password = null, filename = '' } = {}) {
-  if (running >= MAX_WORKERS) await new Promise((r) => waiting.push(r));
-  running++;
+export async function parseInWorker(buffer, { password = null, filename = '', owner = null } = {}) {
+  if ((owner != null && busy.has(owner)) || (running >= MAX_WORKERS && waiting.length >= MAX_QUEUE)) {
+    buffer.fill(0);
+    throw new ImportError('BUSY', MESSAGES.BUSY);
+  }
+  if (owner != null) busy.add(owner);
   const data = new Uint8Array(buffer.length);
   data.set(buffer);
   buffer.fill(0);
+  let started = false;
   try {
+    if (running >= MAX_WORKERS) await new Promise((r) => waiting.push(r));
+    running++;
+    started = true;
     return await new Promise((resolve, reject) => {
-      const worker = new Worker(new URL(import.meta.url), {
-        workerData: { hearthStatement: true, data, password, filename },
-        transferList: [data.buffer],
-        resourceLimits: { maxOldGenerationSizeMb: 256, maxYoungGenerationSizeMb: 32, stackSizeMb: 4 },
-        env: {}, // no secrets (encryption key, …) in the parser's environment
-        stdout: true, // pdf.js chatter is swallowed, never logged
-        stderr: true,
+      const child = fork(fileURLToPath(import.meta.url), [], {
+        env: { [CHILD_FLAG]: '1' },
+        execArgv: ['--max-old-space-size=256', '--disable-warning=ExperimentalWarning'],
+        stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+        serialization: 'advanced',
       });
-      worker.stdout.resume();
-      worker.stderr.resume();
       let settled = false;
-      const finish = (fn, v) => { if (!settled) { settled = true; clearTimeout(timer); worker.terminate(); fn(v); } };
-      const timer = setTimeout(() => finish(reject, new ImportError('TOO_LARGE', MESSAGES.TOO_COMPLEX)), TIMEOUT_MS);
-      worker.on('message', (m) => (m.ok ? finish(resolve, m.result) : finish(reject, new ImportError(m.code, m.message))));
-      worker.on('error', (err) => finish(reject, new ImportError(err?.code === 'ERR_WORKER_OUT_OF_MEMORY' ? 'TOO_LARGE' : 'UNSUPPORTED', err?.code === 'ERR_WORKER_OUT_OF_MEMORY' ? MESSAGES.TOO_COMPLEX : MESSAGES.UNSUPPORTED)));
-      worker.on('exit', () => finish(reject, new ImportError('UNSUPPORTED', MESSAGES.UNSUPPORTED)));
+      const finish = (fn, v) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        child.kill('SIGKILL');
+        fn(v);
+      };
+      const tooBig = () => new ImportError('TOO_LARGE', MESSAGES.TOO_COMPLEX);
+      const timer = setTimeout(() => finish(reject, tooBig()), TIMEOUT_MS);
+      child.on('message', (m) => (m?.ok ? finish(resolve, m.result) : finish(reject, new ImportError(m?.code ?? 'UNSUPPORTED', m?.message ?? MESSAGES.UNSUPPORTED))));
+      child.on('error', () => finish(reject, new ImportError('UNSUPPORTED', MESSAGES.UNSUPPORTED)));
+      child.on('exit', (code) => finish(reject, code === 3 ? tooBig() : new ImportError('UNSUPPORTED', MESSAGES.UNSUPPORTED)));
+      child.send({ data, password, filename }, () => data.fill(0));
     });
   } finally {
-    running--;
-    waiting.shift()?.();
+    if (owner != null) busy.delete(owner);
+    if (started) {
+      running--;
+      waiting.shift()?.();
+    }
   }
+}
+
+// The parser process: watch our own memory, parse on a worker thread, answer once, exit.
+if (isMainThread && process.env[CHILD_FLAG] && process.send) {
+  process.once('message', ({ data, password, filename }) => {
+    setInterval(() => { if (process.memoryUsage.rss() > CHILD_RSS_LIMIT) process.exit(3); }, 10);
+    const worker = new Worker(new URL(import.meta.url), {
+      workerData: { hearthStatement: true, data, password, filename },
+      resourceLimits: { maxOldGenerationSizeMb: 256, maxYoungGenerationSizeMb: 32, stackSizeMb: 4 },
+    });
+    worker.on('message', (m) => process.send(m, () => process.exit(0)));
+    worker.on('error', (err) => process.exit(err?.code === 'ERR_WORKER_OUT_OF_MEMORY' ? 3 : 1));
+    worker.on('exit', () => process.exit(1));
+  });
 }
 
 if (!isMainThread && workerData?.hearthStatement) {

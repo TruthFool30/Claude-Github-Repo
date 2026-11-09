@@ -7,11 +7,11 @@ import { useMember } from '../../lib/auth';
 import { cn } from '../../lib/cn';
 import { firstName, fmtRelative } from '../../lib/format';
 import {
-  Avatar, Button, Card, EmptyState, Fab, Field, IconButton, Input, Menu, Modal, Skeleton, Spinner, Textarea, toast, useConfirm,
+  Avatar, Button, Card, EmptyState, Fab, Field, IconButton, Input, Menu, Modal, Skeleton, Spinner, Textarea, toast, useConfirm, VisibilityBadge, VisibilityPicker,
 } from '../../ui';
 import { keys, useNotes, type NoteField, type NoteKind, type VaultNote, type Visibility } from './api';
 import { ACCENT, NOTE_KINDS, NOTE_KIND_ORDER, Tile, copyText } from './meta';
-import { Chip, SearchField, VisibilityBadge, VisibilityPicker } from './parts';
+import { Chip, SearchField } from './parts';
 import { useAuth } from '../../lib/auth';
 
 const REVEAL_MS = 30_000;

@@ -26,7 +26,7 @@ let step = '';
 
 async function newUser(email, { width = 1280, height = 800, theme = 'light', mobile = false } = {}) {
   const ctx = await browser.newContext({ ...TZ_CTX, viewport: { width, height }, isMobile: mobile, hasTouch: mobile, deviceScaleFactor: mobile ? 2 : 1 });
-  await ctx.addInitScript((t) => localStorage.setItem('hearth-theme', t), theme);
+  await ctx.addInitScript((t) => window.localStorage?.setItem('hearth-theme', t), theme);
   const page = await ctx.newPage();
   // The deliberate /lists/999999 visit logs the expected 404 response.
   page.on('console', (m) => { if (m.type() === 'error' && step !== '404') errors.push(`[${email} ${step}] ${m.text()}`); });

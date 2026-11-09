@@ -29,7 +29,7 @@ async function newPage({ mobile = false, theme = 'light', email = 'alex@hearth.t
     hasTouch: mobile,
     deviceScaleFactor: mobile ? 2 : 1,
   });
-  await ctx.addInitScript((t) => localStorage.setItem('hearth-theme', t), theme);
+  await ctx.addInitScript((t) => window.localStorage?.setItem('hearth-theme', t), theme);
   await ctx.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: BASE });
   const page = await ctx.newPage();
   page.on('pageerror', (e) => pageErrors.push(`${email}: ${e.message}`));

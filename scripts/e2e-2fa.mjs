@@ -65,7 +65,7 @@ for (const mobile of [false, true]) {
       hasTouch: mobile,
       acceptDownloads: true,
     });
-    await ctx.addInitScript((t) => localStorage.setItem('hearth-theme', t), theme);
+    await ctx.addInitScript((t) => window.localStorage?.setItem('hearth-theme', t), theme);
     const page = await ctx.newPage();
     page.on('pageerror', (e) => pageErrors.push(`${tag}: ${e.message}`));
     // Wrong codes/passwords are part of the flow, so their 400/401 responses are expected.

@@ -12,13 +12,13 @@ import { firstName, fmtBytes, fmtDate, fmtRelative, plural } from '../../lib/for
 import { useIsDesktop } from '../../lib/hooks';
 import {
   Avatar, Badge, Button, Card, ColorPicker, EmptyState, Fab, Field, IconButton, Input, Menu, Modal, SegmentedControl, Select, Skeleton,
-  Spinner, Textarea, toast, useConfirm, PALETTE,
+  Spinner, Textarea, toast, useConfirm, PALETTE, VisibilityBadge, VisibilityPicker, VISIBILITY,
 } from '../../ui';
 import {
   keys, MAX_UPLOAD, fileUrl, uploadDocument, useDocuments, useFolders, type Folder, type FolderIcon, type VaultDoc, type Visibility,
 } from './api';
 import { ACCENT, DOC_KINDS, FOLDER_ICONS, Tile, daysUntil, expiryLabel, expiryShort, tint } from './meta';
-import { SearchField, SectionTitle, VisibilityBadge, VisibilityPicker, VISIBILITY } from './parts';
+import { SearchField, SectionTitle } from './parts';
 import { useAuth } from '../../lib/auth';
 
 type View = 'grid' | 'list';

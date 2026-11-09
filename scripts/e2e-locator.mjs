@@ -37,7 +37,7 @@ async function context({ email, width = 1280, height = 800, theme = 'light', mob
     deviceScaleFactor: mobile ? 2 : 1,
     ...(geo ? { geolocation: SPOT, permissions: ['geolocation'] } : {}),
   });
-  await ctx.addInitScript((t) => localStorage.setItem('hearth-theme', t), theme);
+  await ctx.addInitScript((t) => window.localStorage?.setItem('hearth-theme', t), theme);
   if (tiles) await ctx.route(/tile\.openstreetmap\.org/, (r) => r.fulfill({ status: 200, contentType: 'image/svg+xml', body: TILE }));
   const page = await ctx.newPage();
   page.on('console', (m) => {

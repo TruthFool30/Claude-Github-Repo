@@ -18,7 +18,7 @@ async function open(email, { width = 1280, height = 800, theme = 'light' } = {})
   const mobile = width < 700;
   const ctx = await browser.newContext({ viewport: { width, height }, isMobile: mobile, hasTouch: mobile, timezoneId: TZ });
   await ctx.addInitScript((t) => {
-    localStorage.setItem('hearth-theme', t);
+    window.localStorage?.setItem('hearth-theme', t);
   }, theme);
   const page = await ctx.newPage();
   page.on('pageerror', (e) => errors.push(`${email}: ${e.message}`));

@@ -2,7 +2,7 @@
 // top merchants, spikes, recurring total and whether the savings goals fit the monthly surplus.
 import { Link, useSearchParams } from 'react-router';
 import {
-  ArrowDownLeft, ArrowRight, ArrowUpRight, CalendarClock, ChartColumn, Flame, Landmark, Lightbulb, PiggyBank, Plus, Scale, Store, Upload,
+  ArrowDownLeft, ArrowRight, ArrowUpRight, CalendarClock, CalendarX, ChartColumn, Flame, Landmark, Lightbulb, PiggyBank, Plus, Scale, Store, Upload,
 } from 'lucide-react';
 import { cn } from '../../lib/cn';
 import { fmtDate, plural } from '../../lib/format';
@@ -94,15 +94,40 @@ function GoalsCard({ g, fmt }: { g: InsightsData['goals']; fmt: (n: number) => s
             </ul>
           )}
           {g.undated > 0 && <p className="text-xs text-muted">{plural(g.undated, 'goal has', 'goals have')} no target date, so {g.undated === 1 ? "it isn't" : "they aren't"} counted. Add a date to plan monthly savings.</p>}
-          {g.suggestions.length > 0 && (
-            <ul className="flex flex-col gap-2">
-              {g.suggestions.map((s, i) => (
-                <li key={i} className="flex items-start gap-2 rounded-xl bg-surface-2 px-3 py-2 text-sm text-fg">
-                  <Lightbulb size={16} className="mt-0.5 shrink-0 text-warning" aria-hidden />
-                  {s}
+          {!!g.overdue?.length && (
+            <ul className="flex flex-col gap-1.5">
+              {g.overdue.map((o) => (
+                <li key={o.id} className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-xl border border-warning/30 bg-warning-soft px-3 py-2 text-sm text-warning-soft-fg">
+                  <CalendarX size={16} className="shrink-0" aria-hidden />
+                  <span className="min-w-0 flex-1">
+                    Past its date: <b>{o.emoji ? `${o.emoji} ` : ''}{o.name}</b> — {fmt(o.left)} left
+                    <span className="opacity-80"> (was due {fmtDate(o.target_date, 'MMM yyyy')})</span>
+                  </span>
+                  <Link to={`/budget/goals?goal=${o.id}`} className="text-[13px] font-semibold underline-offset-2 hover:underline">Edit goal</Link>
                 </li>
               ))}
             </ul>
+          )}
+          {g.suggestions.length > 0 && (
+            <div className="flex flex-col gap-2">
+              <h3 className="text-[13px] font-semibold text-fg">{g.suggestions.length > 1 ? 'Ways to close the gap' : 'Tip'}</h3>
+              <ul className="flex flex-col gap-2">
+                {g.suggestions.map((s, i) => (
+                  <li key={i} className={cn('flex items-start gap-2 rounded-xl px-3 py-2 text-sm text-fg', i === 0 ? 'bg-surface-2' : 'bg-surface-2/50')}>
+                    <Lightbulb size={16} className={cn('mt-0.5 shrink-0', i === 0 ? 'text-warning' : 'text-subtle')} aria-hidden />
+                    <span>
+                      {i > 0 && <span className="font-semibold">Or: </span>}
+                      {s}
+                      {i === 0 && g.status === 'short' && g.remaining_gap !== undefined && (
+                        <span className="mt-0.5 block text-xs text-muted">
+                          {g.remaining_gap > 0 ? `That still leaves you ${fmt(g.remaining_gap)} a month short.` : 'That alone closes the gap.'}
+                        </span>
+                      )}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
           )}
         </div>
       )}
@@ -169,6 +194,7 @@ export default function Insights() {
   const trend = data.months.map((m) => ({ month: m.month, income: m.income, spent: m.spending }));
   const [firstBalance, ...moreBalances] = data.balances;
   const maxMerchant = Math.max(1, ...data.merchants.map((m) => m.total));
+  const early = new Date().getDate() < 5;
 
   return (
     <div className={cn('flex flex-col gap-5 transition-opacity', isFetching && 'opacity-80')}>
@@ -179,6 +205,7 @@ export default function Insights() {
             : data.full_months
               ? `Averages over ${plural(data.full_months, 'month')} with data (of the last ${months})`
               : 'No full month of data yet — averages appear once a month is complete'}
+          <span className="block text-xs text-subtle">Transfers between your own accounts aren't counted.</span>
         </p>
         {picker}
       </div>
@@ -198,20 +225,26 @@ export default function Insights() {
           icon={<Landmark size={14} />}
           tone="#0090FF"
           value={firstBalance ? fmt(firstBalance.balance) : '—'}
-          hint={firstBalance ? `${firstBalance.account_label} · ${fmtDate(firstBalance.as_of, 'MMM d')}${moreBalances.length ? ` · +${moreBalances.length} more` : ''}` : 'Import a statement to see it'}
+          hint={firstBalance ? `${firstBalance.account_label} · ${firstBalance.stale ? 'as of ' : ''}${fmtDate(firstBalance.as_of, 'MMM d')}${moreBalances.length ? ` · +${moreBalances.length} more` : ''}` : 'Import a statement to see it'}
         />
       </div>
 
-      {moreBalances.length > 0 && (
+      {(moreBalances.length > 0 || firstBalance?.stale) && (
         <Card padding="sm">
           <h2 className="sr-only">All account balances</h2>
           <ul className="flex flex-wrap gap-x-6 gap-y-2 px-1 text-sm">
             {data.balances.map((b) => (
-              <li key={b.account_label} className="flex items-center gap-2">
+              <li key={b.account_label} className="flex flex-wrap items-center gap-x-2">
                 <Landmark size={14} className="text-subtle" aria-hidden />
                 <span className="text-muted">{b.account_label}</span>
                 <span className="font-semibold text-fg tabular">{fmt(b.balance)}</span>
-                <span className="text-xs text-subtle">{fmtDate(b.as_of, 'MMM d')}</span>
+                {b.stale ? (
+                  <span className="text-xs text-warning-soft-fg">
+                    as of {fmtDate(b.as_of, 'MMM d')}{b.statement_to ? ` · newer statement (to ${fmtDate(b.statement_to, 'MMM d')}) had no balance` : ''}
+                  </span>
+                ) : (
+                  <span className="text-xs text-subtle">{fmtDate(b.as_of, 'MMM d')}</span>
+                )}
               </li>
             ))}
           </ul>
@@ -236,7 +269,7 @@ export default function Insights() {
       <div className="grid grid-cols-1 gap-5 lg:grid-cols-[1.25fr_1fr] [&>*]:min-w-0">
         <Card>
           <CardHeader title="Income vs spending" subtitle={`Last ${months} months + this month so far`} icon={Scale} accent={mod.accent} />
-          <TrendChart trend={trend} month="" partialMonth={partial} fmt={fmt} />
+          <TrendChart trend={trend} month="" partialMonth={partial} fmt={fmt} netLabel="Surplus" />
         </Card>
         <Card>
           <CardHeader
@@ -254,6 +287,11 @@ export default function Insights() {
                   <span className="shrink-0 font-semibold text-fg tabular">{fmt(b.amount)}</span>
                 </li>
               ))}
+              {data.recurring.bills.length > 8 && (
+                <li className="pt-2 text-[13px] text-muted">
+                  +{data.recurring.bills.length - 8} more · <Link to="/budget/bills" className="font-semibold text-primary">see all bills</Link>
+                </li>
+              )}
             </ul>
           ) : (
             <p className="py-6 text-center text-sm text-muted">No monthly bills yet.</p>
@@ -263,29 +301,33 @@ export default function Insights() {
 
       <div className="grid grid-cols-1 gap-5 lg:grid-cols-2 [&>*]:min-w-0">
         <Card>
-          <CardHeader title="Categories" subtitle="This month vs your monthly average" icon={ChartColumn} accent="#F76B15" />
+          <CardHeader title="Categories" subtitle="This month so far vs what you usually spend by this day" icon={ChartColumn} accent="#F76B15" />
           {data.categories.length ? (
             <ul className="flex flex-col gap-1">
+              <li aria-hidden className="flex justify-between px-1 text-[11px] font-semibold uppercase tracking-wide text-subtle"><span>Category</span><span>So far this month</span></li>
               {data.categories.map((c) => (
                 <li key={`${c.category_id}-${c.name}`} className="flex items-center gap-3 rounded-xl px-1 py-1.5">
                   <CategoryIcon category={c} size="sm" />
                   <div className="min-w-0 flex-1">
                     <div className="truncate text-sm font-medium text-fg">{c.name}</div>
-                    <div className="text-xs text-muted tabular">avg {fmt(c.avg)}/mo</div>
+                    <div className="text-xs text-muted tabular">
+                      avg {fmt(c.avg)}/mo{c.avg_to_date !== undefined && !early && <> · usually {fmt(c.avg_to_date)} by now</>}
+                    </div>
                   </div>
                   <div className="shrink-0 text-right">
                     <div className="text-sm font-semibold text-fg tabular">{fmt(c.this_month)}</div>
-                    <Change pct={c.change_pct} />
+                    {/* ponytail: early in the month (or with a tiny baseline) a % is noise — "−100%" on the 2nd says nothing. */}
+                    {c.this_month === 0 ? <span className="text-xs text-subtle">none yet</span> : early || (c.avg_to_date ?? c.avg) < 5 ? null : <Change pct={c.change_pct} />}
                   </div>
                 </li>
               ))}
             </ul>
           ) : (
-            <p className="py-6 text-center text-sm text-muted">No categorised spending yet.</p>
+            <p className="py-6 text-center text-sm text-muted">No categorized spending yet.</p>
           )}
         </Card>
         <Card>
-          <CardHeader title="Top merchants" subtitle={`Over the last ${months} months`} icon={Store} accent="#8E4EC6" />
+          <CardHeader title="Top merchants" subtitle={`Last ${months} months + this month so far`} icon={Store} accent="#8E4EC6" />
           {data.merchants.length ? (
             <ol className="flex flex-col gap-3">
               {data.merchants.map((m) => (

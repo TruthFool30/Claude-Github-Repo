@@ -21,7 +21,7 @@ const log = (msg) => console.log(`  ${String(++step).padStart(2, '0')} ${msg}`);
 async function open(email, { width = 1280, height = 800, theme = 'light', mobile = false } = {}) {
   const ctx = await browser.newContext({ viewport: { width, height }, isMobile: mobile, hasTouch: mobile, deviceScaleFactor: 1 });
   await ctx.addInitScript((t) => {
-    localStorage.setItem('hearth-theme', t);
+    window.localStorage?.setItem('hearth-theme', t);
     localStorage.removeItem('hearth-wall-filter');
     localStorage.removeItem('hearth-wall-draft');
   }, theme);

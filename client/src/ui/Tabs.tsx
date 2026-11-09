@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { cn } from '../lib/cn';
 import { renderIcon, type IconLike } from './icon';
 
@@ -72,7 +72,24 @@ export interface SegmentedControlProps<T extends string = string> {
   'aria-label'?: string;
 }
 
-/** iOS-style segmented control with a sliding thumb. */
+/**
+ * Arrow keys / Home / End for a role="radiogroup" of role="radio" buttons (WAI-ARIA radio group
+ * pattern): moves focus AND selection, wrapping around. Pair with a roving tabIndex (only the
+ * checked radio is tabbable).
+ */
+export function radioKeys<T>(values: readonly T[], value: T, onChange: (v: T) => void, buttons: Array<HTMLElement | null>) {
+  return (e: KeyboardEvent) => {
+    const i = Math.max(0, values.indexOf(value));
+    const next = { ArrowRight: i + 1, ArrowDown: i + 1, ArrowLeft: i - 1, ArrowUp: i - 1, Home: 0, End: values.length - 1 }[e.key];
+    if (next === undefined) return;
+    e.preventDefault();
+    const j = (next + values.length) % values.length;
+    onChange(values[j]);
+    buttons[j]?.focus();
+  };
+}
+
+/** iOS-style segmented control with a sliding thumb (a radio group: arrow keys move the choice). */
 export function SegmentedControl<T extends string>({
   options, value, onChange, size = 'md', block, className, ...aria
 }: SegmentedControlProps<T>) {
@@ -95,6 +112,7 @@ export function SegmentedControl<T extends string>({
       role="radiogroup"
       aria-label={aria['aria-label']}
       className={cn('relative inline-flex rounded-xl bg-surface-2 p-1', block && 'flex w-full', className)}
+      onKeyDown={radioKeys(options.map((o) => o.value), value, onChange, refs.current)}
     >
       {thumb && (
         <span
@@ -114,6 +132,7 @@ export function SegmentedControl<T extends string>({
             type="button"
             role="radio"
             aria-checked={on}
+            tabIndex={on || (index < 0 && i === 0) ? 0 : -1}
             onClick={() => onChange(o.value)}
             className={cn(
               'relative z-10 inline-flex items-center justify-center gap-1.5 whitespace-nowrap rounded-[10px] font-semibold transition-colors',

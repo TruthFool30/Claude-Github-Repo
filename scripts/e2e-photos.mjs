@@ -30,7 +30,7 @@ async function context({ email = 'alex@hearth.test', mobile = false, theme = 'li
   const ctx = await browser.newContext(
     mobile ? { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 } : { viewport: { width: 1280, height: 800 } },
   );
-  await ctx.addInitScript((t) => localStorage.setItem('hearth-theme', t), theme);
+  await ctx.addInitScript((t) => window.localStorage?.setItem('hearth-theme', t), theme);
   const page = await ctx.newPage();
   page.on('console', (m) => m.type() === 'error' && !/favicon|Failed to load resource.*40[0134]/.test(m.text()) && errors.push(`[${email} ${step}] ${m.text()}`));
   page.on('pageerror', (e) => errors.push(`[${email} ${step}] pageerror ${e.message}`));

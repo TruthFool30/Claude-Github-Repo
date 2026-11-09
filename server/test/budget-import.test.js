@@ -4,9 +4,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { startServer, familyFixture, registerUser, collectEvents } from './helpers.js';
+import { startServer, familyFixture, registerUser, collectEvents, PNG_1X1 } from './helpers.js';
 import * as F from './fixtures/statements/index.js';
-import { addMonths, autoAmount, dateKey, monthOf } from '../src/modules/budget/lib.js';
+import { addMonths, autoAmount, dateKey, daysInMonth, monthOf } from '../src/modules/budget/lib.js';
 import { detectRecurring, maskDigits, merchantKey, parseAmount, parseDate } from '../src/modules/budget/import.js';
 
 let srv;
@@ -451,12 +451,14 @@ describe('import flow', () => {
     assert.equal(bills[0].description, 'Netflix ••7890');
     assert.equal(bills[0].visibility, 'adults');
     assert.equal(bills[0].auto_create, 0);
-    assert.equal(bills[0].start_month, '2026-10');
+    assert.equal(bills[0].start_month, '2026-11'); // the month after its latest payment
     // October is paid by the imported payment; no extra transaction was created.
     const oct = (await h.admin.agent.get('/api/budget/recurring?month=2026-10')).body.find((b) => b.id === bills[0].id);
     assert.equal(oct.status, 'paid');
     assert.equal(oct.paid_amount, 19.98);
-    assert.equal(srv.db.prepare("SELECT COUNT(*) AS n FROM budget_transactions WHERE family_id = ? AND recurring_id = ?").get(h.family.id, bills[0].id).n, 1);
+    // September and October's imported payments are linked; no extra transaction was created.
+    assert.equal(srv.db.prepare("SELECT COUNT(*) AS n FROM budget_transactions WHERE family_id = ? AND recurring_id = ? AND import_id IS NOT NULL").get(h.family.id, bills[0].id).n, 2);
+    assert.equal(srv.db.prepare("SELECT COUNT(*) AS n FROM budget_transactions WHERE family_id = ? AND recurring_id = ?").get(h.family.id, bills[0].id).n, 2);
     // Kids don't see the adults' bill (list, badge, search).
     assert.ok(!(await h.child.agent.get('/api/budget/recurring?month=2026-10')).body.some((b) => b.id === bills[0].id));
     assert.ok(!(await h.child.agent.get('/api/search?q=netflix')).body.results.some((x) => x.module === 'budget'));
@@ -524,7 +526,10 @@ describe('insights', () => {
     assert.equal(ins.avg_spending, 1400);
     assert.equal(ins.avg_surplus, 3600);
     const dining = ins.categories.find((c) => c.name === 'Dining');
-    assert.deepEqual([dining.avg, dining.this_month, dining.change_pct], [400, 900, 125]);
+    // This month so far is compared with the average pro-rated to today.
+    const toDate = Math.round((40000 * Number(today.slice(8, 10))) / daysInMonth(month)) / 100;
+    assert.deepEqual([dining.avg, dining.avg_to_date, dining.this_month], [400, toDate, 900]);
+    assert.equal(dining.change_pct, Math.round(((900 - toDate) / toDate) * 100));
     assert.deepEqual(ins.spikes.map((s) => s.name), ['Dining']);
     assert.equal(ins.categories[0].name, 'Groceries'); // biggest average first
     assert.equal(ins.merchants[0].merchant, 'Ntuc Fairprice');
@@ -535,11 +540,14 @@ describe('insights', () => {
     assert.equal(ins.goals.undated, 1);
     assert.equal(ins.goals.status, 'short');
     assert.equal(ins.goals.shortfall, Math.round((monthly - 3600) * 100) / 100);
-    const tips = ins.goals.suggestions.join('\n');
-    assert.match(tips, /Move 🏠 House from .+ to .+ frees up/);
-    assert.match(tips, /less on Dining/);
-    assert.match(tips, /Dining is 125% above usual/);
-    assert.match(tips, /1 goal has no target date/);
+    // Alternatives, best first: pushing the date closes the gap; trimming Dining by a quarter doesn't.
+    const [move, groceries, trimDining] = ins.goals.suggestions;
+    assert.match(move, /^Move 🏠 House from .+ to .+ frees up .+ closes the gap\.$/);
+    assert.match(groceries, /^Spend \$250\.00 less on Groceries each month \(usually \$1,000\.00\) — you'd still be .+ short\.$/);
+    assert.match(trimDining, /^Spend \$100\.00 less on Dining each month \(usually \$400\.00\) — you'd still be .+ short\.$/);
+    assert.equal(ins.goals.suggestions.length, 3);
+    assert.equal(ins.goals.remaining_gap, 0);
+    assert.deepEqual(ins.goals.overdue, []);
     assert.equal((await h.admin.agent.get('/api/budget/insights?months=0')).status, 400);
     assert.equal((await h.admin.agent.get('/api/budget/insights?months=abc')).status, 400);
     // On track with a small goal; balances from an imported statement.
@@ -551,7 +559,7 @@ describe('insights', () => {
     assert.equal(ins2.goals.status, 'on_track');
     assert.equal(ins2.goals.shortfall, 0);
     assert.match(ins2.goals.suggestions[0], /to spare/);
-    assert.deepEqual(ins2.balances, [{ account_label: 'DBS ••4821', balance: F.statement('dbs').meta.closing, as_of: '2026-10-31' }]);
+    assert.deepEqual(ins2.balances, [{ account_label: 'DBS ••4821', balance: F.statement('dbs').meta.closing, as_of: '2026-10-31', statement_to: '2026-10-31', stale: false }]);
     // No data at all.
     const none = await household('Insights none');
     const ins3 = (await none.admin.agent.get('/api/budget/insights')).body;
@@ -575,5 +583,286 @@ describe('insights', () => {
     } finally {
       await demo.close();
     }
+  });
+});
+
+describe('security review fixes', () => {
+  /** Resident memory of this process's child processes (the statement parsers), Linux only. */
+  const childRss = () => {
+    let sum = 0;
+    for (const pid of fs.readdirSync('/proc').filter((d) => /^\d+$/.test(d))) {
+      try {
+        const st = fs.readFileSync(`/proc/${pid}/status`, 'utf8');
+        if (Number(/PPid:\s+(\d+)/.exec(st)?.[1]) === process.pid) sum += Number(/VmRSS:\s+(\d+)/.exec(st)?.[1] ?? 0) * 1024;
+      } catch { /* gone */ }
+    }
+    return sum;
+  };
+
+  test('learned rules stay on their side of the privacy line', async () => {
+    const h = await household('Rules privacy');
+    const secret = dbsCsv([[day(month, 3), 'POS', 'POS SECRETCLINIC PSYCH', -85.4]], { account: '999-99999-1111' });
+    const p = await preview(h.admin.agent, secret, 's.csv');
+    const c = await h.admin.agent.post(`/api/budget/imports/${p.body.token}/commit`, { visibility: 'private', rows: [{ row_id: 'r1', category_id: h.cat('Health').id }] });
+    assert.equal(c.status, 201);
+    const probe = dbsCsv([[day(month, 4), 'POS', 'SECRETCLINIC PSYCH', -1]], { account: '999-99999-7777' });
+    const sam = await preview(h.member.agent, probe, 'p.csv');
+    assert.equal(sam.body.rows[0].category_source, 'none'); // no oracle for the other adult
+    assert.equal(sam.body.rows[0].category_id, null);
+    const alex = await preview(h.admin.agent, probe, 'p.csv');
+    assert.equal(alex.body.rows[0].category_source, 'learned'); // the importer still benefits
+    // A rule from an adults import is shared with the grown-ups; the importer's private rule wins for them.
+    const shared = await preview(h.member.agent, dbsCsv([[day(month, 5), 'POS', 'SECRETCLINIC PSYCH', -2]], { account: '999-99999-7777' }), 'q.csv');
+    assert.equal((await h.member.agent.post(`/api/budget/imports/${shared.body.token}/commit`, { rows: [{ row_id: 'r1', category_id: h.cat('Other').id }] })).status, 201);
+    assert.equal((await preview(h.admin.agent, probe, 'p.csv')).body.rows[0].category_id, h.cat('Health').id);
+    const other = await registerUser(srv, { name: 'Other adult' });
+    await other.agent.post('/api/families/join', { invite_code: h.family.invite_code });
+    assert.equal((await preview(other.agent, probe, 'p.csv')).body.rows[0].category_id, h.cat('Other').id);
+    // Undo removes the rules that import set.
+    const imports = (await h.member.agent.get('/api/budget/imports')).body;
+    await h.member.agent.del(`/api/budget/imports/${imports.find((i) => i.account_label === 'DBS ••7777').id}`);
+    assert.equal((await preview(other.agent, probe, 'p.csv')).body.rows[0].category_source, 'none');
+    // Leaving removes someone's private rules (Alex's stays while Sam leaves; gone when Alex's own private ones go).
+    const priv = () => srv.db.prepare("SELECT COUNT(*) AS n FROM budget_merchant_rules WHERE family_id = ? AND visibility = 'private'").get(h.family.id).n;
+    assert.equal(priv(), 1);
+    srv.ctx.memberEvent('left', { familyId: h.family.id, userId: h.admin.user.id, reason: 'left' });
+    assert.equal(priv(), 0);
+  });
+
+  test('a PDF decompression bomb is stopped with bounded memory, which is given back', { skip: !fs.existsSync('/proc/self/status') }, async () => {
+    const h = await household('Bomb');
+    const second = await registerUser(srv, { name: 'Second adult' });
+    await second.agent.post('/api/families/join', { invite_code: h.family.invite_code });
+    const bomb = await F.bombPdf(3 * 1024 * 1024 * 1024); // ~3 MB inflating to 3 GB
+    assert.ok(bomb.length < 4 * 1024 * 1024);
+    const mainBefore = process.memoryUsage.rss();
+    let peak = 0;
+    const watch = setInterval(() => { peak = Math.max(peak, childRss()); }, 20);
+    const [a, b] = await Promise.all([preview(h.admin.agent, bomb, 'bomb.pdf'), preview(second.agent, bomb, 'bomb.pdf')]);
+    clearInterval(watch);
+    assert.deepEqual([a.body.code, b.body.code], ['TOO_LARGE', 'TOO_LARGE']);
+    assert.ok(peak < 2 * 400 * 1024 * 1024, `parsers peaked at ${Math.round(peak / 1e6)} MB`);
+    assert.ok(process.memoryUsage.rss() - mainBefore < 150 * 1024 * 1024, 'the server process itself did not grow');
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(childRss(), 0, 'parser processes are gone');
+    assert.equal((await preview(h.admin.agent, F.pdf('dbs'), 'ok.pdf')).status, 200);
+  });
+
+  test('one parse per person, bounded queue; broken xlsx XML is read in linear time', async () => {
+    const h = await household('Busy');
+    const bomb = await F.bombPdf(1024 * 1024 * 1024);
+    const [slow, fast] = await Promise.all([
+      preview(h.admin.agent, bomb, 'b.pdf'),
+      new Promise((r) => setTimeout(r, 150)).then(() => preview(h.admin.agent, F.csv('dbs'), 'x.csv')),
+    ]);
+    assert.equal(slow.body.code, 'TOO_LARGE');
+    assert.equal(fast.status, 429);
+    assert.equal(fast.body.code, 'BUSY');
+    const wb = '<workbook><sheets><sheet name="a" r:id="rId1"/></sheets></workbook>';
+    const rels = '<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>';
+    for (const [name, xml] of [
+      ['xl/sharedStrings.xml', '<si>'.repeat(2_000_000)], ['xl/worksheets/sheet1.xml', '<row>'.repeat(2_000_000)],
+      ['xl/worksheets/sheet1.xml', `<row>${'<c>'.repeat(3_000_000)}</row>`], ['xl/worksheets/sheet1.xml', `<row>${'<c r="A1"><v>'.repeat(500_000)}</row>`],
+      ['xl/workbook.xml', '<sheet'.repeat(2_000_000)],
+    ]) {
+      const files = new Map([['xl/workbook.xml', wb], ['xl/_rels/workbook.xml.rels', rels], ['xl/worksheets/sheet1.xml', '<row></row>'], [name, xml]]);
+      const t0 = Date.now();
+      const res = await preview(h.admin.agent, F.zip([...files]), 'x.xlsx');
+      assert.equal(res.status, 400);
+      assert.ok(Date.now() - t0 < 5000, `${name} took ${Date.now() - t0} ms`);
+    }
+  });
+
+  test('masking covers separators, Unicode digits and NRIC/FIN; the holder name becomes (you)', async () => {
+    for (const [input, out] of [
+      ['CARD 4111.1111.1111.1111', 'CARD ••1111'], ['4111/1111/1111/1111', '••1111'], ['4111_1111_1111_1111', '••1111'],
+      ['TO 4111 - 1111 - 1111 - 1111', 'TO ••1111'], ['4111–1111–1111–1111', '••1111'], ['4111—1111—1111—1111', '••1111'],
+      ['PAN ４１１１１１１１１１１１１１１１', 'PAN ••1111'], ['٤١١١١١١١١١', '••1111'], ['ACCT 123/456789/0', 'ACCT ••7890'],
+      ['IRAS TAX S1234567A', 'IRAS TAX •••••••••'], ['fin g7654321x', 'fin •••••••••'], ['IBAN GB82WEST12345698765432', 'IBAN GB82WEST••5432'],
+      ['1234*5678*9012', '••9012'], ['+65 9123 4567', '+••4567'], ['  A\t\tB  ', 'A B'],
+      // Amounts, dates and short numbers stay.
+      ['SGD 1,234.56 12.30 45.60 ON 01/11/2026 2026-11-01 REF 1234567', 'SGD 1,234.56 12.30 45.60 ON 01/11/2026 2026-11-01 REF 1234567'],
+    ]) assert.equal(maskDigits(input), out, input);
+    const h = await household('Masking');
+    const leak = Buffer.from(['Account Details For:,DBS Multiplier Account 123-45678-4821', 'Name:,ALEX RIVERA', 'Address:,BLK 123 SECRET STREET #12-34 S123456', '',
+      'Transaction Date,Reference,Debit Amount,Credit Amount,Transaction Ref1,Transaction Ref2,Transaction Ref3',
+      `${dmy(day(month, 1))},FAST,10.00,,CARD 4111.1111.1111.1111,,`, `${dmy(day(month, 1))},ICT,,50.00,FROM ALEX  RIVERA,,`,
+      `${dmy(day(month, 2))},ICT,20.00,,TO JOHN TAN,,`].join('\n'));
+    const p = await preview(h.admin.agent, leak, 'leak.csv');
+    assert.deepEqual(p.body.rows.map((r) => r.description), ['FAST CARD ••1111', 'ICT FROM (you)', 'ICT TO JOHN TAN']);
+    assert.doesNotMatch(JSON.stringify(p.body), /RIVERA|SECRET STREET/);
+    // Manual entries and bill names are masked too.
+    const t = await h.admin.agent.post('/api/budget/transactions', { amount: 1, description: 'Transfer to 4111.1111.1111.1111' });
+    assert.equal(t.body.description, 'Transfer to ••1111');
+    const patched = await h.admin.agent.patch(`/api/budget/transactions/${t.body.id}`, { description: 'NRIC S1234567A' });
+    assert.equal(patched.body.description, 'NRIC •••••••••');
+    const bill = await h.admin.agent.post('/api/budget/recurring', { description: 'Loan 1234 5678 9012', amount: 5, day_of_month: 3 });
+    assert.equal(bill.body.description, 'Loan ••9012');
+  });
+
+  test('only the creator can show a row to more people', async () => {
+    const h = await household('Widening');
+    const { commit } = await importFile(h.member.agent, dbsCsv([[day(month, 1), 'POS', 'SAM ONLY', -9]]), 's.csv');
+    const row = (await h.member.agent.get(`/api/budget/transactions?import_id=${commit.body.import.id}`)).body[0];
+    assert.equal((await h.admin.agent.patch(`/api/budget/transactions/${row.id}`, { visibility: 'family' })).status, 403);
+    assert.equal((await h.child.agent.get(`/api/budget/transactions/${row.id}`)).status, 404);
+    assert.equal((await h.member.agent.patch(`/api/budget/transactions/${row.id}`, { visibility: 'family' })).body.visibility, 'family');
+    // Manual rows: another grown-up may hide one from the kids, not widen it again.
+    const t = await h.admin.agent.post('/api/budget/transactions', { amount: 3, description: 'Gift' });
+    assert.equal((await h.member.agent.patch(`/api/budget/transactions/${t.body.id}`, { visibility: 'adults' })).status, 200);
+    assert.equal((await h.member.agent.patch(`/api/budget/transactions/${t.body.id}`, { visibility: 'family' })).status, 403);
+    assert.equal((await h.admin.agent.patch(`/api/budget/transactions/${t.body.id}`, { visibility: 'family' })).status, 200);
+  });
+
+  test('over-budget live event goes to grown-ups; bill payment details follow the transaction', async () => {
+    const h = await household('Nits');
+    await h.admin.agent.patch(`/api/budget/categories/${h.cat('Dining').id}`, { monthly_limit: 10 });
+    const childEvents = await collectEvents(h.child.agent, { timeoutMs: 1500, until: () => false });
+    const memberEvents = await collectEvents(h.member.agent, { timeoutMs: 3000, until: (e) => e.type === 'budget.category.over' });
+    await h.admin.agent.post('/api/budget/transactions', { amount: 50, category_id: h.cat('Dining').id, visibility: 'adults' });
+    assert.ok((await memberEvents.events).some((e) => e.type === 'budget.category.over'));
+    assert.ok(!(await childEvents.events).some((e) => e.type === 'budget.category.over'));
+    // A family bill whose payment is an adults-only transaction: the child sees "paid", not the details.
+    const bill = await h.admin.agent.post('/api/budget/recurring', { description: 'Rent', amount: 100, day_of_month: 1 });
+    const t = await h.admin.agent.post('/api/budget/transactions', { amount: 100, date: day(month, 1), visibility: 'adults' });
+    srv.db.prepare("INSERT INTO budget_recurring_runs (recurring_id, family_id, month, status, transaction_id) VALUES (?, ?, ?, 'paid', ?)").run(bill.body.id, h.family.id, month, t.body.id);
+    const kid = (await h.child.agent.get(`/api/budget/recurring?month=${month}`)).body.find((b) => b.id === bill.body.id);
+    assert.deepEqual([kid.status, kid.transaction_id, kid.paid_amount, kid.paid_date], ['paid', null, null, null]);
+    const adult = (await h.admin.agent.get(`/api/budget/recurring?month=${month}`)).body.find((b) => b.id === bill.body.id);
+    assert.deepEqual([adult.transaction_id, adult.paid_amount], [t.body.id, 100]);
+  });
+
+  test('a member leaving takes their private Wall entries, rules and receipts', async () => {
+    const h = await household('Leaving 2');
+    const t = await h.member.agent.post('/api/budget/transactions', { amount: 77, description: 'SECRET GIFT FOR ALEX', visibility: 'private' });
+    const up = await h.member.agent.upload(`/api/budget/transactions/${t.body.id}/receipt`, { file: PNG_1X1, filename: 'r.png' });
+    assert.equal(up.status, 200);
+    const file = path.join(srv.dir, 'uploads', up.body.receipt_url.replace('/uploads/', ''));
+    assert.ok(fs.existsSync(file));
+    const p = await preview(h.member.agent, dbsCsv([[day(month, 2), 'POS', 'HUSH HUSH JEWELLERS', -300]], { account: '999-99999-7777' }), 'h.csv');
+    await h.member.agent.post(`/api/budget/imports/${p.body.token}/commit`, { visibility: 'private', rows: [{ row_id: 'r1', category_id: h.cat('Shopping').id }] });
+    assert.equal(srv.db.prepare('SELECT COUNT(*) AS n FROM budget_merchant_rules WHERE family_id = ?').get(h.family.id).n, 1);
+    assert.equal((await h.admin.agent.del(`/api/family/members/${h.member.user.id}`)).status, 200);
+    await new Promise((r) => setTimeout(r, 200));
+    assert.equal(fs.existsSync(file), false);
+    const rows = srv.db.prepare("SELECT summary FROM activity WHERE family_id = ? AND module = 'budget'").all(h.family.id).map((a) => a.summary).join('|');
+    assert.doesNotMatch(rows, /SECRET GIFT|imported/);
+    assert.equal(srv.db.prepare('SELECT COUNT(*) AS n FROM budget_merchant_rules WHERE family_id = ?').get(h.family.id).n, 0);
+  });
+});
+
+describe('functional review round 2', () => {
+  test('a statement line for a bill already paid by hand is a duplicate (posted a few days later)', async () => {
+    const h = await household('Bill dupes');
+    const bill = await h.admin.agent.post('/api/budget/recurring', { description: 'Mortgage', amount: 2150, day_of_month: 1, category_id: h.cat('Housing').id, start_month: month });
+    assert.equal((await h.admin.agent.post(`/api/budget/recurring/${bill.body.id}/pay`, { month, date: day(month, 1) })).status, 200);
+    const p = await preview(h.admin.agent, dbsCsv([
+      [day(month, 2), 'GIRO', 'MORTGAGE HOME LOAN', -2150], // the same payment, posted a day later
+      [day(month, 2), 'GIRO', 'MORTGAGE HOME LOAN', -2150], // a second one in the file isn't absorbed by the same manual row
+      [day(month, 9), 'GIRO', 'MORTGAGE HOME LOAN', -2150.5], // other amount
+    ]), 'm.csv');
+    assert.deepEqual(p.body.rows.map((r) => r.duplicate), [true, true, false]);
+    const q = await preview(h.admin.agent, dbsCsv([[day(month, 2), 'GIRO', 'MORTGAGE HOME LOAN', -2150]], { account: '000-11111-2222' }), 'm2.csv');
+    assert.equal(q.body.rows[0].duplicate, true);
+  });
+
+  test('imported payments mark existing bills paid; undo puts them back', async () => {
+    const h = await household('Bill paid');
+    const bill = await h.admin.agent.post('/api/budget/recurring', { description: 'Netflix', amount: 19.98, day_of_month: 7, start_month: addMonths(month, -2) });
+    const prev = addMonths(month, -1);
+    const { commit } = await importFile(h.admin.agent, dbsCsv([[day(prev, 8), 'UMC', 'NETFLIX.COM FOREIGN AMT USD 11.99', -19.98]]), 'n.csv');
+    assert.equal(commit.status, 201);
+    const status = async () => (await h.admin.agent.get(`/api/budget/recurring?month=${prev}`)).body.find((b) => b.id === bill.body.id);
+    const paid = await status();
+    assert.equal(paid.status, 'paid');
+    assert.equal(paid.paid_amount, 19.98);
+    const tx = (await h.admin.agent.get(`/api/budget/transactions?import_id=${commit.body.import.id}`)).body[0];
+    assert.equal(tx.recurring_id, bill.body.id);
+    assert.equal(tx.merchant, 'Netflix'); // FOREIGN AMT USD dropped from the merchant
+    assert.equal((await h.admin.agent.post(`/api/budget/recurring/${bill.body.id}/pay`, { month: prev })).status, 409); // no double payment
+    await h.admin.agent.del(`/api/budget/imports/${commit.body.import.id}`);
+    assert.equal((await status()).status, 'overdue');
+    // Manual rows have no merchant.
+    assert.equal((await h.admin.agent.post('/api/budget/transactions', { amount: 1, description: 'Cash' })).body.merchant, null);
+  });
+
+  test('transfers between own accounts are flagged and left out of every total', async () => {
+    const h = await household('Transfers');
+    const a = await importFile(h.admin.agent, dbsCsv([
+      [day(month, 1), 'GIRO', 'SALARY SAMPLECO', 3000],
+      [day(month, 2), 'ICT', 'FUNDS TRANSFER TO OWN ACCOUNT', -500],
+      [day(month, 3), 'FAST', 'FAST PAYMENT TO SAVINGS', -700],
+    ]), 'a.csv');
+    assert.deepEqual(a.preview.rows.map((r) => r.transfer), [false, true, false]);
+    assert.equal(a.preview.summary.spending, 700);
+    // The other account receives the 700 two days later: both sides become transfers.
+    const b = await preview(h.admin.agent, dbsCsv([[day(month, 5), 'ICT', 'INCOMING FAST', 700], [day(month, 5), 'ICT', 'GIFT FROM MUM', 50]], { account: '555-66666-7777', name: 'POSB Savings Account' }), 'b.csv');
+    assert.deepEqual(b.body.rows.map((r) => r.transfer), [true, false]);
+    assert.equal(b.body.summary.income, 50);
+    assert.equal((await h.admin.agent.post(`/api/budget/imports/${b.body.token}/commit`, { rows: [{ row_id: 'r1', transfer: 'yes' }] })).status, 400);
+    assert.equal((await h.admin.agent.post(`/api/budget/imports/${b.body.token}/commit`, {})).status, 201);
+    const s = (await h.admin.agent.get(`/api/budget/summary?month=${month}`)).body;
+    assert.deepEqual([s.totals.income, s.totals.spent], [3050, 0]);
+    const list = (await h.admin.agent.get(`/api/budget/transactions?month=${month}`)).body;
+    assert.equal(list.filter((t) => t.transfer).length, 3); // still listed
+    assert.equal((await h.admin.agent.get('/api/budget/insights')).body.months.at(-1).spending, 0);
+    assert.equal((await h.admin.agent.get('/api/budget/imports')).body.find((i) => i.account_label === 'POSB ••7777').total_income, 50);
+    // Manual rows: POST/PATCH accept transfer.
+    const t = await h.admin.agent.post('/api/budget/transactions', { amount: 99, transfer: true });
+    assert.equal(t.body.transfer, true);
+    assert.equal((await h.admin.agent.get(`/api/budget/summary?month=${month}`)).body.totals.spent, 0);
+    await h.admin.agent.patch(`/api/budget/transactions/${t.body.id}`, { transfer: false });
+    assert.equal((await h.admin.agent.get(`/api/budget/summary?month=${month}`)).body.totals.spent, 99);
+    assert.equal((await h.admin.agent.post('/api/budget/transactions', { amount: 1, transfer: 1 })).status, 400);
+  });
+
+  test('day/month order is decided per file; balance-only lines are skipped quietly', async () => {
+    const h = await household('Dates');
+    const us = Buffer.from(['Account Details For:,DBS Savings Account 123-45678-4821', 'Statement as at:,31 Oct 2026', '',
+      'Transaction Date,Reference,Debit Amount,Credit Amount,Transaction Ref1,Transaction Ref2,Transaction Ref3',
+      '10/1/2026,GIRO,,5200,SALARY,ACME,', '10/4/2026,POS,91.25,,NTUC FP,,', '10/13/2026,POS,12.00,,KOPITIAM,,', '10/25/2026,POS,30.00,,SHENG SIONG,,'].join('\n'));
+    const p = await preview(h.admin.agent, us, 'us.csv');
+    assert.deepEqual(p.body.rows.map((r) => r.date), ['2026-10-01', '2026-10-04', '2026-10-13', '2026-10-25']);
+    assert.deepEqual(p.body.warnings, []);
+    const ambiguous = Buffer.from(['Account Details For:,DBS Savings Account 123-45678-4821', 'Statement as at:,31 Oct 2026', '',
+      'Transaction Date,Reference,Debit Amount,Credit Amount,Transaction Ref1,Transaction Ref2,Transaction Ref3',
+      '10/1/2026,POS,1.00,,A,,', '10/4/2026,POS,2.00,,B,,'].join('\n'));
+    const amb = await preview(h.admin.agent, ambiguous, 'a.csv');
+    assert.equal(amb.body.rows.length, 2);
+    assert.match(amb.body.warnings.join(' '), /day\/month or month\/day/);
+    const bf = Buffer.from(['United Overseas Bank Limited', 'Account Number:,123-456-789-0', 'Statement Period:,01 Dec 2025 To 31 Jan 2026', '',
+      'Transaction Date,Transaction Description,Withdrawal,Deposit,Available Balance', '31 Jan 2026,INTEREST,,0.50,"1,000.50"',
+      '05 Jan 2026,NETFLIX.COM,19.98,,"1,000.00"', '30 Dec 2025,NETFLIX.COM,19.98,,"1,019.98"', '01 Dec 2025,BALANCE B/F,,,"1,039.96"'].join('\n'));
+    const u = await preview(h.admin.agent, bf, 'bf.csv');
+    assert.equal(u.body.rows.length, 3);
+    assert.deepEqual(u.body.warnings, []);
+    assert.equal(u.body.opening_balance, 1039.96);
+  });
+
+  test('recurring: two plans with one merchant, foreign-amount lines', () => {
+    const it = (date, cents, desc) => ({ key: merchantKey(desc), kind: 'expense', amount_cents: cents, date, ref: `${date}-${cents}`, statement: true });
+    const two = detectRecurring([it('2026-09-18', 4500, 'SINGTEL'), it('2026-09-19', 4900, 'SINGTEL'), it('2026-10-18', 4500, 'SINGTEL'), it('2026-10-19', 4900, 'SINGTEL')]);
+    assert.deepEqual(two.map((g) => g.amount_cents).sort(), [4500, 4900]);
+    const fx = detectRecurring([it('2025-12-28', 1599, 'Debit Card Transaction NETFLIX.COM FOREIGN AMT USD 11.99'), it('2026-01-02', 1599, 'Debit Card Transaction NETFLIX.COM')]);
+    assert.equal(fx.length, 1);
+    assert.equal(fx[0].key, 'NETFLIX');
+    // Groceries a varying number of times a month aren't a bill.
+    assert.equal(detectRecurring([it('2026-09-03', 8540, 'NTUC'), it('2026-10-04', 9125, 'NTUC'), it('2026-10-24', 6410, 'NTUC')]).length, 0);
+  });
+
+  test('balances say when they are stale; overdue goals are listed', async () => {
+    const h = await household('Stale');
+    await importFile(h.admin.agent, F.csv('uob'), 'uob.csv');
+    // A newer UOB export without balances.
+    const newer = Buffer.from(['United Overseas Bank Limited', 'Account Number:,123-456-789-0', '', 'Transaction Date,Transaction Description,Withdrawal,Deposit',
+      `${dmy(day(month, 1))},COFFEE,3.00,`].join('\n'));
+    await importFile(h.admin.agent, newer, 'n.csv');
+    const ins = (await h.admin.agent.get('/api/budget/insights')).body;
+    assert.deepEqual(ins.balances, [{ account_label: 'UOB ••7890', balance: F.statement('uob').meta.closing, as_of: '2026-10-31', statement_to: day(month, 1), stale: true }]);
+    const g = await h.admin.agent.post('/api/budget/goals', { name: 'Old trip', target: 500, target_date: '2025-01-31' });
+    const ins2 = (await h.admin.agent.get('/api/budget/insights')).body;
+    assert.deepEqual(ins2.goals.overdue, [{ id: g.body.id, name: 'Old trip', emoji: null, target_date: '2025-01-31', left: 500 }]);
+    assert.ok(!ins2.goals.items.some((x) => x.id === g.body.id));
+    assert.equal(typeof ins2.goals.remaining_gap, 'number');
   });
 });

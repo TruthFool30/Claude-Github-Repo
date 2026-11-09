@@ -616,8 +616,11 @@ location data. Not called when a whole family is deleted (its rows cascade).
 ### In-memory uploads for sensitive files (bank statements)
 
 - `POST /api/budget/imports/preview` uses its own `multer.memoryStorage()` (10 MB) instead of
-  `ctx.upload`, so the statement never reaches the disk; the buffer is moved into a worker thread
-  (`budget/import.js`: `resourceLimits`, 20 s timeout, `env: {}`, stdout/stderr swallowed) and zeroed.
+  `ctx.upload`, so the statement never reaches the disk; the bytes go over IPC to a short-lived child
+  process (`budget/import.js` forked with `env` holding only its flag, stdio ignored, 320 MB RSS cap watched
+  from its main thread while a worker thread parses, 20 s SIGKILL) and the server's copy is zeroed. A
+  process (not just a thread) because pdf.js's inflated buffers live outside V8's heap limit and a
+  terminated thread doesn't give that memory back.
   Only `ImportError` codes/messages cross back — library errors could quote the file. See
   MODULE_SPECS "budget" for the import API.
 

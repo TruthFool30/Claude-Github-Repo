@@ -139,7 +139,7 @@ The most sensitive data, in **Contacts & Docs**, is encrypted on disk with AES-2
 
 ### Bank statements
 
-- The uploaded statement is read in memory (max 10 MB) by a separate worker thread with a memory
+- The uploaded statement is read in memory (max 10 MB) by a separate, short-lived process with a memory
   cap, a 20-second limit and no access to Hearth's environment; it is **never written to disk or
   logged**, and nothing in it is executed. A PDF password is used once to open the file and never
   stored or logged.

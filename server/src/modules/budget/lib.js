@@ -165,6 +165,7 @@ export function txOut(row) {
     created_at: row.created_at,
     updated_at: row.updated_at,
     visibility: row.visibility ?? 'family',
+    transfer: !!row.transfer, // between the family's own accounts: in no income/spending total
     import_id: row.import_id ?? null,
     import_label: row.import_id ? row.import_label ?? null : null, // e.g. "DBS ••4821"
     balance: row.balance == null ? null : fromCents(Number(row.balance)), // running balance (imported rows; opened by the caller)

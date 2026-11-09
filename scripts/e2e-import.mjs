@@ -30,7 +30,7 @@ const ok = (msg) => console.log(`  ✓ ${++step}. ${msg}`);
 async function open(email, { viewport = { width: 1280, height: 860 }, theme = 'light', base = BASE } = {}) {
   const mobile = viewport.width < 600;
   const ctx = await browser.newContext({ viewport, isMobile: mobile, hasTouch: mobile });
-  await ctx.addInitScript((t) => localStorage.setItem('hearth-theme', t), theme);
+  await ctx.addInitScript((t) => window.localStorage?.setItem('hearth-theme', t), theme); // null inside PDF viewer frames
   const page = await ctx.newPage();
   page.on('pageerror', (e) => errors.push(`${email}: ${e.message}`));
   page.on('console', (m) => {
@@ -118,13 +118,20 @@ async function finish(page, { visibility, tag, label }) {
   await page.getByText('Step 4 of 4').waitFor();
   assert.equal(await page.getByRole('radio', { name: /Adults only/ }).getAttribute('aria-checked'), 'true', 'adults default');
   assert.equal(await page.getByRole('radio', { name: /Everyone/ }).count(), 0, 'no Everyone option for imports');
-  if (visibility === 'private') await page.getByRole('radio', { name: /Only me/ }).click();
+  if (visibility === 'private') {
+    // Radio group keyboard pattern: arrow keys move focus and selection.
+    await page.getByRole('radio', { name: /Adults only/ }).focus();
+    await page.keyboard.press('ArrowDown');
+    assert.equal(await page.getByRole('radio', { name: /Only me/ }).getAttribute('aria-checked'), 'true', 'ArrowDown selects Only me');
+    assert.equal(await page.getByRole('radio', { name: /Only me/ }).evaluate((el) => el === document.activeElement), true, 'focus follows');
+  }
   if (tag) await shot(page, `06-visibility-${tag}`);
   const commit = page.waitForResponse((r) => /\/api\/budget\/imports\/[^/]+\/commit$/.test(r.url()));
   await page.getByRole('button', { name: 'Import', exact: true }).click();
   const res = await commit;
   assert.equal(res.status(), 201);
   const body = await res.json();
+  body.sent = res.request().postDataJSON();
   assert.equal(body.import.account_label, label);
   assert.equal(body.import.visibility, visibility);
   await page.getByText(`Imported ${body.created} transaction`).waitFor();
@@ -158,6 +165,8 @@ try {
   await A.getByRole('button', { name: 'Import statement' }).first().click();
   await A.waitForURL('**/budget/import');
   await A.getByText('never stored').waitFor();
+  await A.getByText('Where to get a statement').waitFor();
+  await A.getByText(/Account → Transaction History → Export, choose CSV/).waitFor();
   assert.equal(await A.getByText("You're not on a secure").count(), 0, 'no insecure warning on localhost');
   await A.getByText('No statements imported yet.').waitFor();
   await shot(A, '01-upload-desktop-light');
@@ -170,7 +179,7 @@ try {
   await A.getByText(/1 Sep 2026 – 31 Oct 2026/).waitFor();
   await A.getByText('of 17 transactions selected').waitFor();
   assert.equal(await A.getByText('Already in Hearth · skipped').count(), 0, 'first import has no duplicates');
-  assert.ok(await A.getByText('Rule', { exact: true }).count() > 0, 'rule hints');
+  assert.ok(await A.getByText('Suggested', { exact: true }).count() > 0, '"Suggested" hints');
   // Long account numbers are masked by the server before they reach the page.
   assert.equal(await A.getByText(/4111 1111 1111 1111|1234567890/).count(), 0, 'card/account numbers masked');
   await A.getByText(/GRAB\*TRIP CARD ••1111/).waitFor();
@@ -186,8 +195,8 @@ try {
   await A.getByRole('button', { name: 'Set for all' }).click();
   await A.getByText('Updated 3 transactions').waitFor();
   for (const s of await ntuc.all()) assert.equal(await s.inputValue(), String(catId('Other')));
-  // Uncategorised filter keeps a row on screen after it gets a category.
-  await segment(A, /Uncategorised \d+/).click();
+  // Uncategorized filter keeps a row on screen after it gets a category.
+  await segment(A, /Uncategorized \d+/).click();
   const hw = A.getByRole('combobox', { name: /Category for .*SAMPLE HARDWARE TRADING/ });
   if (await hw.count()) {
     await hw.selectOption({ label: 'Shopping' });
@@ -196,11 +205,37 @@ try {
   await segment(A, /^All \d+/).click();
   { const cb = A.getByRole('checkbox', { name: /Import .*PAYNOW TRANSFER TO SAMPLE FRIEND/ }); await cb.focus(); await A.keyboard.press('Space'); } // leave one out (keyboard)
   await A.getByText('16 of 17 transactions selected').waitFor();
+  // Bulk select controls.
+  await A.getByRole('button', { name: 'Deselect all' }).click();
+  await A.getByText('0 of 17 transactions selected').waitFor();
+  await A.getByRole('button', { name: 'Select all', exact: true }).click();
+  await A.getByText('17 of 17 transactions selected').waitFor();
+  await A.getByRole('button', { name: 'Untick all income' }).click();
+  await A.getByText('14 of 17 transactions selected').waitFor();
+  await A.getByRole('button', { name: 'Select all', exact: true }).click();
+  { const cb = A.getByRole('checkbox', { name: /Import .*PAYNOW TRANSFER TO SAMPLE FRIEND/ }); await cb.focus(); await A.keyboard.press('Space'); }
+  await A.getByText('16 of 17 transactions selected').waitFor();
+  // Transfer between own accounts: muted, not counted in the selected totals.
+  const landlord = A.locator('div.px-3', { hasText: 'SAMPLE LANDLORD' }).first();
+  const outBefore = await A.getByText(/transactions selected/).locator('xpath=..').innerText();
+  await landlord.getByRole('button', { name: 'Transfer between my accounts' }).click();
+  assert.equal(await landlord.getByRole('button', { name: 'Transfer between my accounts' }).getAttribute('aria-pressed'), 'true');
+  await landlord.getByText('Not counted as income or spending').waitFor();
+  assert.notEqual(await A.getByText(/transactions selected/).locator('xpath=..').innerText(), outBefore, 'transfer left out of the totals');
+  await shot(A, '04b-transfer-desktop-light', false);
+  // Start over asks first when something was changed.
+  await A.getByRole('button', { name: 'Start over' }).click();
+  await A.getByRole('dialog').getByText('Start over?').waitFor();
+  await A.getByRole('dialog').getByRole('button', { name: 'Cancel' }).click();
+  await A.getByText('Step 2 of 4').waitFor();
   const dbs = await finish(A, { visibility: 'adults', tag: 'desktop-light', label: 'DBS ••4821' });
   assert.equal(dbs.created, 16);
   assert.equal(dbs.excluded, 1);
+  const sentLandlord = dbs.sent.rows.find((r) => r.transfer);
+  assert.ok(sentLandlord && dbs.sent.rows.filter((r) => r.transfer).length === 1, 'commit sends transfer: true for the marked row');
+  assert.ok(dbs.sent.rows.every((r) => typeof r.transfer === 'boolean'), 'every row carries transfer');
   await A.getByText('1 left out').waitFor();
-  ok(`DBS CSV: review, masked numbers, bulk merchant category, uncategorised filter, 16 imported (1 left out), adults only`);
+  ok(`DBS CSV: review, masked numbers, bulk merchant category, uncategorized filter, select/deselect/untick income, transfer toggle, start-over confirm, 16 imported (1 left out), adults only`);
 
   // Live: Sam's open History shows the imported rows without a reload.
   await sam.page.getByText('Imported · DBS ••4821').first().waitFor({ timeout: 15_000 });
@@ -216,10 +251,24 @@ try {
   await shot(A, '12-detail-desktop-light', false);
   await dlg.getByRole('button', { name: 'Edit' }).click();
   await A.getByRole('radiogroup', { name: 'Who can see this transaction' }).waitFor();
+  await A.getByRole('switch', { name: /This is a transfer between my own accounts/ }).or(A.getByText('This is a transfer between my own accounts')).first().waitFor();
   await shot(A, '13-edit-visibility-desktop-light', false);
   await A.keyboard.press('Escape');
   await A.getByRole('button', { name: 'Clear filter', exact: true }).click();
   await A.waitForURL((u) => !u.search.includes('import='));
+  // Round-2 server fields: assert them once the server returns them, otherwise say what was skipped.
+  {
+    const rows = await alex.api(`/budget/transactions?import_id=${dbs.import.id}`);
+    if (rows.length && 'transfer' in rows[0]) {
+      assert.equal(rows.filter((t) => t.transfer).length, 1, 'transfer stored');
+      await A.goto(`${BASE}/budget/transactions?import=${dbs.import.id}`);
+      await A.getByText('Transfer', { exact: true }).first().waitFor();
+    } else console.log('    ⚠ skipped: server has no transactions[].transfer yet (Transfer badge not checked)');
+    if (rows.length && 'merchant' in rows[0]) {
+      const m = rows.find((t) => t.merchant && t.merchant !== t.description);
+      if (m) await A.getByText(m.description, { exact: true }).first().waitFor(); // raw bank text as subtitle
+    } else console.log('    ⚠ skipped: server has no transactions[].merchant yet (merchant title not checked)');
+  }
   ok('import filter link (?import=) with "Imported from DBS ••4821 · Clear filter" chip, badges, detail, edit visibility');
 
   // ---- 2. POSB XLSX, desktop dark: learned categories --------------------------------------
@@ -228,11 +277,11 @@ try {
   await dark.page.getByText('POSB ••1357').first().waitFor();
   const posbNtuc = dark.page.getByRole('combobox', { name: /Category for .*NTUC FP-SAMPLE BRANCH/ });
   assert.equal(await posbNtuc.first().inputValue(), String(catId('Other')), 'learned from the DBS import');
-  assert.ok(await dark.page.getByText('Learned', { exact: true }).count() >= 3, '"Learned" hint');
+  assert.ok(await dark.page.getByText('Learned from you', { exact: true }).count() >= 3, '"Learned from you" hint');
   await shot(dark.page, '03-review-desktop-dark', false);
   const posb = await finish(dark.page, { visibility: 'adults', tag: 'desktop-dark', label: 'POSB ••1357' });
   await checkImportFilter(dark.page, posb.import.id, 'POSB ••1357', posb.created, 'desktop-dark');
-  ok('POSB XLSX: merchant categories learned from the previous import ("Learned"), committed');
+  ok('POSB XLSX: merchant categories learned from the previous import ("Learned from you"), committed');
 
   // ---- 3. UOB protected PDF, mobile light: wrong password first, only me --------------------
   const mob = await open('alex@hearth.test', { viewport: { width: 390, height: 844 } });
@@ -289,6 +338,8 @@ try {
     const tile = await p.locator('div', { hasText: /^Avg income/ }).locator('xpath=..').first().innerText();
     assert.match(tile, /\$[1-9]/, 'avg income is a real amount');
     await p.getByText('* this month so far').waitFor();
+    await p.getByText("Transfers between your own accounts aren't counted.").waitFor();
+    await p.getByText('Last 3 months + this month so far').nth(1).waitFor(); // top merchants say they include this month
     await p.getByText(/•• ?(4821|1357|7890)/).first().waitFor(); // latest balances
     await noHorizontalScroll(p, `insights ${tag}`);
     await p.waitForFunction(() => document.querySelectorAll('.recharts-bar-rectangle path').length >= 4, null, { timeout: 10_000 });
