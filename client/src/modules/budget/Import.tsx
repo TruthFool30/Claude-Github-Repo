@@ -29,17 +29,10 @@ type BillDraft = { on: boolean; amount: string; day: string; category_id: number
 type Filter = 'all' | 'uncat' | 'dup' | 'income';
 
 const ERRORS: Record<Exclude<ImportErrorCode, 'PASSWORD_REQUIRED' | 'BAD_PASSWORD'>, { title: string; body: string }> = {
-  UNSUPPORTED: { title: "Hearth can't read this file yet", body: `It works with DBS/POSB and UOB statements (PDF, CSV or Excel). ${EXPORT_TIP}` },
+  UNSUPPORTED: { title: "Hearth can't read this file yet", body: `It works with DBS/POSB and UOB statements (PDF, CSV or Excel .xlsx — older .xls files aren't supported). ${EXPORT_TIP}` },
   EMPTY: { title: 'No transactions found', body: 'The statement looks empty. Check the period you exported and try again.' },
   TOO_LARGE: { title: 'That file is too large', body: `Statements must be under 10 MB. ${EXPORT_TIP}` },
 };
-
-/**
- * Same-merchant key for the bulk "set category for all" action: the description without digits,
- * masked numbers and punctuation. ponytail: preview rows carry no merchant field, so this is a
- * conservative client-side match (identical text apart from reference numbers).
- */
-const merchantKey = (d: string) => d.toLowerCase().replace(/[•*]+\s*\d*|[\d]+/g, ' ').replace(/[^a-z&]+/g, ' ').trim();
 
 export default function ImportPage() {
   const [step, setStep] = useState<Step>('upload');
@@ -93,8 +86,7 @@ export default function ImportPage() {
       void invalidate();
       go('done');
     } catch (e) {
-      // ponytail: the contract doesn't name the expired-token error; any 404/410 means the 15-minute preview is gone.
-      if (e instanceof ApiError && (e.status === 404 || e.status === 410)) {
+      if (e instanceof ApiError && e.code === 'EXPIRED') {
         toast.error('This preview expired', { description: 'Previews are kept for 15 minutes. Upload the statement again.' });
         reset();
       } else toast.error(errorMessage(e));
@@ -262,7 +254,7 @@ function UploadStep({ onPreview }: { onPreview: (p: ImportPreview) => void }) {
           <Upload size={26} aria-hidden />
         </span>
         <span className="text-base font-semibold text-fg">{busy ? 'Reading your statement…' : file ? file.name : 'Drop a bank statement here'}</span>
-        <span className="text-sm text-muted">PDF, CSV or Excel from DBS/POSB or UOB · up to 10 MB</span>
+        <span className="text-sm text-muted">PDF, CSV or Excel (.xlsx) from DBS/POSB or UOB · up to 10 MB</span>
         <span className={buttonClass('secondary', 'sm')}>{file ? 'Choose another file' : 'Choose a file'}</span>
         <input
           ref={input}
@@ -336,7 +328,8 @@ function ReviewStep({
   const [shown, setShown] = useState(PAGE);
   const [suggest, setSuggest] = useState<{ row_id: string; key: string; category_id: number | null; count: number } | null>(null);
   const rows = preview.rows;
-  const keyOf = useMemo(() => new Map(rows.map((r) => [r.row_id, merchantKey(r.description)])), [rows]);
+  // Same-merchant rows (server's normalised `merchant`) for "set for all from this merchant".
+  const keyOf = useMemo(() => new Map(rows.map((r) => [r.row_id, r.merchant.trim().toLowerCase()])), [rows]);
 
   const counts = useMemo(() => ({
     all: rows.length,
@@ -518,7 +511,11 @@ const ReviewRow = memo(function ReviewRow({
 });
 
 function StatementHeader({ preview: p }: { preview: ImportPreview }) {
-  const { fmt } = useMoney();
+  const { fmt, currency } = useMoney();
+  // ponytail: no conversion — amounts are imported as numbers in the family's currency.
+  const warnings = currency !== p.currency
+    ? [`This statement is in ${p.currency} but your family budget uses ${currency}. Amounts are imported as they are, without conversion.`, ...p.warnings]
+    : p.warnings;
   return (
     <Card className="flex flex-col gap-4">
       <div className="flex flex-wrap items-center gap-3">
@@ -539,9 +536,9 @@ function StatementHeader({ preview: p }: { preview: ImportPreview }) {
         {plural(p.summary.count, 'transaction')}
         {p.summary.duplicates > 0 && ` · ${p.summary.duplicates} already in Hearth (unticked)`}
       </p>
-      {p.warnings.length > 0 && (
+      {warnings.length > 0 && (
         <ul className="flex flex-col gap-1.5">
-          {p.warnings.map((w, i) => (
+          {warnings.map((w, i) => (
             <li key={i} className="flex items-start gap-2 rounded-xl bg-warning-soft px-3 py-2 text-[13px] text-warning-soft-fg">
               <CircleAlert size={15} className="mt-0.5 shrink-0" aria-hidden />{w}
             </li>
@@ -661,7 +658,6 @@ function ImportSummary({ preview, choices, bills }: { preview: ImportPreview; ch
 // ---- done -------------------------------------------------------------------------------------
 
 function DoneStep({ result, onAgain }: { result: CommitResult; onAgain: () => void }) {
-  const month = result.import.period_to.slice(0, 7);
   return (
     <Card>
       <EmptyState
@@ -672,6 +668,7 @@ function DoneStep({ result, onAgain }: { result: CommitResult; onAgain: () => vo
           <span role="status">
             {[
               result.skipped_duplicates ? `${result.skipped_duplicates} duplicate${result.skipped_duplicates === 1 ? '' : 's'} skipped` : null,
+              result.excluded ? `${result.excluded} left out` : null,
               result.bills_created ? `${plural(result.bills_created, 'monthly bill')} created` : null,
               `visible to ${result.import.visibility === 'private' ? 'only you' : 'adults only'}`,
             ].filter(Boolean).join(' · ')}
@@ -679,7 +676,7 @@ function DoneStep({ result, onAgain }: { result: CommitResult; onAgain: () => vo
         }
         action={
           <div className="flex flex-wrap justify-center gap-2">
-            <Link to={`/budget/transactions?month=${month}`} className={buttonClass('primary', 'md')}>See transactions</Link>
+            <Link to={`/budget/transactions?import=${result.import.id}`} className={buttonClass('primary', 'md')}>See transactions</Link>
             <Link to="/budget/insights" className={buttonClass('secondary', 'md')}>View insights</Link>
             <Button variant="ghost" icon={Upload} onClick={onAgain}>Import another</Button>
           </div>
@@ -739,7 +736,7 @@ function HistoryRow({ i }: { i: ImportOut }) {
       <span className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-info-soft text-info-soft-fg"><Landmark size={18} aria-hidden /></span>
       <div className="min-w-[14rem] flex-1">
         <div className="flex flex-wrap items-center gap-2">
-          <span className="text-[15px] font-semibold text-fg">{importLabel(i)}</span>
+          <Link to={`/budget/transactions?import=${i.id}`} className="text-[15px] font-semibold text-fg hover:text-primary hover:underline">{importLabel(i)}</Link>
           <VisibilityBadge value={i.visibility} />
         </div>
         <div className="text-[13px] text-muted">

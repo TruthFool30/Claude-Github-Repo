@@ -7,7 +7,7 @@ import { useAuth, useMember } from '../../lib/auth';
 import { cn } from '../../lib/cn';
 import { fmtDate, fmtRelative, firstName } from '../../lib/format';
 import { Avatar, Button, Lightbox, Modal, Skeleton, toast } from '../../ui';
-import { keys, useCanManage, useImportLabel, useMoney, type Transaction, type TxPage } from './api';
+import { keys, useCanManage, useMoney, type Transaction, type TxPage } from './api';
 import { Amount, CategoryIcon, ImportedTag, UNCATEGORIZED, VISIBILITY, VisibilityBadge } from './shared';
 
 export const txTitle = (t: Transaction) => t.description || t.category?.name || (t.kind === 'income' ? 'Income' : 'Expense');
@@ -57,7 +57,7 @@ export function useCanEditTx() {
 export function TransactionRow({ t, onOpen, showDate }: { t: Transaction; onOpen: (t: Transaction) => void; showDate?: boolean }) {
   const { fmt } = useMoney();
   const member = useMember(t.paid_by);
-  const imported = useImportLabel(t.import_id);
+  const imported = t.import_label;
   return (
     <li>
       <button
@@ -74,10 +74,10 @@ export function TransactionRow({ t, onOpen, showDate }: { t: Transaction; onOpen
             {t.receipt_url && <Paperclip size={13} className="shrink-0 text-subtle" aria-label="Has receipt" />}
             <VisibilityBadge value={t.visibility} iconOnly />
           </div>
-          <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[13px] text-muted">
+          <div className="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-1.5 text-[13px] text-muted">
             <span className="truncate">{t.category?.name ?? UNCATEGORIZED.name}</span>
             {showDate && <span className="shrink-0">· {fmtDate(t.date, 'MMM d')}</span>}
-            {imported && <><span aria-hidden className="shrink-0">·</span><ImportedTag label={imported} /></>}
+            {imported && <ImportedTag label={imported} className="max-w-full" />}
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-2.5">
@@ -105,7 +105,7 @@ export function TransactionDetail({
   const t = data;
   const payer = useMember(t?.paid_by);
   const creator = useMember(t?.created_by);
-  const imported = useImportLabel(t?.import_id);
+  const imported = t?.import_label;
   const isPdf = !!t?.receipt_url && /\.pdf$/i.test(t.receipt_url);
 
   return (

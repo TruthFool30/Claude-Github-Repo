@@ -52,7 +52,8 @@ export default function BudgetPage() {
   const txId = Number(params.get('tx')) || null;
 
   const tab: Tab = (['transactions', 'bills', 'goals', 'insights'] as const).find((t) => location.pathname.startsWith(`/budget/${t}`)) ?? 'overview';
-  const dated = !UNDATED.includes(tab);
+  // ?import=<id> spans every month, so the month picker would only confuse.
+  const dated = !UNDATED.includes(tab) && !(tab === 'transactions' && params.get('import'));
   const setTab = (t: Tab) => {
     const q = month !== currentMonth() && !UNDATED.includes(t) ? `?month=${month}` : '';
     navigate(`/budget${t === 'overview' ? '' : `/${t}`}${q}`);

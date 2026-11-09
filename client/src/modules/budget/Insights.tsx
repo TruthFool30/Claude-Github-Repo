@@ -7,7 +7,7 @@ import {
 import { cn } from '../../lib/cn';
 import { fmtDate, plural } from '../../lib/format';
 import { Badge, Button, Card, CardHeader, EmptyState, SegmentedControl, Skeleton, SkeletonCard, buttonClass } from '../../ui';
-import { currentMonth, useInsights, useMoney, type Insights as InsightsData } from './api';
+import { useInsights, useMoney, type Insights as InsightsData } from './api';
 import { TrendChart } from './Charts';
 import { useBudget } from './context';
 import { CategoryIcon, Progress, Stat } from './shared';
@@ -65,7 +65,7 @@ function GoalsCard({ g, fmt }: { g: InsightsData['goals']; fmt: (n: number) => s
           {g.status !== 'no_data' && g.needed_monthly > 0 && (
             <div>
               <Progress
-                value={Math.max(g.surplus, 0)}
+                value={Math.min(Math.max(g.surplus, 0), g.needed_monthly)}
                 max={g.needed_monthly}
                 color={g.status === 'short' ? 'var(--warning)' : '#30A46C'}
                 warnAt={2}
@@ -165,8 +165,7 @@ export default function Insights() {
     );
   }
 
-  const now = currentMonth();
-  const partial = data.months.find((m) => m.partial)?.month ?? (data.months.some((m) => m.month === now) ? now : undefined);
+  const partial = data.months.find((m) => m.partial)?.month;
   const trend = data.months.map((m) => ({ month: m.month, income: m.income, spent: m.spending }));
   const [firstBalance, ...moreBalances] = data.balances;
   const maxMerchant = Math.max(1, ...data.merchants.map((m) => m.total));
@@ -174,7 +173,13 @@ export default function Insights() {
   return (
     <div className={cn('flex flex-col gap-5 transition-opacity', isFetching && 'opacity-80')}>
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <p className="text-sm text-muted">Monthly averages over the last {months} full months</p>
+        <p className="text-sm text-muted">
+          {data.full_months >= months
+            ? `Monthly averages over the last ${months} full months`
+            : data.full_months
+              ? `Averages over ${plural(data.full_months, 'month')} with data (of the last ${months})`
+              : 'No full month of data yet — averages appear once a month is complete'}
+        </p>
         {picker}
       </div>
 

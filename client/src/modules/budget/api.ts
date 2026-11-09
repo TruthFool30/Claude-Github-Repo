@@ -41,6 +41,8 @@ export interface Transaction {
   visibility: TxVisibility;
   /** Set on rows that came from a bank statement import. */
   import_id: number | null;
+  /** "DBS ••4821" for imported rows. */
+  import_label: string | null;
   /** Running balance from the statement (imported rows only). */
   balance: number | null;
 }
@@ -138,6 +140,8 @@ export interface PreviewRow {
   row_id: string;
   date: string;
   description: string;
+  /** Normalised merchant name; rows of the same merchant share it. */
+  merchant: string;
   amount: number;
   kind: Kind;
   balance: number | null;
@@ -199,13 +203,16 @@ export interface CommitResult {
   import: ImportOut;
   created: number;
   skipped_duplicates: number;
+  /** Non-duplicate rows the user unticked. */
+  excluded: number;
   bills_created: number;
 }
 
 export interface Insights {
-  // ponytail: the contract says the current month is "flagged partial" without naming the field;
-  // `partial` is read when present, otherwise the current calendar month counts as partial.
+  /** The last N full months, then the current one with partial: true. */
   months: Array<{ month: string; income: number; spending: number; surplus: number; partial?: boolean }>;
+  /** How many full months had any transaction (the averages' denominator). */
+  full_months: number;
   avg_income: number;
   avg_spending: number;
   avg_surplus: number;
@@ -234,6 +241,8 @@ export interface TxFilters {
   category_id?: string;
   paid_by?: number | null;
   kind?: Kind | '';
+  /** One import's rows (all months). */
+  import_id?: number;
 }
 
 // ---- keys + hooks -----------------------------------------------------------------------------
@@ -287,7 +296,7 @@ export const useTransactions = (f: TxFilters) =>
     queryFn: ({ pageParam }) =>
       api.get<TxPage>(
         `/budget/transactions${qs({
-          month: f.month, q: f.q, category_id: f.category_id, paid_by: f.paid_by ?? undefined, kind: f.kind, all: f.q ? 1 : undefined,
+          month: f.import_id ? undefined : f.month, import_id: f.import_id, q: f.q, category_id: f.category_id, paid_by: f.paid_by ?? undefined, kind: f.kind, all: f.q ? 1 : undefined,
           page: 1, limit: 100, cursor: pageParam,
         })}`,
       ),
@@ -310,17 +319,6 @@ export const useImports = () => {
   const canManage = useCanManage();
   return useQuery({ queryKey: keys.imports, queryFn: () => api.get<ImportOut[]>('/budget/imports'), enabled: canManage, staleTime: 60_000 });
 };
-
-/**
- * "DBS ••4821" for a transaction's import_id. ponytail: transactions only carry import_id, so the
- * label comes from the (small, cached) imports list; unknown ids fall back to "bank statement".
- */
-export function useImportLabel(importId: number | null | undefined) {
-  const { data } = useImports();
-  if (!importId) return null;
-  const imp = data?.find((i) => i.id === importId);
-  return imp ? importLabel(imp) : 'bank statement';
-}
 
 export const useInsights =(months: number) =>
   useQuery({ queryKey: keys.insights(months), queryFn: () => api.get<Insights>(`/budget/insights${qs({ months })}`), placeholderData: (p) => p });

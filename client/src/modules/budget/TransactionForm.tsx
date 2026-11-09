@@ -66,9 +66,10 @@ export function TransactionForm({
     if (receiptPreview) URL.revokeObjectURL(receiptPreview);
   }, [receiptPreview]);
 
-  // Who can see it: editable by its creator or a manager; children never get "Adults only".
-  const canChangeVisibility = !!editing && (canManage || editing.created_by === user?.id);
-  const visOptions: TxVisibility[] = canManage ? ['family', 'adults', 'private'] : ['family', 'private'];
+  // Grown-ups only (the server refuses children); only the creator may make a row private.
+  const canChangeVisibility = canManage;
+  const mine = !editing || editing.created_by === user?.id;
+  const visOptions: TxVisibility[] = mine || editing?.visibility === 'private' ? ['family', 'adults', 'private'] : ['family', 'adults'];
   const visible = useMemo(() => categories.filter((c) => c.kind === kind), [categories, kind]);
   const changeKind = (k: Kind) => {
     setKind(k);
@@ -88,8 +89,8 @@ export function TransactionForm({
     try {
       const body = {
         kind, amount: n, description: description.trim() || null, category_id: categoryId, date, paid_by: paidBy, notes: notes.trim() || null, ...localDay(),
-        // Only sent when changed (PATCH; the server allows it for the creator or a manager).
-        ...(editing && canChangeVisibility && visibility !== (editing.visibility ?? 'family') ? { visibility } : {}),
+        // Only sent when it differs from the current (or default "Everyone") visibility.
+        ...(canChangeVisibility && visibility !== (editing?.visibility ?? 'family') ? { visibility } : {}),
       };
       saved = editing
         ? await api.patch<Transaction>(`/budget/transactions/${editing.id}`, body)
