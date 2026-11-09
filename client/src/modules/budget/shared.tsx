@@ -2,12 +2,12 @@
 import type { ReactNode } from 'react';
 import {
   Baby, Banknote, Book, Briefcase, Car, CircleDashed, Coffee, Dog, Dumbbell, Fuel, Gamepad2, Gift, GraduationCap, HandCoins,
-  HeartPulse, House, Music, PiggyBank, Plane, Receipt, Shirt, ShoppingBag, ShoppingCart, Smartphone, Sparkles, Ticket,
-  Utensils, Wifi, Wrench, Zap, type LucideIcon,
+  HeartPulse, House, Landmark, Lock, Music, PiggyBank, Plane, Receipt, ShieldCheck, Shirt, ShoppingBag, ShoppingCart, Smartphone,
+  Sparkles, Ticket, Users, Utensils, Wifi, Wrench, Zap, type LucideIcon,
 } from 'lucide-react';
 import { cn } from '../../lib/cn';
 import { Input, useFieldControl } from '../../ui';
-import { currencySymbol, type CategoryRef } from './api';
+import { currencySymbol, type CategoryRef, type TxVisibility } from './api';
 
 /** Mirrors ICONS in server/src/modules/budget/lib.js. */
 export const ICONS: Record<string, LucideIcon> = {
@@ -141,5 +141,74 @@ export function Stat({ label, value, hint, icon, tone }: { label: string; value:
       <div className="mt-2 truncate text-[22px] font-bold tracking-tight text-fg tabular sm:text-2xl">{value}</div>
       {hint && <div className="mt-1 truncate text-xs text-muted">{hint}</div>}
     </div>
+  );
+}
+
+// ponytail: same wording/look as the vault's VisibilityPicker (modules can't import each other's code).
+export const VISIBILITY: Record<TxVisibility, { label: string; icon: LucideIcon; hint: string }> = {
+  family: { label: 'Everyone', icon: Users, hint: 'Everyone in the family can see it' },
+  adults: { label: 'Adults only', icon: ShieldCheck, hint: 'Hidden from children' },
+  private: { label: 'Only me', icon: Lock, hint: 'Nobody else can see or find it' },
+};
+
+/** Stacked radio list "Who can see …" (vault style). */
+export function VisibilityChoice<V extends TxVisibility>({ value, onChange, options, what = 'it' }: {
+  value: V; onChange: (v: V) => void; options: readonly V[]; what?: string;
+}) {
+  return (
+    <div className="flex flex-col gap-1.5">
+      <span className="text-[13px] font-semibold text-fg">Who can see {what}</span>
+      <div role="radiogroup" aria-label={`Who can see ${what}`} className="flex flex-col gap-1">
+        {options.map((v) => {
+          const V = VISIBILITY[v];
+          const on = v === value;
+          return (
+            <button
+              key={v}
+              type="button"
+              role="radio"
+              aria-checked={on}
+              onClick={() => onChange(v)}
+              className={cn(
+                'flex items-center gap-2.5 rounded-xl border px-3 py-2.5 text-left transition focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-ring',
+                on ? 'border-primary bg-primary-soft/60' : 'border-border hover:bg-surface-2',
+              )}
+            >
+              <V.icon size={17} className={on ? 'text-primary' : 'text-muted'} aria-hidden />
+              <span className="min-w-0 flex-1">
+                <span className="block text-sm font-semibold text-fg">{V.label}</span>
+                <span className="block text-xs text-muted">{V.hint}</span>
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/** "Adults only" / "Only me" pill (nothing for family-visible rows). */
+export function VisibilityBadge({ value, iconOnly, className }: { value: TxVisibility | undefined; iconOnly?: boolean; className?: string }) {
+  if (!value || value === 'family') return null;
+  const V = VISIBILITY[value];
+  const tone = value === 'private' ? 'bg-warning-soft text-warning-soft-fg' : 'bg-info-soft text-info-soft-fg';
+  return (
+    <span
+      title={iconOnly ? V.label : undefined}
+      className={cn('inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-full text-[11px] font-semibold', iconOnly ? 'size-5 justify-center' : 'px-2 py-0.5', tone, className)}
+    >
+      <V.icon size={iconOnly ? 11 : 10} aria-hidden />
+      {iconOnly ? <span className="sr-only">{V.label}</span> : V.label}
+    </span>
+  );
+}
+
+/** "Imported · DBS ••4821" marker. */
+export function ImportedTag({ label, className }: { label: string; className?: string }) {
+  return (
+    <span className={cn('inline-flex min-w-0 items-center gap-1 text-[12px] text-subtle', className)}>
+      <Landmark size={12} className="shrink-0" aria-hidden />
+      <span className="truncate">Imported · {label}</span>
+    </span>
   );
 }

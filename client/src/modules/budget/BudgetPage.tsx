@@ -2,7 +2,7 @@
 // shared add/edit/detail sheets and live updates.
 import { useEffect, useMemo, useState } from 'react';
 import { Navigate, Route, Routes, useLocation, useNavigate, useSearchParams } from 'react-router';
-import { CalendarClock, ChartPie, ChevronLeft, ChevronRight, PiggyBank, Plus, Receipt, SlidersHorizontal } from 'lucide-react';
+import { CalendarClock, ChartColumn, ChartPie, ChevronLeft, ChevronRight, FileUp, PiggyBank, Plus, Receipt, SlidersHorizontal } from 'lucide-react';
 import { useLive } from '../../lib/live';
 import { Button, Fab, IconButton, Menu, PageHeader, SegmentedControl, Tabs } from '../../ui';
 import { addMonths, currentMonth, monthLabel, useBills, useCanManage, useMonthParam, type Transaction } from './api';
@@ -10,13 +10,17 @@ import Bills from './Bills';
 import { CategoryManager } from './Categories';
 import { BudgetContext, type BudgetActions } from './context';
 import Goals from './Goals';
+import ImportPage from './Import';
+import Insights from './Insights';
 import Overview from './Overview';
 import { TransactionDetail } from './TransactionDetail';
 import { TransactionForm, type TxDraft } from './TransactionForm';
 import Transactions from './Transactions';
 import mod from './index';
 
-type Tab = 'overview' | 'transactions' | 'bills' | 'goals';
+type Tab = 'overview' | 'transactions' | 'bills' | 'goals' | 'insights';
+/** Tabs without the month picker (they aren't about one month). */
+const UNDATED: Tab[] = ['goals', 'insights'];
 
 function MonthNav({ month, setMonth }: { month: string; setMonth: (m: string) => void }) {
   const isCurrent = month === currentMonth();
@@ -47,9 +51,10 @@ export default function BudgetPage() {
   const [categoriesOpen, setCategoriesOpen] = useState(false);
   const txId = Number(params.get('tx')) || null;
 
-  const tab: Tab = (['transactions', 'bills', 'goals'] as const).find((t) => location.pathname.startsWith(`/budget/${t}`)) ?? 'overview';
+  const tab: Tab = (['transactions', 'bills', 'goals', 'insights'] as const).find((t) => location.pathname.startsWith(`/budget/${t}`)) ?? 'overview';
+  const dated = !UNDATED.includes(tab);
   const setTab = (t: Tab) => {
-    const q = month !== currentMonth() && t !== 'goals' ? `?month=${month}` : '';
+    const q = month !== currentMonth() && !UNDATED.includes(t) ? `?month=${month}` : '';
     navigate(`/budget${t === 'overview' ? '' : `/${t}`}${q}`);
   };
 
@@ -91,17 +96,27 @@ export default function BudgetPage() {
 
   const draftForMonth = month !== currentMonth() ? { date: `${month}-01` } : undefined;
 
+  // The statement import wizard is a full page of its own (adults only; the server also refuses children).
+  if (location.pathname.startsWith('/budget/import')) {
+    return canManage ? <BudgetContext.Provider value={actions}><ImportPage /></BudgetContext.Provider> : <Navigate to="/budget" replace />;
+  }
+
   return (
     <BudgetContext.Provider value={actions}>
       <div className="pb-24 lg:pb-0">
         <PageHeader
           title={mod.label}
-          subtitle={tab === 'goals' ? 'Savings goals & allowances' : `${monthLabel(month)} · shared family budget`}
+          subtitle={tab === 'goals' ? 'Savings goals & allowances' : tab === 'insights' ? 'Averages, trends and goal check' : `${monthLabel(month)} · shared family budget`}
           icon={mod.icon}
           accent={mod.accent}
           actions={
             <>
-              {tab !== 'goals' && <div className="hidden sm:block"><MonthNav month={month} setMonth={setMonth} /></div>}
+              {dated && <div className="hidden sm:block"><MonthNav month={month} setMonth={setMonth} /></div>}
+              {canManage && (tab === 'overview' || tab === 'transactions' || tab === 'insights') && (
+                <Button variant="secondary" icon={FileUp} onClick={() => navigate('/budget/import')} aria-label="Import statement">
+                  <span className="hidden sm:inline">Import statement</span>
+                </Button>
+              )}
               <div className="hidden lg:block">
                 <Button icon={Plus} onClick={() => actions.addTransaction(draftForMonth)} title="Add transaction (N)">
                   Add transaction
@@ -112,6 +127,7 @@ export default function BudgetPage() {
                 items={[
                   { label: 'Categories & limits', icon: SlidersHorizontal, onSelect: () => setCategoriesOpen(true) },
                   canManage && { label: 'Monthly bills', icon: CalendarClock, onSelect: () => setTab('bills') },
+                  canManage && { label: 'Import statement', icon: FileUp, onSelect: () => navigate('/budget/import') },
                   { label: 'Savings goals', icon: PiggyBank, onSelect: () => setTab('goals') },
                 ]}
               />
@@ -128,6 +144,7 @@ export default function BudgetPage() {
                 { id: 'transactions', label: 'History', icon: Receipt },
                 { id: 'bills', label: 'Bills', icon: CalendarClock, count: canManage && due ? due : undefined },
                 { id: 'goals', label: 'Goals', icon: PiggyBank },
+                ...(canManage ? [{ id: 'insights' as const, label: 'Insights', icon: ChartColumn }] : []),
               ]}
             />
           </div>
@@ -154,10 +171,11 @@ export default function BudgetPage() {
                   ),
                 },
                 { value: 'goals', label: 'Goals' },
+                ...(canManage ? [{ value: 'insights' as const, label: 'Insights' }] : []),
               ]}
             />
           </nav>
-          {tab !== 'goals' && (
+          {dated && (
             <div className="mt-3 flex justify-center sm:hidden">
               <MonthNav month={month} setMonth={setMonth} />
             </div>
@@ -169,10 +187,11 @@ export default function BudgetPage() {
           <Route path="transactions" element={<Transactions />} />
           <Route path="bills" element={<Bills />} />
           <Route path="goals" element={<Goals />} />
+          <Route path="insights" element={canManage ? <Insights /> : <Navigate to="/budget" replace />} />
           <Route path="*" element={<Navigate to="/budget" replace />} />
         </Routes>
 
-        {tab !== 'goals' && <Fab label="Add transaction" accent={mod.accent} onClick={() => actions.addTransaction(draftForMonth)} />}
+        {dated && <Fab label="Add transaction" accent={mod.accent} onClick={() => actions.addTransaction(draftForMonth)} />}
 
         <TransactionForm
           open={form.open}

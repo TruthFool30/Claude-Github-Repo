@@ -10,7 +10,10 @@ FamilyWall. One place for everything a household shares:
 - **Photos** — shared albums
 - **Meals** — recipes and a weekly meal plan
 - **Budget** — shared spending, monthly bills and savings goals (each goal can top itself up
-  automatically every month to hit its target date)
+  automatically every month to hit its target date); import DBS/POSB and UOB bank statements
+  (PDF e-statements, password-protected ones too, or CSV / Excel .xlsx exports) with automatic
+  Singapore merchant categories, duplicate and monthly-bill detection, and money insights
+  (averages, spikes, whether your savings goals fit)
 - **Locator** — places and check-ins on a map
 - **Contacts & Docs** — important contacts and a document vault
 
@@ -128,8 +131,27 @@ The most sensitive data, in **Contacts & Docs**, is encrypted on disk with AES-2
 
 - **Encrypted:** every document file in the vault, the free-text notes on documents, and the
   contents (fields, secret or not, and text) of every info card.
+- **Also encrypted:** the description and running balance of every transaction imported from a bank
+  statement, an import's opening/closing balances, and the learned merchant → category choices.
 - **Not encrypted:** document names and info-card titles/types (listings and search need them),
-  contacts, photos, receipts, avatars, messages and everything else in the database.
+  imported transactions' date, amount, type and category, contacts, photos, receipts, avatars,
+  messages and everything else in the database.
+
+### Bank statements
+
+- The uploaded statement is read in memory (max 10 MB) by a separate worker thread with a memory
+  cap, a 20-second limit and no access to Hearth's environment; it is **never written to disk or
+  logged**, and nothing in it is executed. A PDF password is used once to open the file and never
+  stored or logged.
+- Only date, description, amount, type and running balance are kept. The account number is reduced
+  to its last 4 digits ("DBS ••4821"); names and addresses are never read. Any run of 8 or more digits
+  in a description (card, account and phone numbers) is stored as "••" + its last 4 digits.
+- Imported rows are visible to the grown-ups (default) or only to whoever imported them — never to
+  children — everywhere: lists, totals and charts, search, the dashboard, insights, bills made from an
+  import and the Wall (one "imported N transactions from DBS ••4821" entry for the same people).
+  Someone leaving the family takes their private imports with them.
+- Legacy Excel `.xls` files are refused (no safe reader); export CSV instead. Use Hearth over HTTPS
+  when uploading statements from outside your home network.
 
 The key comes from `HEARTH_ENCRYPTION_KEY` if set. Otherwise Hearth creates a random key on first
 start in `hearth.key` next to the database (mode 0600; override the location with `KEY_FILE`).

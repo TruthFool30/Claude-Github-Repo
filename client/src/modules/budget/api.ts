@@ -1,11 +1,13 @@
 // Budget data layer: API types, query hooks and month helpers.
-import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
+import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useSearchParams } from 'react-router';
 import { api, qs } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { fmtMoney, toDateKey } from '../../lib/format';
 
 export type Kind = 'expense' | 'income';
+/** Who can see a transaction: everyone, adults only, or only its creator. */
+export type TxVisibility = 'family' | 'adults' | 'private';
 
 export interface CategoryRef {
   id: number;
@@ -36,6 +38,11 @@ export interface Transaction {
   created_by: number | null;
   created_at: string;
   updated_at: string;
+  visibility: TxVisibility;
+  /** Set on rows that came from a bank statement import. */
+  import_id: number | null;
+  /** Running balance from the statement (imported rows only). */
+  balance: number | null;
 }
 
 export interface SummaryCategory extends Category {
@@ -121,6 +128,106 @@ export interface Allowance {
   created_at: string;
 }
 
+// ---- statement import + insights (CONTRACT.md) ------------------------------------------------
+
+export type Bank = 'dbs' | 'posb' | 'uob';
+export const BANK_LABEL: Record<Bank, string> = { dbs: 'DBS', posb: 'POSB', uob: 'UOB' };
+export type ImportErrorCode = 'UNSUPPORTED' | 'PASSWORD_REQUIRED' | 'BAD_PASSWORD' | 'EMPTY' | 'TOO_LARGE';
+
+export interface PreviewRow {
+  row_id: string;
+  date: string;
+  description: string;
+  amount: number;
+  kind: Kind;
+  balance: number | null;
+  category_id: number | null;
+  category_source: 'rule' | 'learned' | 'none';
+  duplicate: boolean;
+  recurring_group: string | null;
+}
+
+export interface RecurringSuggestion {
+  group: string;
+  merchant: string;
+  description: string;
+  amount: number;
+  kind: Kind;
+  day_of_month: number;
+  months_seen: number;
+  category_id: number | null;
+  existing_bill_id: number | null;
+}
+
+export interface ImportPreview {
+  token: string;
+  expires_at: string;
+  bank: Bank;
+  format: 'pdf' | 'csv' | 'xls' | 'xlsx';
+  account: { label: string; last4: string } | null;
+  currency: string;
+  period: { from: string; to: string };
+  opening_balance: number | null;
+  closing_balance: number | null;
+  rows: PreviewRow[];
+  recurring: RecurringSuggestion[];
+  summary: { count: number; income: number; spending: number; duplicates: number };
+  warnings: string[];
+}
+
+export interface CommitBody {
+  visibility: 'adults' | 'private';
+  rows: Array<{ row_id: string; category_id: number | null; include: boolean }>;
+  bills: Array<{ group: string; description?: string; amount?: number; day_of_month?: number; category_id?: number | null }>;
+}
+
+export interface ImportOut {
+  id: number;
+  bank: Bank;
+  account_label: string | null;
+  period_from: string;
+  period_to: string;
+  row_count: number;
+  visibility: 'adults' | 'private';
+  created_by: number | null;
+  created_at: string;
+  total_income: number;
+  total_spending: number;
+}
+
+export interface CommitResult {
+  import: ImportOut;
+  created: number;
+  skipped_duplicates: number;
+  bills_created: number;
+}
+
+export interface Insights {
+  // ponytail: the contract says the current month is "flagged partial" without naming the field;
+  // `partial` is read when present, otherwise the current calendar month counts as partial.
+  months: Array<{ month: string; income: number; spending: number; surplus: number; partial?: boolean }>;
+  avg_income: number;
+  avg_spending: number;
+  avg_surplus: number;
+  balances: Array<{ account_label: string; balance: number; as_of: string }>;
+  categories: Array<{ category_id: number | null; name: string; icon: string; color: string; avg: number; this_month: number; change_pct: number | null }>;
+  merchants: Array<{ merchant: string; total: number; count: number }>;
+  spikes: Array<{ category_id: number | null; name: string; this_month: number; avg: number; change_pct: number }>;
+  recurring: { total_monthly: number; bills: Array<{ id: number; description: string; amount: number }> };
+  goals: {
+    needed_monthly: number;
+    surplus: number;
+    status: 'on_track' | 'short' | 'no_data';
+    shortfall: number;
+    items: Array<{ id: number; name: string; emoji: string | null; monthly: number; target_date: string | null; auto_monthly: boolean }>;
+    undated: number;
+    suggestions: string[];
+  };
+}
+
+/** "DBS ••4821" (or just the bank) for an import. */
+export const importLabel = (i: Pick<ImportOut, 'bank' | 'account_label'>) => i.account_label || BANK_LABEL[i.bank] || 'Bank';
+
 export interface TxFilters {
   month: string;
   q?: string;
@@ -143,6 +250,8 @@ export const keys = {
   goal: (id: number) => ['budget', 'goal', id] as const,
   allowances: ['budget', 'allowances'] as const,
   badge: ['budget', 'badge'] as const,
+  imports: ['budget', 'imports'] as const,
+  insights: (months: number) => ['budget', 'insights', months] as const,
 };
 
 /**
@@ -195,6 +304,43 @@ export const useGoal = (id: number | null) =>
   useQuery({ queryKey: keys.goal(id ?? 0), queryFn: () => api.get<Goal>(`/budget/goals/${id}`), enabled: !!id });
 
 export const useAllowances = () => useQuery({ queryKey: keys.allowances, queryFn: () => api.get<Allowance[]>('/budget/allowances') });
+
+/** Past statement imports (adults only; disabled for children, whom the server refuses anyway). */
+export const useImports = () => {
+  const canManage = useCanManage();
+  return useQuery({ queryKey: keys.imports, queryFn: () => api.get<ImportOut[]>('/budget/imports'), enabled: canManage, staleTime: 60_000 });
+};
+
+/**
+ * "DBS ••4821" for a transaction's import_id. ponytail: transactions only carry import_id, so the
+ * label comes from the (small, cached) imports list; unknown ids fall back to "bank statement".
+ */
+export function useImportLabel(importId: number | null | undefined) {
+  const { data } = useImports();
+  if (!importId) return null;
+  const imp = data?.find((i) => i.id === importId);
+  return imp ? importLabel(imp) : 'bank statement';
+}
+
+export const useInsights =(months: number) =>
+  useQuery({ queryKey: keys.insights(months), queryFn: () => api.get<Insights>(`/budget/insights${qs({ months })}`), placeholderData: (p) => p });
+
+/** Upload a statement for preview (multipart: file, password?). Throws ApiError with `code`. */
+export function previewImport(file: File, password?: string) {
+  const fd = new FormData();
+  fd.append('file', file);
+  if (password) fd.append('password', password);
+  return api.upload<ImportPreview>('/budget/imports/preview', fd);
+}
+
+/**
+ * After a commit or undo, everything money-shaped may have changed: transactions, summary,
+ * insights, bills, goals (all under ['budget']) and the Wall's dashboard tile.
+ */
+export function useInvalidateAfterImport() {
+  const qc = useQueryClient();
+  return () => Promise.all([qc.invalidateQueries({ queryKey: keys.all }), qc.invalidateQueries({ queryKey: ['wall', 'dashboard'] })]);
+}
 
 /** Currency formatter bound to this family's currency. */
 export function useMoney() {

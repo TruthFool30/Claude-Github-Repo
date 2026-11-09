@@ -613,6 +613,14 @@ location data. Not called when a whole family is deleted (its rows cascade).
 (e.g. cook mode, where the main buttons are at the bottom). The toaster container carries
 `data-toaster="default|top"`; never restyle it via its utility classes.
 
+### In-memory uploads for sensitive files (bank statements)
+
+- `POST /api/budget/imports/preview` uses its own `multer.memoryStorage()` (10 MB) instead of
+  `ctx.upload`, so the statement never reaches the disk; the buffer is moved into a worker thread
+  (`budget/import.js`: `resourceLimits`, 20 s timeout, `env: {}`, stdout/stderr swallowed) and zeroed.
+  Only `ImportError` codes/messages cross back — library errors could quote the file. See
+  MODULE_SPECS "budget" for the import API.
+
 ### Compression and private activity (added during integration)
 
 - Responses (API JSON, the built client, other text assets ≥ 1 KB) are compressed with br/gzip by

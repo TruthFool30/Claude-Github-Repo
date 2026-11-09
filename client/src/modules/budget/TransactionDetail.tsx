@@ -1,14 +1,14 @@
 // Transaction detail sheet + list row + delete-with-undo helper.
 import { useState } from 'react';
 import { useQuery, useQueryClient, type InfiniteData } from '@tanstack/react-query';
-import { CalendarDays, FileText, Paperclip, Pencil, Repeat, StickyNote, Trash2, UserRound } from 'lucide-react';
+import { CalendarDays, Eye, FileText, Landmark, Paperclip, Pencil, Repeat, Scale, StickyNote, Trash2, UserRound } from 'lucide-react';
 import { api, errorMessage } from '../../lib/api';
 import { useAuth, useMember } from '../../lib/auth';
 import { cn } from '../../lib/cn';
 import { fmtDate, fmtRelative, firstName } from '../../lib/format';
 import { Avatar, Button, Lightbox, Modal, Skeleton, toast } from '../../ui';
-import { keys, useCanManage, useMoney, type Transaction, type TxPage } from './api';
-import { Amount, CategoryIcon, UNCATEGORIZED } from './shared';
+import { keys, useCanManage, useImportLabel, useMoney, type Transaction, type TxPage } from './api';
+import { Amount, CategoryIcon, ImportedTag, UNCATEGORIZED, VISIBILITY, VisibilityBadge } from './shared';
 
 export const txTitle = (t: Transaction) => t.description || t.category?.name || (t.kind === 'income' ? 'Income' : 'Expense');
 
@@ -57,13 +57,14 @@ export function useCanEditTx() {
 export function TransactionRow({ t, onOpen, showDate }: { t: Transaction; onOpen: (t: Transaction) => void; showDate?: boolean }) {
   const { fmt } = useMoney();
   const member = useMember(t.paid_by);
+  const imported = useImportLabel(t.import_id);
   return (
     <li>
       <button
         type="button"
         onClick={() => onOpen(t)}
         className="group flex w-full items-center gap-3 rounded-xl px-2 py-2.5 text-left transition-colors hover:bg-surface-2 focus-visible:bg-surface-2 focus-visible:outline-none"
-        aria-label={`${txTitle(t)}, ${t.kind === 'income' ? 'income' : 'expense'} ${fmt(t.amount)}, ${fmtDate(t.date)}`}
+        aria-label={`${txTitle(t)}, ${t.kind === 'income' ? 'income' : 'expense'} ${fmt(t.amount)}, ${fmtDate(t.date)}${t.visibility && t.visibility !== 'family' ? `, ${VISIBILITY[t.visibility].label.toLowerCase()}` : ''}${imported ? `, imported from ${imported}` : ''}`}
       >
         <CategoryIcon category={t.category} />
         <div className="min-w-0 flex-1">
@@ -71,10 +72,12 @@ export function TransactionRow({ t, onOpen, showDate }: { t: Transaction; onOpen
             <span className="truncate text-[15px] font-semibold text-fg">{txTitle(t)}</span>
             {t.recurring_id && <Repeat size={13} className="shrink-0 text-subtle" aria-label="Recurring" />}
             {t.receipt_url && <Paperclip size={13} className="shrink-0 text-subtle" aria-label="Has receipt" />}
+            <VisibilityBadge value={t.visibility} iconOnly />
           </div>
           <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[13px] text-muted">
             <span className="truncate">{t.category?.name ?? UNCATEGORIZED.name}</span>
             {showDate && <span className="shrink-0">· {fmtDate(t.date, 'MMM d')}</span>}
+            {imported && <><span aria-hidden className="shrink-0">·</span><ImportedTag label={imported} /></>}
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-2.5">
@@ -102,6 +105,7 @@ export function TransactionDetail({
   const t = data;
   const payer = useMember(t?.paid_by);
   const creator = useMember(t?.created_by);
+  const imported = useImportLabel(t?.import_id);
   const isPdf = !!t?.receipt_url && /\.pdf$/i.test(t.receipt_url);
 
   return (
@@ -155,6 +159,11 @@ export function TransactionDetail({
                 value={payer ? (<span className="inline-flex items-center gap-2"><Avatar user={payer} size="xs" />{payer.name}</span>) : '—'}
               />
               {t.recurring_id && <Row icon={Repeat} label="Recurring" value="Monthly bill payment" />}
+              {imported && <Row icon={Landmark} label="Source" value={`Imported · ${imported}`} />}
+              {t.balance != null && <Row icon={Scale} label="Balance after" value={<span className="tabular">{fmt(t.balance)}</span>} />}
+              {t.visibility && t.visibility !== 'family' && (
+                <Row icon={Eye} label="Visible to" value={<span className="inline-flex flex-wrap items-center gap-2"><VisibilityBadge value={t.visibility} />{VISIBILITY[t.visibility].hint}</span>} />
+              )}
               {t.notes && <Row icon={StickyNote} label="Notes" value={<span className="whitespace-pre-wrap">{t.notes}</span>} />}
             </dl>
             {t.receipt_url && (

@@ -144,8 +144,8 @@ export function money(cents, currency = 'USD') {
 // ---- serialization -----------------------------------------------------------------------
 
 export const TX_SELECT = `
-  SELECT t.*, c.name AS c_name, c.icon AS c_icon, c.color AS c_color, c.kind AS c_kind
-  FROM budget_transactions t LEFT JOIN budget_categories c ON c.id = t.category_id`;
+  SELECT t.*, c.name AS c_name, c.icon AS c_icon, c.color AS c_color, c.kind AS c_kind, bi.account_label AS import_label
+  FROM budget_transactions t LEFT JOIN budget_categories c ON c.id = t.category_id LEFT JOIN budget_imports bi ON bi.id = t.import_id`;
 
 export function txOut(row) {
   if (!row) return null;
@@ -164,6 +164,10 @@ export function txOut(row) {
     created_by: row.created_by,
     created_at: row.created_at,
     updated_at: row.updated_at,
+    visibility: row.visibility ?? 'family',
+    import_id: row.import_id ?? null,
+    import_label: row.import_id ? row.import_label ?? null : null, // e.g. "DBS ••4821"
+    balance: row.balance == null ? null : fromCents(Number(row.balance)), // running balance (imported rows; opened by the caller)
   };
 }
 
@@ -233,6 +237,7 @@ export function billOut(row, extra = {}) {
     notes: row.notes,
     created_by: row.created_by,
     created_at: row.created_at,
+    visibility: row.visibility ?? 'family',
     ...extra,
   };
 }
@@ -247,11 +252,13 @@ export const BILL_SELECT = `
  */
 export function recordBillPayment(db, bill, month, { amountCents, date, userId, paidBy } = {}) {
   const { lastInsertRowid } = db.prepare(
-    `INSERT INTO budget_transactions (family_id, kind, amount_cents, category_id, description, date, paid_by, recurring_id, created_by)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO budget_transactions (family_id, kind, amount_cents, category_id, description, date, paid_by, recurring_id, created_by, visibility)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     bill.family_id, bill.kind, amountCents ?? bill.amount_cents, bill.category_id, bill.description,
-    date ?? dueDate(month, bill.day_of_month), paidBy === undefined ? bill.paid_by : paidBy, bill.id, userId ?? bill.created_by,
+    date ?? dueDate(month, bill.day_of_month), paidBy === undefined ? bill.paid_by : paidBy, bill.id,
+    // Payments of a private bill (from a private import) stay private to its creator.
+    bill.visibility === 'private' ? bill.created_by : userId ?? bill.created_by, bill.visibility ?? 'family',
   );
   db.prepare(
     `INSERT INTO budget_recurring_runs (recurring_id, family_id, month, status, transaction_id) VALUES (?, ?, ?, 'paid', ?)

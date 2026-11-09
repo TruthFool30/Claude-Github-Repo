@@ -1,0 +1,613 @@
+// Bank statement import for the budget: parse DBS/POSB and UOB statements (CSV, Excel .xlsx and
+// PDF e-statements, password-protected ones too), mask account-like numbers, guess categories
+// (learned per family, then built-in Singapore merchant rules) and spot monthly bills.
+//
+// Parsing runs in a worker thread (this same file, see the bottom) with a memory cap, a time limit,
+// no environment and its console output thrown away, so a hostile or huge file can only fail its
+// own request. The file is handed over in memory and never written anywhere; nothing in it is
+// executed (PDF text is read with pdf.js, scripting/eval/fonts off; .xlsx is unzipped with zlib
+// under an output cap and read as plain XML text).
+//
+// Layouts (see docs/MODULE_SPECS.md "budget" for the sources):
+//   DBS/POSB CSV   "Account Details For:,POSB Savings Account 123-45678-9" … then
+//                  "Transaction Date,Reference,Debit Amount,Credit Amount,Transaction Ref1,Ref2,Ref3"
+//   UOB export     "Account Number" / "Statement Period" preamble, then
+//                  "Transaction Date | Transaction Description | Withdrawal | Deposit | Available Balance"
+//   PDF            "Date  Description  Withdrawal(s)  Deposit(s)  Balance" table (DBS/POSB consolidated
+//                  statement with "Balance Brought/Carried Forward", UOB with "BALANCE B/F"), dates
+//                  "01 Nov" (year from "Period: … to …" / "as at …") or "01/11/2026".
+import { Worker, isMainThread, parentPort, workerData } from 'node:worker_threads';
+import zlib from 'node:zlib';
+
+export const MAX_FILE_BYTES = 10 * 1024 * 1024;
+export const MAX_ROWS = 5000;
+const MAX_PAGES = 60;
+const MAX_UNZIPPED = 40 * 1024 * 1024;
+const TIMEOUT_MS = 20_000;
+const MAX_WORKERS = 2;
+
+export class ImportError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.code = code;
+  }
+}
+const fail = (code, message) => { throw new ImportError(code, message); };
+
+export const MESSAGES = {
+  UNSUPPORTED: "That doesn't look like a DBS, POSB or UOB account statement. Upload the PDF e-statement, or a CSV or Excel (.xlsx) export of your account history.",
+  XLS: 'Older Excel (.xls) files can’t be read safely. Download the CSV export from your bank instead, or open the file in Excel or Numbers and save it as .xlsx or CSV.',
+  PASSWORD_REQUIRED: 'This PDF is password-protected. Enter its password to open it.',
+  BAD_PASSWORD: 'That password didn’t open the PDF. Check it and try again.',
+  EMPTY: 'No transactions were found in this statement.',
+  TOO_LARGE: 'That file is too large (max 10 MB).',
+  TOO_COMPLEX: 'That file is too large or complex to read.',
+  PDF: 'That PDF couldn’t be read. Upload the original e-statement from your bank, or a CSV export.',
+};
+
+// ---- text helpers (shared by the worker and the server) ----------------------------------------
+
+/** Runs of ≥ 8 digits (spaces/dashes allowed between them) → "••" + last 4: account, card and phone numbers. */
+export function maskDigits(s) {
+  return String(s ?? '').replace(/\d(?:[ -]?\d){7,}/g, (m) => `••${m.replace(/\D/g, '').slice(-4)}`);
+}
+
+const clean = (s) => maskDigits(String(s ?? '').replace(/\s+/g, ' ').trim()).slice(0, 140);
+
+const MONTHS = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
+const pad = (n) => String(n).padStart(2, '0');
+function ymd(y, m, d) {
+  if (y < 100) y += 2000;
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== m - 1 || dt.getUTCDate() !== d || y < 1990 || y > 2100) return null;
+  return `${y}-${pad(m)}-${pad(d)}`;
+}
+
+/**
+ * 'YYYY-MM-DD' from "01 Nov 2026", "01-Nov-26", "01/11/2026" (day first, as in Singapore),
+ * "2026-11-01", an Excel serial number, or "01 Nov" (year from `end`, the statement's last day).
+ */
+export function parseDate(v, end = null) {
+  if (typeof v === 'number') {
+    if (v < 30000 || v > 80000) return null; // Excel serial (1900 system)
+    return new Date(Date.UTC(1899, 11, 30) + Math.floor(v) * 864e5).toISOString().slice(0, 10);
+  }
+  const s = String(v ?? '').trim();
+  let m = /^(\d{1,2})[\s\-/.]*([A-Za-z]{3})[a-z]*\.?(?:[\s\-/.,]+(\d{4}|\d{2}))?$/.exec(s);
+  if (m) {
+    const mon = MONTHS[m[2].toLowerCase()];
+    if (!mon) return null;
+    if (m[3]) return ymd(Number(m[3]), mon, Number(m[1]));
+    if (!end) return null;
+    const [ey, em] = end.split('-').map(Number);
+    return ymd(mon > em ? ey - 1 : ey, mon, Number(m[1]));
+  }
+  if ((m = /^(\d{1,2})\/(\d{1,2})\/(\d{4}|\d{2})$/.exec(s))) return ymd(Number(m[3]), Number(m[2]), Number(m[1]));
+  if ((m = /^(\d{4})-(\d{2})-(\d{2})(?:[T ].*)?$/.exec(s))) return ymd(Number(m[1]), Number(m[2]), Number(m[3]));
+  return null;
+}
+
+/** Signed cents from "1,234.56", "-12.30", "12.30 CR" / "DR", "(12.30)", "S$12.30", or a number; null if not money. */
+export function parseAmount(v) {
+  if (typeof v === 'number') return Number.isFinite(v) && Math.abs(v) < 1e10 ? Math.round(v * 100) : null;
+  let s = String(v ?? '').trim();
+  if (!s) return null;
+  let neg = false;
+  if (/^\(.*\)$/.test(s)) { neg = true; s = s.slice(1, -1).trim(); }
+  const m = /^(?:S?\$|SGD)?\s*([+-])?\s*(?:S?\$|SGD)?\s*(\d{1,3}(?:,\d{3})+|\d{1,10})(?:\.(\d{1,2}))?\s*(CR|DR)?$/i.exec(s);
+  if (!m) return null;
+  const cents = Number(m[2].replace(/,/g, '')) * 100 + Number((m[3] ?? '0').padEnd(2, '0'));
+  if (m[1] === '-' || /DR/i.test(m[4] ?? '')) neg = true;
+  return neg ? -cents : cents;
+}
+
+const NOISE = new Set(`POS NETS EPS VISA MASTERCARD MC DEBIT CREDIT CARD PURCHASE POINT OF SALE TRANSACTION TRANSFER FAST PAYMENT PAYMENTS
+  PAYNOW GIRO IBG ICT MST UMC BILL TO FROM OTHR OTHER INWARD OUTWARD SI STANDING INSTRUCTION REF REFERENCE SGP SG SINGAPORE SGD PTE LTD
+  CO COM WWW THE AND NO ADVICE RECURRING VIA FUND FUNDS NETS QR CONTACTLESS BIZ AT ACCT ACCOUNT AC`.split(/\s+/));
+
+/** Short merchant key ("NETFLIX", "NTUC FAIRPRICE") used for learning, recurring detection and insights. */
+export function merchantKey(desc) {
+  return String(desc ?? '').toUpperCase().replace(/••\d{4}/g, ' ').replace(/[^A-Z&]+/g, ' ')
+    .split(' ').filter((w) => w.length > 1 && !NOISE.has(w)).slice(0, 3).join(' ');
+}
+export const prettyMerchant = (key) => key.toLowerCase().replace(/\b[a-z]/g, (c) => c.toUpperCase());
+
+/** Description normalised for duplicate detection. */
+export const normDesc = (s) => String(s ?? '').toUpperCase().replace(/[^A-Z0-9•]+/g, '');
+
+// ---- categorising --------------------------------------------------------------------------------
+
+// [pattern, category names to try (first that exists in the family wins), kind]. Order matters:
+// NTUC Income before NTUC FairPrice, GrabFood before Grab.
+const RULES = [
+  [/\b(AIA|PRUDENTIAL|GREAT EASTERN|NTUC INCOME|INCOME INSURANCE|MANULIFE|AVIVA|SINGLIFE|FWD|HSBC LIFE|TOKIO MARINE|CHUBB|ETIQA|AXA)\b/, ['Insurance', 'Health'], 'expense'],
+  [/\b(GRABFOOD|GRAB ?FOOD|FOODPANDA|DELIVEROO|MCDONALD'?S?|KFC|STARBUCKS|TOAST BOX|YA KUN|KOPITIAM|FOOD REPUBLIC|KOUFU|BREADTALK|SUBWAY|JOLLIBEE|DIN TAI FUNG|HAWKER|RESTAURANT|CAFE)\b/, ['Dining'], 'expense'],
+  [/\b(NTUC|FAIRPRICE|FAIR ?PRICE|FP ?XTRA|COLD STORAGE|SHENG SIONG|GIANT|DON DON DONKI|DONKI|PRIME SUPERMARKET|REDMART|CS FRESH|SUPERMARKET)\b/, ['Groceries'], 'expense'],
+  [/\b(GRAB|GOJEK|COMFORTDELGRO|CDG ?TAXI|TADA|RYDE|SIMPLYGO|TRANSITLINK|EZ-?LINK|BUS ?\/ ?MRT|SMRT|SBS TRANSIT|MRT|SHELL|ESSO|CALTEX|SPC|SINOPEC|CARPARK|PARKING|ERP)\b/, ['Transport'], 'expense'],
+  [/\b(SINGTEL|STARHUB|M1|SIMBA|CIRCLES ?LIFE|GOMO|MYREPUBLIC|VIEWQWEST|SP GROUP|SP SERVICES|SP DIGITAL|SENOKO|GENECO|TUAS POWER|KEPPEL ELECTRIC|CITY GAS)\b/, ['Utilities'], 'expense'],
+  [/\b(SHOPEE|LAZADA|AMAZON|AMZN|TAOBAO|QOO10|IKEA|UNIQLO|COURTS|HARVEY NORMAN|BEST DENKI|CHALLENGER|DECATHLON|TEMU|ZALORA)\b/, ['Shopping'], 'expense'],
+  [/\b(NETFLIX|SPOTIFY|DISNEY|YOUTUBE|APPLE\.COM|STEAM|PLAYSTATION|NINTENDO|GOLDEN VILLAGE|SHAW THEATRES|CATHAY CINEPLEXES|KLOOK)\b/, ['Entertainment'], 'expense'],
+  [/\b(GUARDIAN|WATSONS|POLYCLINIC|CLINIC|HOSPITAL|DENTAL|PHARMACY|RAFFLES MEDICAL|PARKWAY)\b/, ['Health'], 'expense'],
+  [/\b(HDB|TOWN COUNCIL|MCST|RENTAL|MORTGAGE|HOME LOAN)\b/, ['Housing'], 'expense'],
+  [/\b(IRAS|TAX)\b/, ['Taxes', 'Other'], 'expense'],
+  [/\b(CPF|SRS)\b/, ['Savings'], 'expense'],
+  [/\b(SCHOOL|MOE|KINDERGARTEN|PRESCHOOL|STUDENT CARE|TUITION|SPARKLETOTS)\b/, ['Kids'], 'expense'],
+  [/\b(SALARY|PAYROLL)\b/, ['Salary'], 'income'],
+  [/\b(INTEREST|DIVIDEND|CASHBACK)\b/, ['Side income'], 'income'],
+  [/\b(REFUND|REVERSAL)\b/, ['Gifts & refunds'], 'income'],
+];
+
+/** Built-in category id for a description, mapped onto the family's categories by name; null if none. */
+export function ruleCategory(desc, kind, cats) {
+  const up = String(desc ?? '').toUpperCase();
+  for (const [re, names, k] of RULES) {
+    if (k !== kind || !re.test(up)) continue;
+    for (const n of names) {
+      const c = cats.find((x) => x.kind === kind && x.name.toLowerCase() === n.toLowerCase());
+      if (c) return c.id;
+    }
+  }
+  return null;
+}
+
+// ---- recurring detection -------------------------------------------------------------------------
+
+const monthIndex = (date) => Number(date.slice(0, 4)) * 12 + Number(date.slice(5, 7)) - 1;
+
+/**
+ * Monthly payments: same kind + merchant key, amount within 10% of the latest one seen in the
+ * statement, exactly one such payment per month in ≥ 2 consecutive months (a one-month gap is
+ * allowed), on roughly the same day (± 7). `items`: { key, kind, amount_cents, date, ref, statement }.
+ * Returns [{ key, kind, amount_cents, day_of_month, months_seen, latest, refs }].
+ */
+export function detectRecurring(items) {
+  const groups = new Map();
+  for (const it of items) {
+    if (!it.key) continue;
+    const g = `${it.kind}|${it.key}`;
+    if (!groups.has(g)) groups.set(g, []);
+    groups.get(g).push(it);
+  }
+  const out = [];
+  for (const list of groups.values()) {
+    const anchor = list.filter((i) => i.statement).sort((a, b) => b.date.localeCompare(a.date))[0];
+    if (!anchor) continue;
+    const near = list.filter((i) => Math.abs(i.amount_cents - anchor.amount_cents) <= anchor.amount_cents * 0.1);
+    const byMonth = new Map();
+    for (const i of near) byMonth.set(monthIndex(i.date), [...(byMonth.get(monthIndex(i.date)) ?? []), i]);
+    if ([...byMonth.values()].some((v) => v.length > 1)) continue; // several a month: everyday spending, not a bill
+    const months = [...byMonth.keys()].sort((a, b) => b - a);
+    let seen = 1;
+    for (let k = 1; k < months.length && months[k - 1] - months[k] <= 2; k++) seen++;
+    if (seen < 2) continue;
+    const members = months.slice(0, seen).map((m) => byMonth.get(m)[0]);
+    const days = members.map((i) => Number(i.date.slice(8, 10)));
+    if (Math.max(...days) - Math.min(...days) > 7 && !days.every((d) => d >= 25 || d <= 3)) continue;
+    out.push({
+      key: anchor.key, kind: anchor.kind, amount_cents: anchor.amount_cents, day_of_month: Number(anchor.date.slice(8, 10)),
+      months_seen: seen, latest: members[0], refs: members.map((i) => i.ref),
+    });
+  }
+  return out;
+}
+
+// ---- file readers (run inside the worker) -----------------------------------------------------------
+
+function decodeText(buf) {
+  if (buf[0] === 0xff && buf[1] === 0xfe) return new TextDecoder('utf-16le').decode(buf.subarray(2));
+  if (buf[0] === 0xfe && buf[1] === 0xff) return new TextDecoder('utf-16be').decode(buf.subarray(2));
+  const utf8 = new TextDecoder('utf-8', { fatal: false }).decode(buf);
+  return utf8.replace(/^﻿/, '');
+}
+
+function parseCsv(text) {
+  const head = text.slice(0, 4096);
+  const delim = ['\t', ';', ','].reduce((a, d) => ((head.split(d).length > head.split(a).length) ? d : a), ',');
+  const rows = [];
+  let row = [];
+  let cell = '';
+  let quoted = false;
+  const push = () => { row.push(cell.length > 500 ? cell.slice(0, 500) : cell); cell = ''; };
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (quoted) {
+      if (c !== '"') cell += c;
+      else if (text[i + 1] === '"') { cell += '"'; i++; } else quoted = false;
+    } else if (c === '"' && cell.trim() === '') { quoted = true; cell = ''; } else if (c === delim) push();
+    else if (c === '\n' || c === '\r') {
+      if (c === '\r' && text[i + 1] === '\n') i++;
+      push();
+      rows.push(row);
+      row = [];
+      if (rows.length > MAX_ROWS + 200) fail('TOO_LARGE', MESSAGES.TOO_COMPLEX);
+    } else if (cell.length < 2000) cell += c;
+  }
+  push();
+  rows.push(row);
+  return rows;
+}
+
+/** Entries of a .zip (only the ones `want(name)` accepts), inflated under a total output cap. */
+function unzip(buf, want) {
+  let eocd = -1;
+  for (let i = buf.length - 22; i >= Math.max(0, buf.length - 65557); i--) {
+    if (buf.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
+  }
+  if (eocd < 0) fail('UNSUPPORTED', MESSAGES.UNSUPPORTED);
+  const count = buf.readUInt16LE(eocd + 10);
+  let p = buf.readUInt32LE(eocd + 16);
+  if (count > 5000 || p >= buf.length) fail('UNSUPPORTED', MESSAGES.UNSUPPORTED); // zip64 / damaged
+  const files = new Map();
+  let total = 0;
+  for (let k = 0; k < count; k++) {
+    if (p + 46 > buf.length || buf.readUInt32LE(p) !== 0x02014b50) fail('UNSUPPORTED', MESSAGES.UNSUPPORTED);
+    const method = buf.readUInt16LE(p + 10);
+    const size = buf.readUInt32LE(p + 20);
+    const nameLen = buf.readUInt16LE(p + 28);
+    const local = buf.readUInt32LE(p + 42);
+    const name = buf.toString('utf8', p + 46, p + 46 + nameLen);
+    p += 46 + nameLen + buf.readUInt16LE(p + 30) + buf.readUInt16LE(p + 32);
+    if (!want(name)) continue;
+    if (local + 30 > buf.length || buf.readUInt32LE(local) !== 0x04034b50) fail('UNSUPPORTED', MESSAGES.UNSUPPORTED);
+    const start = local + 30 + buf.readUInt16LE(local + 26) + buf.readUInt16LE(local + 28);
+    if (start + size > buf.length) fail('UNSUPPORTED', MESSAGES.UNSUPPORTED);
+    const data = buf.subarray(start, start + size);
+    let out;
+    if (method === 0) out = data;
+    else if (method === 8) {
+      try {
+        out = zlib.inflateRawSync(data, { maxOutputLength: Math.max(1, MAX_UNZIPPED - total) });
+      } catch (err) {
+        fail(err.code === 'ERR_BUFFER_TOO_LARGE' || err instanceof RangeError ? 'TOO_LARGE' : 'UNSUPPORTED', err.code === 'ERR_BUFFER_TOO_LARGE' || err instanceof RangeError ? MESSAGES.TOO_COMPLEX : MESSAGES.UNSUPPORTED);
+      }
+    } else fail('UNSUPPORTED', MESSAGES.UNSUPPORTED);
+    total += out.length;
+    if (total > MAX_UNZIPPED) fail('TOO_LARGE', MESSAGES.TOO_COMPLEX);
+    files.set(name, out.toString('utf8'));
+  }
+  return files;
+}
+
+const xmlText = (s) => s.replace(/&(#x[0-9a-f]+|#\d+|lt|gt|amp|quot|apos);/gi, (m, e) => {
+  if (e[0] === '#') {
+    const n = e[1] === 'x' || e[1] === 'X' ? parseInt(e.slice(2), 16) : Number(e.slice(1));
+    return n > 0 && n < 0x110000 ? String.fromCodePoint(n) : '';
+  }
+  return { lt: '<', gt: '>', amp: '&', quot: '"', apos: "'" }[e.toLowerCase()];
+});
+const runs = (xml) => [...xml.matchAll(/<t\b[^>]*>([^<]*)<\/t>/g)].map((m) => xmlText(m[1])).join('');
+
+/** First worksheet of an .xlsx as rows of cells (strings, or numbers for numeric cells). */
+function readXlsx(buf) {
+  const meta = unzip(buf, (n) => n === 'xl/workbook.xml' || n === 'xl/_rels/workbook.xml.rels' || n === 'xl/sharedStrings.xml');
+  const wb = meta.get('xl/workbook.xml');
+  if (!wb) fail('UNSUPPORTED', MESSAGES.UNSUPPORTED);
+  const rid = /<sheet\b[^>]*\br:id="([^"]+)"/.exec(wb)?.[1];
+  const rel = rid && [...(meta.get('xl/_rels/workbook.xml.rels') ?? '').matchAll(/<Relationship\b[^>]*>/g)].map((m) => m[0]).find((t) => t.includes(`Id="${rid}"`));
+  let target = rel ? /Target="([^"]+)"/.exec(rel)?.[1] : 'worksheets/sheet1.xml';
+  target = target.startsWith('/') ? target.slice(1) : `xl/${target}`;
+  const sheet = unzip(buf, (n) => n === target).get(target);
+  if (!sheet) fail('UNSUPPORTED', MESSAGES.UNSUPPORTED);
+  const shared = [...(meta.get('xl/sharedStrings.xml') ?? '').matchAll(/<si>([\s\S]*?)<\/si>/g)].map((m) => runs(m[1]));
+  const rows = [];
+  for (const rm of sheet.matchAll(/<row\b[^>]*>([\s\S]*?)<\/row>/g)) {
+    if (rows.length > MAX_ROWS + 200) fail('TOO_LARGE', MESSAGES.TOO_COMPLEX);
+    const row = [];
+    for (const cm of rm[1].matchAll(/<c\b([^>]*?)(?:\/>|>([\s\S]*?)<\/c>)/g)) {
+      const ref = /\br="([A-Z]{1,3})\d+"/.exec(cm[1])?.[1];
+      const col = ref ? [...ref].reduce((n, ch) => n * 26 + ch.charCodeAt(0) - 64, 0) - 1 : row.length;
+      if (col > 60) continue;
+      const t = /\bt="(\w+)"/.exec(cm[1])?.[1];
+      const inner = cm[2] ?? '';
+      const v = /<v>([^<]*)<\/v>/.exec(inner)?.[1];
+      if (t === 'inlineStr') row[col] = runs(inner);
+      else if (t === 's') row[col] = shared[Number(v)] ?? '';
+      else if (t === 'str' || t === 'b' || t === 'e') row[col] = xmlText(v ?? '');
+      else row[col] = v === undefined || v === '' || !Number.isFinite(Number(v)) ? '' : Number(v);
+    }
+    rows.push(Array.from(row, (c) => c ?? ''));
+  }
+  return rows;
+}
+
+// ---- table (CSV / XLSX) statements ---------------------------------------------------------------
+
+const lc = (c) => String(c ?? '').trim().toLowerCase();
+const isHeaderRow = (r) => {
+  const h = r.map(lc);
+  return h.some((c) => /\bdate\b/.test(c)) && (h.some((c) => /debit|withdraw/.test(c)) && h.some((c) => /credit|deposit/.test(c)) || h.some((c) => /amount/.test(c)));
+};
+
+function detectBank(text, header = '') {
+  if (/\bUOB\b|United Overseas Bank|uobgroup/i.test(text)) return 'uob';
+  if (/\bPOSB\b/i.test(text)) return 'posb';
+  if (/\bDBS\b|dbs\.com/i.test(text)) return 'dbs';
+  // Headers alone, when the preamble was trimmed: DBS's "Transaction Ref1" and UOB's "Transaction Description … Available Balance".
+  if (/transaction ref1/i.test(header)) return 'dbs';
+  if (/transaction description/i.test(header) && /available balance/i.test(header)) return 'uob';
+  return null;
+}
+
+function accountLast4(text) {
+  for (const line of text.split('\n')) {
+    if (!/account|a\/c/i.test(line)) continue;
+    const m = /(\d[\d -]{5,24}\d)/.exec(line.replace(/\b\d{1,2} [A-Za-z]{3} \d{4}\b/g, ''));
+    if (m && m[1].replace(/\D/g, '').length >= 6) return m[1].replace(/\D/g, '').slice(-4);
+  }
+  return null;
+}
+
+const DATE_RE = '\\d{1,2}[ -][A-Za-z]{3}[ -]\\d{4}';
+function periodOf(text) {
+  const m = new RegExp(`(${DATE_RE})\\s*(?:to|-|–)\\s*(${DATE_RE})`, 'i').exec(text);
+  if (m) return { from: parseDate(m[1]), to: parseDate(m[2]) };
+  const end = new RegExp(`(?:as at|statement date|as of)[:\\s,]*(${DATE_RE})`, 'i').exec(text);
+  return { from: null, to: end ? parseDate(end[1]) : null };
+}
+
+function parseTable(rows, format) {
+  const hi = rows.findIndex((r, i) => i < 80 && isHeaderRow(r));
+  if (hi < 0) fail('UNSUPPORTED', MESSAGES.UNSUPPORTED);
+  const header = rows[hi].map(lc);
+  const preamble = rows.slice(0, hi).map((r) => r.join(' ')).join('\n');
+  const bank = detectBank(preamble, header.join(','));
+  if (!bank) fail('UNSUPPORTED', MESSAGES.UNSUPPORTED);
+  const find = (re, not = /$^/) => header.findIndex((c) => re.test(c) && !not.test(c));
+  let dateCol = find(/^(transaction )?date$/);
+  if (dateCol < 0) dateCol = find(/date/, /value|posting/);
+  const debit = find(/debit|withdraw/);
+  const credit = find(/credit|deposit/);
+  const amountCol = debit < 0 || credit < 0 ? find(/amount/) : -1;
+  const balanceCol = find(/balance/);
+  const descCols = header.map((c, i) => (/desc|ref|detail|particular|narrat|payee|merchant|remark/.test(c) && i !== dateCol ? i : -1)).filter((i) => i >= 0);
+  const period = periodOf(preamble);
+  const out = [];
+  let skipped = 0;
+  for (const r of rows.slice(hi + 1)) {
+    if (!r.some((c) => String(c ?? '').trim())) continue;
+    const date = parseDate(r[dateCol]);
+    let cents = null;
+    if (amountCol >= 0) cents = parseAmount(r[amountCol]);
+    else {
+      const d = parseAmount(r[debit]);
+      const c = parseAmount(r[credit]);
+      if (d) cents = -Math.abs(d);
+      else if (c) cents = Math.abs(c);
+    }
+    if (!date || !cents) {
+      if (date || cents) skipped++;
+      continue;
+    }
+    out.push({
+      date,
+      description: clean(descCols.map((i) => String(r[i] ?? '').trim()).filter(Boolean).join(' ')),
+      amount_cents: Math.abs(cents),
+      kind: cents > 0 ? 'income' : 'expense',
+      balance_cents: balanceCol >= 0 ? parseAmount(r[balanceCol]) : null,
+    });
+  }
+  if (out.length > 1 && out[0].date > out[out.length - 1].date) out.reverse(); // newest-first exports
+  let closing = out.length ? out[out.length - 1].balance_cents : null;
+  if (closing == null) {
+    const row = rows.slice(0, hi).find((r) => /ledger balance|closing balance/i.test(String(r[0] ?? '')));
+    closing = row ? parseAmount(row.slice(1).find((c) => String(c).trim()) ?? '') : null;
+  }
+  const first = out[0];
+  const opening = first?.balance_cents != null ? first.balance_cents + (first.kind === 'income' ? -first.amount_cents : first.amount_cents) : null;
+  const warnings = skipped ? [`${skipped} line${skipped === 1 ? '' : 's'} couldn't be read and ${skipped === 1 ? 'was' : 'were'} skipped.`] : [];
+  return { bank, format, last4: accountLast4(preamble), period, opening, closing, rows: out, warnings };
+}
+
+// ---- PDF statements -------------------------------------------------------------------------------
+
+const PDF_DATE = /^(\d{2}\/\d{2}\/\d{4}|\d{1,2} [A-Za-z]{3}(?: \d{4})?)$/;
+const AMOUNT = /^(?:S?\$)?\d{1,3}(?:,\d{3})*\.\d{2}(?:\s?(?:CR|DR))?$/;
+
+async function pdfLines(buf, password) {
+  const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs');
+  const task = pdfjs.getDocument({
+    data: new Uint8Array(buf), password: password || undefined, isEvalSupported: false, disableFontFace: true, useSystemFonts: false,
+    enableXfa: false, verbosity: 0, disableAutoFetch: true, disableStream: true, isOffscreenCanvasSupported: false,
+  });
+  let doc;
+  try {
+    doc = await task.promise;
+  } catch (err) {
+    if (err?.name === 'PasswordException') fail(password ? 'BAD_PASSWORD' : 'PASSWORD_REQUIRED', password ? MESSAGES.BAD_PASSWORD : MESSAGES.PASSWORD_REQUIRED);
+    fail('UNSUPPORTED', MESSAGES.PDF);
+  }
+  try {
+    if (doc.numPages > MAX_PAGES) fail('TOO_LARGE', MESSAGES.TOO_COMPLEX);
+    const lines = [];
+    for (let p = 1; p <= doc.numPages; p++) {
+      const page = await doc.getPage(p);
+      const { items } = await page.getTextContent();
+      const pageLines = [];
+      for (const it of items) {
+        if (!it.str?.trim()) continue;
+        const x = it.transform[4];
+        const y = it.transform[5];
+        let line = pageLines.find((l) => Math.abs(l.y - y) <= 2);
+        if (!line) pageLines.push((line = { page: p, y, items: [] }));
+        line.items.push({ x, r: x + (it.width || it.str.length * 4), s: it.str });
+      }
+      pageLines.sort((a, b) => b.y - a.y);
+      for (const l of pageLines) {
+        l.items.sort((a, b) => a.x - b.x);
+        // Merge pieces of the same phrase (gap < 6pt) into cells; amounts always stand alone.
+        const cells = [];
+        for (const it of l.items) {
+          const last = cells[cells.length - 1];
+          if (last && it.x - last.r < 6 && !AMOUNT.test(it.s.trim()) && !AMOUNT.test(last.s)) { last.s += (it.x - last.r > 1 ? ' ' : '') + it.s; last.r = it.r; } else cells.push({ ...it });
+        }
+        cells.forEach((c) => { c.s = c.s.replace(/\s+/g, ' ').trim(); });
+        lines.push({ page: l.page, y: l.y, cells, text: cells.map((c) => c.s).join(' ') });
+      }
+      if (lines.length > MAX_ROWS * 4) fail('TOO_LARGE', MESSAGES.TOO_COMPLEX);
+    }
+    return lines;
+  } finally {
+    await task.destroy();
+  }
+}
+
+async function parsePdf(buf, password) {
+  const lines = await pdfLines(buf, password);
+  const hi = lines.findIndex((l) => /withdraw/i.test(l.text) && /deposit/i.test(l.text) && /balance/i.test(l.text) && /date/i.test(l.text));
+  const preamble = lines.slice(0, hi < 0 ? 40 : hi).map((l) => l.text).join('\n');
+  const bank = detectBank(preamble);
+  if (!bank || hi < 0) fail('UNSUPPORTED', MESSAGES.UNSUPPORTED);
+  const all = lines.map((l) => l.text).join('\n');
+  const period = periodOf(all);
+  const end = period.to;
+  let cols = null;
+  const center = (c) => (c.x + c.r) / 2;
+  const setCols = (l) => {
+    const at = (re) => l.cells.find((c) => re.test(c.s));
+    const w = at(/withdraw/i);
+    const d = at(/deposit/i);
+    const b = at(/balance/i);
+    cols = { w: center(w), d: center(d), b: center(b), desc: at(/description/i)?.x ?? w.x / 2 };
+  };
+  const rows = [];
+  const warnings = [];
+  let opening = null;
+  let closing = null;
+  let current = null;
+  let continuations = 0;
+  let prevY = null;
+  let undated = 0;
+  const last4 = accountLast4(preamble);
+  for (let i = hi; i < lines.length; i++) {
+    const l = lines[i];
+    const t = l.text;
+    if (/withdraw/i.test(t) && /deposit/i.test(t) && /balance/i.test(t)) {
+      // A table for another account (consolidated statements): stop at the first account.
+      // ponytail: one account per import; the others can be imported from their own exports.
+      const other = i > hi ? accountLast4(lines.slice(Math.max(hi + 1, i - 6), i).map((x) => x.text).join('\n')) : null;
+      if (other && last4 && other !== last4) {
+        warnings.push('This statement covers more than one account; only the first one was imported.');
+        break;
+      }
+      setCols(l);
+      current = null;
+      prevY = l.y;
+      continue;
+    }
+    const nums = l.cells.filter((c) => AMOUNT.test(c.s) && c.x > cols.desc + 40);
+    const nearest = (c) => ['w', 'd', 'b'].reduce((a, k) => (Math.abs(center(c) - cols[k]) < Math.abs(center(c) - cols[a]) ? k : a), 'w');
+    const pick = (k) => { const c = nums.find((n) => nearest(n) === k); return c ? Math.abs(parseAmount(c.s)) : null; };
+    if (/balance brought forward|balance b\/f|opening balance|previous balance/i.test(t)) {
+      // DBS repeats "Balance Brought Forward" at the top of every page: only the first one opens.
+      if (opening == null && !rows.length) opening = pick('b') ?? (nums.length ? Math.abs(parseAmount(nums[nums.length - 1].s)) : null);
+      current = null;
+      continue;
+    }
+    if (/balance carried forward|balance c\/f|closing balance|total balance/i.test(t)) {
+      closing = pick('b') ?? (nums.length ? Math.abs(parseAmount(nums[nums.length - 1].s)) : closing);
+      current = null;
+      continue;
+    }
+    const first = l.cells[0];
+    const date = first && PDF_DATE.test(first.s) ? parseDate(first.s, end) : null;
+    if (first && PDF_DATE.test(first.s) && !date) undated++;
+    const w = pick('w');
+    const d = pick('d');
+    if (date && (w || d)) {
+      const prev = rows.length ? rows[rows.length - 1].balance_cents : opening;
+      const bal = pick('b');
+      const amount = w || d;
+      let kind = w ? 'expense' : 'income';
+      // The running balance decides when it agrees with the amount (columns can drift on later pages).
+      if (prev != null && bal != null && Math.abs(Math.abs(bal - prev) - amount) <= 1) kind = bal > prev ? 'income' : 'expense';
+      const words = l.cells.slice(1).filter((c) => !nums.includes(c)).map((c) => c.s);
+      current = { date, description: words.join(' '), amount_cents: amount, kind, balance_cents: bal };
+      rows.push(current);
+      continuations = 0;
+      prevY = l.y;
+      if (rows.length > MAX_ROWS) fail('TOO_LARGE', MESSAGES.TOO_COMPLEX);
+      continue;
+    }
+    // Continuation of the previous row's description (PayNow / card details on the next line).
+    if (current && !nums.length && !date && continuations < 3 && first && first.x >= cols.desc - 5 && first.x < cols.w - 20
+      && prevY != null && prevY - l.y < 16 && l.page === lines[i - 1]?.page) {
+      current.description += ` ${t}`;
+      continuations++;
+      prevY = l.y;
+      continue;
+    }
+    current = null;
+  }
+  if (!rows.length && undated) fail('UNSUPPORTED', MESSAGES.UNSUPPORTED);
+  for (const r of rows) r.description = clean(r.description);
+  return { bank, format: 'pdf', last4, period, opening, closing: closing ?? rows[rows.length - 1]?.balance_cents ?? null, rows, warnings };
+}
+
+/** Parse a statement file (Buffer). Throws ImportError with a contract code. */
+export async function parseStatement(buf, { password = null, filename = '' } = {}) {
+  if (buf.length > MAX_FILE_BYTES) fail('TOO_LARGE', MESSAGES.TOO_LARGE);
+  if (buf.length < 4) fail('EMPTY', MESSAGES.EMPTY);
+  const ext = (/\.([a-z0-9]{1,5})$/i.exec(filename)?.[1] ?? '').toLowerCase();
+  let res;
+  if (buf.subarray(0, 1024).includes('%PDF-')) res = await parsePdf(buf, password);
+  else if (buf.readUInt32LE(0) === 0x04034b50) res = parseTable(readXlsx(buf), 'xlsx');
+  else if (buf.length >= 8 && buf.readUInt32BE(0) === 0xd0cf11e0) fail('UNSUPPORTED', MESSAGES.XLS); // legacy BIFF .xls
+  else if (buf.subarray(0, 4096).includes(0) && !(buf[0] === 0xff || buf[0] === 0xfe)) fail('UNSUPPORTED', MESSAGES.UNSUPPORTED); // binary
+  else res = parseTable(parseCsv(decodeText(buf)), ext === 'xls' ? 'xls' : 'csv');
+  if (!res.rows.length) fail('EMPTY', MESSAGES.EMPTY);
+  if (res.rows.length > MAX_ROWS) fail('TOO_LARGE', MESSAGES.TOO_COMPLEX);
+  const dates = res.rows.map((r) => r.date).sort();
+  return {
+    ...res,
+    period: { from: res.period.from && res.period.from <= dates[0] ? res.period.from : dates[0], to: res.period.to && res.period.to >= dates[dates.length - 1] ? res.period.to : dates[dates.length - 1] },
+  };
+}
+
+// ---- worker plumbing ----------------------------------------------------------------------------------
+
+let running = 0;
+const waiting = [];
+
+/**
+ * Parse in a worker thread: 256 MB heap, 20 s, at most 2 at a time (others wait their turn).
+ * The buffer's bytes are moved into the worker and the caller's copy is zeroed.
+ */
+export async function parseInWorker(buffer, { password = null, filename = '' } = {}) {
+  if (running >= MAX_WORKERS) await new Promise((r) => waiting.push(r));
+  running++;
+  const data = new Uint8Array(buffer.length);
+  data.set(buffer);
+  buffer.fill(0);
+  try {
+    return await new Promise((resolve, reject) => {
+      const worker = new Worker(new URL(import.meta.url), {
+        workerData: { hearthStatement: true, data, password, filename },
+        transferList: [data.buffer],
+        resourceLimits: { maxOldGenerationSizeMb: 256, maxYoungGenerationSizeMb: 32, stackSizeMb: 4 },
+        env: {}, // no secrets (encryption key, …) in the parser's environment
+        stdout: true, // pdf.js chatter is swallowed, never logged
+        stderr: true,
+      });
+      worker.stdout.resume();
+      worker.stderr.resume();
+      let settled = false;
+      const finish = (fn, v) => { if (!settled) { settled = true; clearTimeout(timer); worker.terminate(); fn(v); } };
+      const timer = setTimeout(() => finish(reject, new ImportError('TOO_LARGE', MESSAGES.TOO_COMPLEX)), TIMEOUT_MS);
+      worker.on('message', (m) => (m.ok ? finish(resolve, m.result) : finish(reject, new ImportError(m.code, m.message))));
+      worker.on('error', (err) => finish(reject, new ImportError(err?.code === 'ERR_WORKER_OUT_OF_MEMORY' ? 'TOO_LARGE' : 'UNSUPPORTED', err?.code === 'ERR_WORKER_OUT_OF_MEMORY' ? MESSAGES.TOO_COMPLEX : MESSAGES.UNSUPPORTED)));
+      worker.on('exit', () => finish(reject, new ImportError('UNSUPPORTED', MESSAGES.UNSUPPORTED)));
+    });
+  } finally {
+    running--;
+    waiting.shift()?.();
+  }
+}
+
+if (!isMainThread && workerData?.hearthStatement) {
+  const { data, password, filename } = workerData;
+  parseStatement(Buffer.from(data.buffer, data.byteOffset, data.byteLength), { password, filename }).then(
+    (result) => parentPort.postMessage({ ok: true, result }),
+    // Only our own codes/messages cross back: library errors could quote the file.
+    (err) => parentPort.postMessage({ ok: false, code: err instanceof ImportError ? err.code : 'UNSUPPORTED', message: err instanceof ImportError ? err.message : MESSAGES.UNSUPPORTED }),
+  );
+}
