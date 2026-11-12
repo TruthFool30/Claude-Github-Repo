@@ -549,10 +549,9 @@ describe('insights', () => {
     // Alternatives, best first: pushing the date closes the gap; trimming Dining by a quarter doesn't.
     const [move, groceries, trimDining] = ins.goals.suggestions;
     assert.match(move, /^Move 🏠 House from .+ to .+ frees up .+ closes the gap\.$/);
-    // Trims say what's usual by now (as spikes do), never a % against a full month.
-    assert.match(groceries, /^Groceries: \$0\.00 so far — usually \$[\d,.]+ by now.*\. Spending \$250\.00 less on Groceries each month would leave you .+ a month short\.$/);
-    assert.equal(trimDining, "Dining: $900.00 so far — usually $400.00 by now (+125%). Spending $100.00 less on Dining each month would leave you " + trimDining.split('leave you ')[1]);
-    assert.match(trimDining, /would leave you \$[\d,.]+ a month short\.$/);
+    // Trims are only the saving (how this month compares is in Categories), never "$0.00 so far".
+    assert.match(groceries, /^Spending \$250\.00 less on Groceries each month would leave you \$[\d,.]+ a month short\.$/);
+    assert.match(trimDining, /^Spending \$100\.00 less on Dining each month would leave you \$[\d,.]+ a month short\.$/);
     assert.equal(ins.goals.suggestions.length, 3);
     assert.equal(ins.goals.remaining_gap, 0);
     assert.deepEqual(ins.goals.overdue, []);
@@ -1032,7 +1031,7 @@ describe('functional review round 3', () => {
     const p = await preview(h.admin.agent, F.pairCsv('uob'), 'uob-pair.csv');
     const row = p.body.rows.find((r) => r.amount === 1500);
     assert.equal(row.transfer, true);
-    assert.deepEqual(row.pair, { account_label: 'DBS ••4821', date: '2026-10-10', amount: -1500, description: 'ICT FUNDS TRANSFER TO UOB A/C' });
+    assert.deepEqual(row.pair, { account_label: 'DBS ••4821', date: '2026-10-10', amount: -1500, description: 'ICT FUNDS TRANSFER IBANKING' });
     assert.equal(p.body.rows.find((r) => r.amount === 4.2).pair, null);
     assert.equal((await h.admin.agent.post(`/api/budget/imports/${p.body.token}/commit`, { rows: [{ row_id: row.row_id, pair: true }] })).status, 400);
     // Declined: this row is a transfer, the DBS one stays as it was.
@@ -1074,5 +1073,97 @@ describe('functional review round 3', () => {
     await importFile(h.admin.agent, statement([[day(month, 2), 'SAMPLE BAKERY', 3]], lastDay(month)), 'n.csv');
     assert.ok(['upcoming', 'due_today', 'overdue'].includes(await status(month)));
     assert.equal(await status(addMonths(month, 1)), 'expected');
+  });
+});
+
+describe('review round 4', () => {
+  test("bill events: the payment's details only reach people who can see that payment", async () => {
+    const h = await household('Bill events');
+    const prev = addMonths(month, -1);
+    const bill = await h.admin.agent.post('/api/budget/recurring', { description: 'Netflix', amount: 19.98, day_of_month: 7, start_month: addMonths(month, -2) });
+    await importFile(h.admin.agent, dbsCsv([[day(prev, 8), 'UMC', 'NETFLIX.COM', -19.98]]), 'n.csv'); // adults-only row pays the family bill
+    const isBill = (e) => e.type === 'budget.bill.updated' && e.payload?.id === bill.body.id;
+    const kid = await collectEvents(h.child.agent, { timeoutMs: 4000, until: isBill });
+    const sam = await collectEvents(h.member.agent, { timeoutMs: 4000, until: isBill });
+    assert.equal((await h.admin.agent.patch(`/api/budget/recurring/${bill.body.id}?month=${prev}`, { description: 'Netflix family' })).status, 200);
+    const k = (await kid.events).find(isBill).payload;
+    const m = (await sam.events).find(isBill).payload;
+    assert.deepEqual([k.status, k.transaction_id, k.paid_amount, k.paid_date], ['paid', null, null, null]);
+    assert.equal(m.paid_amount, 19.98);
+    assert.ok(m.transaction_id);
+    // Taking the month back: the same split.
+    const kid2 = await collectEvents(h.child.agent, { timeoutMs: 4000, until: isBill });
+    await h.admin.agent.del(`/api/budget/recurring/${bill.body.id}/runs/${prev}`);
+    const k2 = (await kid2.events).find(isBill).payload;
+    assert.equal(k2.transaction_id, null);
+  });
+
+  test('sealing a row on a visibility change leaves no plaintext in the WAL', async () => {
+    const h = await household('WAL');
+    srv.db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+    const t = await h.admin.agent.post('/api/budget/transactions', { amount: 5, description: 'WALMARKER-PLAIN', notes: 'WALNOTE-PLAIN' });
+    await h.admin.agent.patch(`/api/budget/transactions/${t.body.id}`, { visibility: 'adults' });
+    const file = Buffer.concat(walk(srv.dir).filter((f) => /test\.db/.test(f)).map((f) => fs.readFileSync(f)));
+    assert.ok(!file.includes(Buffer.from('WALMARKER-PLAIN')) && !file.includes(Buffer.from('WALNOTE-PLAIN')));
+  });
+
+  test('PDF import works when node_modules is a symlink; the self-test says so', async () => {
+    const T = fs.mkdtempSync(path.join(os.tmpdir(), 'hearth-link-'));
+    try {
+      const dir = path.join(T, 'app', 'server', 'src', 'modules', 'budget');
+      fs.mkdirSync(dir, { recursive: true });
+      fs.copyFileSync(fileURLToPath(new URL('../src/modules/budget/import.js', import.meta.url)), path.join(dir, 'import.js'));
+      fs.writeFileSync(path.join(T, 'app', 'server', 'package.json'), '{"type":"module"}');
+      fs.symlinkSync(fileURLToPath(new URL('../../node_modules', import.meta.url)), path.join(T, 'app', 'node_modules'), 'dir');
+      const copy = await import(new URL(`file://${path.join(dir, 'import.js')}`).href);
+      assert.equal(await copy.pdfImportSelfTest(), true);
+      assert.equal((await copy.parseInWorker(F.pdf('dbs'), { filename: 'd.pdf' })).rows.length, F.statement('dbs').rows.length);
+      assert.ok(copy.parserFlags().some((f) => f === `--allow-fs-read=${path.join(T, 'app', 'node_modules', 'pdfjs-dist')}`));
+    } finally {
+      fs.rmSync(T, { recursive: true, force: true });
+    }
+  });
+
+  test('links the audience rule rejects are removed at startup', async () => {
+    const h = await household('Old links');
+    const sam = await h.member.agent.post('/api/budget/transactions', { amount: 10, description: 'Zumba studio', date: day(month, 2) });
+    const bill = Number(srv.db.prepare("INSERT INTO budget_recurring (family_id, kind, description, amount_cents, day_of_month, start_month, created_by, visibility) VALUES (?, 'expense', ?, 1000, 2, ?, ?, 'private')")
+      .run(h.family.id, srv.ctx.box.seal('Secret bill'), month, h.admin.user.id).lastInsertRowid);
+    srv.db.prepare('UPDATE budget_transactions SET recurring_id = ? WHERE id = ?').run(bill, sam.body.id);
+    srv.db.prepare("INSERT INTO budget_recurring_runs (recurring_id, family_id, month, status, transaction_id) VALUES (?, ?, ?, 'paid', ?)").run(bill, h.family.id, month, sam.body.id);
+    const again = await startServer({ dbPath: path.join(srv.dir, 'test.db'), uploadDir: path.join(srv.dir, 'uploads') });
+    try {
+      assert.equal(srv.db.prepare('SELECT recurring_id FROM budget_transactions WHERE id = ?').get(sam.body.id).recurring_id, null);
+      assert.equal(srv.db.prepare('SELECT COUNT(*) AS n FROM budget_recurring_runs WHERE recurring_id = ?').get(bill).n, 0);
+    } finally {
+      await again.close();
+    }
+  });
+
+  test('masking: semicolons; words before 7 digits are left alone', () => {
+    assert.equal(maskDigits('ACCT 1234 ; 5678 ; 9012'), 'ACCT ••9012');
+    assert.equal(maskDigits('1234;5678;9012'), '••9012');
+    assert.equal(maskDigits('STAN 1234567 X'), 'STAN 1234567 X');
+  });
+
+  test('lines naming another of the banks are likely transfers; the closest pair wins', async () => {
+    const h = await household('Bank names');
+    const p = await preview(h.admin.agent, dbsCsv([
+      [day(month, 1), 'ICT', 'FAST TRANSFER TO UOB A/C', -100], [day(month, 1), 'ICT', 'FUNDS TO POSB A/C', -50], [day(month, 1), 'ICT', 'TO DBS A/C 1234', -20],
+      [day(month, 2), 'ICT', 'PAYNOW TO JOHN TAN', -30],
+    ]), 'b.csv');
+    assert.deepEqual(p.body.rows.map((r) => r.transfer), [true, false, false, false]); // POSB/DBS is this bank
+    const uob = Buffer.from(['United Overseas Bank Limited', 'Account Number:,123-456-789-0', '', 'Transaction Date,Transaction Description,Withdrawal,Deposit',
+      `${dmy(day(month, 2))},FUNDS TRANSFER FROM DBS,,100.00`].join('\n'));
+    assert.equal((await preview(h.admin.agent, uob, 'u.csv')).body.rows[0].transfer, true);
+    // Two possible other halves: the closer date wins; on the same day, the one naming this bank.
+    const q = await importFile(h.admin.agent, dbsCsv([
+      [day(month, 10), 'ICT', 'FAST TRANSFER', -700], [day(month, 12), 'ICT', 'FAST PAYMENT X', -700],
+      [day(month, 20), 'ICT', 'FAST TRANSFER', -900], [day(month, 20), 'ICT', 'FAST TRANSFER UOB', -900],
+    ], { account: '000-11122-8888' }), 'q.csv');
+    assert.equal(q.commit.status, 201);
+    const other = await preview(h.admin.agent, Buffer.from(['United Overseas Bank Limited', 'Account Number:,555-666-777-1', '',
+      'Transaction Date,Transaction Description,Withdrawal,Deposit', `${dmy(day(month, 13))},FAST TRANSFER IN,,700.00`, `${dmy(day(month, 21))},FAST TRANSFER IN,,900.00`].join('\n')), 'o.csv');
+    assert.deepEqual(other.body.rows.map((r) => [r.pair?.date, r.pair?.description]), [[day(month, 12), 'ICT FAST PAYMENT X'], [day(month, 20), 'ICT FAST TRANSFER UOB']]);
   });
 });

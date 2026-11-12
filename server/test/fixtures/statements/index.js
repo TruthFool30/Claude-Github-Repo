@@ -201,7 +201,7 @@ export function pdf(bank, { password = null } = {}) {
 export const pairCsv = (bank) => Buffer.from(bank === 'dbs'
   ? ['Account Details For:,DBS Multiplier Account 123-45678-4821', 'Statement as at:,31 Oct 2026', '',
     'Transaction Date,Reference,Debit Amount,Credit Amount,Transaction Ref1,Transaction Ref2,Transaction Ref3',
-    '10 Oct 2026,ICT,"1,500.00",,FUNDS TRANSFER TO UOB A/C,,', '12 Oct 2026,POS,8.50,,SAMPLE BAKERY,,'].join('\r\n')
+    '10 Oct 2026,ICT,"1,500.00",,FUNDS TRANSFER IBANKING,,', '12 Oct 2026,POS,8.50,,SAMPLE BAKERY,,'].join('\r\n')
   : ['United Overseas Bank Limited', 'Account Number:,123-456-789-0', 'Statement Period:,01 Oct 2026 To 31 Oct 2026', '',
     'Transaction Date,Transaction Description,Withdrawal,Deposit,Available Balance',
     '13 Oct 2026,SAMPLE CAFE,4.20,,"5,795.80"', '11 Oct 2026,FUNDS TRANSFER FROM DBS,,"1,500.00","5,800.00"'].join('\r\n'));

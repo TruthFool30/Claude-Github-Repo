@@ -117,7 +117,7 @@ server tests, and Wall activity entries for meaningful actions.
     | EMPTY | TOO_LARGE` (timeouts/zip bombs/out of memory → `TOO_LARGE`).
   - Masking (imports, manual transactions on POST/PATCH, bill names): NFKC, format characters (zero-width
     space, soft hyphen) dropped, every Unicode digit as 0–9, whitespace collapsed; NRIC/FIN (`S1234567A`,
-    `s 1234567 a`, `S1234567`) → `•••••••••`; ≥ 8 digits with up to 3 separator characters (space . , - / _ *
+    `s 1234567 a`, `S1234567`) → `•••••••••`; ≥ 8 digits with up to 3 separator characters (space . , ; - / _ *
     dashes) between digits → `••` + last 4 (a trailing `.00` is not part of the number). Inside such a run,
     space-separated amounts (`1,234.56`, `12.30`) and dates (`01/11/2026`, `2026-11-01`) are kept unless they
     follow ≥ 4 digits of the number (`4111 1111 1111 1111.00` → `••1111`). The holder's name — from a "Name:"
@@ -142,15 +142,20 @@ server tests, and Wall activity entries for meaningful actions.
     rows (e.g. a bill marked paid by hand): same kind + amount within ±4 days and the same merchant (or
     the bill the row pays; keys match when equal, sharing a first word, or one contained in the other),
     each manual row absorbing one line — among rows the importer can see; within one file, an identical
-    line unless the running balances differ.
+    line unless the running balances differ. Matching a manual entry needs the exact amount; hint the
+    client can show: "Bank lines match your own entries only when the amount is exactly the same (dates
+    may differ by a few days)."
   - Transfers: rows have `transfer` (preview + commit rows + POST/PATCH /transactions, boolean; txOut
     `transfer`). Pre-flagged for "TO/FROM OWN …", "OWN ACCOUNT" lines and for the opposite amount in another of
     the importer's imported accounts within ±3 days when either side has a transfer-like word (TRANSFER, TRF,
-    FAST, PAYNOW, IBG, GIRO … TO/FROM OWN, OWN ACCOUNT, TO/FROM A/C). Such preview rows carry `pair:
+    FAST, PAYNOW, IBG, GIRO … TO/FROM OWN, OWN ACCOUNT, TO/FROM A/C) — the closest date first, then a row
+    naming this statement's bank, then one that looks like a transfer. A line naming another of the banks
+    ("TO UOB A/C", "FROM DBS", "TO POSB A/C"; DBS and POSB count as one bank) is pre-flagged as a transfer
+    even before the other half is imported (the person can untick it). Such preview rows carry `pair:
     { account_label, date, amount, description }` — the existing row that is ALSO marked a transfer on commit;
     `amount` is that row's signed amount (income positive, expense negative). Commit rows accept `pair: false`
     to leave it alone; the import that flagged it is remembered (`transfer_by_import`) and undo clears it.
-    Fixtures: `dbs-pair.csv` (DBS ••4821, −1,500.00 "FUNDS TRANSFER TO UOB A/C" on 10 Oct) then
+    Fixtures: `dbs-pair.csv` (DBS ••4821, −1,500.00 "FUNDS TRANSFER IBANKING" on 10 Oct) then
     `uob-pair.csv` (UOB ••7890, +1,500.00 "FUNDS TRANSFER FROM DBS" on 11 Oct). Transfers stay listed but count in
     no income/spending total (summary, charts, category totals/limits, dashboard, insights, import totals,
     preview summary) and aren't bill/recurring candidates.
@@ -184,8 +189,14 @@ server tests, and Wall activity entries for meaningful actions.
     and bill reminders leave the name out. Budget turns on `PRAGMA secure_delete` (connection-wide) and
     truncates the WAL after member removal, purges and the legacy sealing.
   - The parser child runs under Node's permission model: `--permission`, read access only to
-    `server/src/modules/budget`, `server/package.json` and `pdfjs-dist`, `--allow-worker` for its one parsing
-    thread; no writes, child processes or addons.
+    `server/src/modules/budget`, `server/package.json` and `pdfjs-dist` (both the path Node finds and its real
+    path, plus any symlink on the way, e.g. a symlinked `node_modules`), `--allow-worker` for its one parsing
+    thread; no writes, child processes or addons. At startup the server opens a tiny built-in PDF through it
+    once and logs a warning when PDF import is unavailable (CSV/Excel still work).
+  - Live bill events (`bill.created/updated/paid`) send the payment's `transaction_id`, `paid_amount` and
+    `paid_date` only to members who can see that transaction; other members who see the bill get them as null.
+    Making a row adults-only/private also truncates the WAL, and links the audience rule rejects are removed
+    at startup.
   - Categories: learned per family (`budget_merchant_rules`, merchant key sealed) beat built-in Singapore
     rules mapped onto existing categories by name (NTUC/FairPrice/Cold Storage/Sheng Siong/Giant →
     Groceries; Grab/Gojek/ComfortDelGro/SimplyGo/TransitLink/EZ-Link/BUS/MRT/fuel → Transport; Singtel/
@@ -219,8 +230,8 @@ server tests, and Wall activity entries for meaningful actions.
   next month), `overdue` = `[{id, name, emoji, target_date, left}]` for those whose target date has passed,
   status `on_track | short | no_data`, `shortfall`, `suggestions` = alternatives, best first, each a complete
   sentence (push the biggest goal's date — closes the gap; or trim one non-essential category by ≤ 25%,
-  worded like spikes: "Dining: $344.90 so far — usually $213.28 by now (+62%). Spending $X less on Dining each
-  month would …" — never a percentage against a full month),
+  as one sentence: "Spending $X less on Dining each month would close the gap / leave you $Y a month short."
+  (how this month compares is in categories/spikes),
   `remaining_gap` = what's still short after the best one (0 when on track).
 
 ## locator

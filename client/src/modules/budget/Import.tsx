@@ -18,6 +18,9 @@ import {
 import { Amount, MoneyInput, merchantCase } from './shared';
 import mod from './index';
 
+/** A sign only for non-zero amounts, so an empty total reads "$0.00", not "−$0.00". */
+const sgn = (sign: string, v: number) => (v ? sign : '');
+
 const MAX_BYTES = 10 * 1024 * 1024; // CONTRACT: the preview endpoint's own 10 MB limit
 const ACCEPT = '.pdf,.csv,.xlsx,.xls';
 const PAGE = 60; // review rows rendered per "Show more"
@@ -42,6 +45,7 @@ export default function ImportPage() {
   const [bills, setBills] = useState<Record<string, BillDraft>>({});
   const [visibility, setVisibility] = useState<'adults' | 'private'>('adults');
   const [result, setResult] = useState<CommitResult | null>(null);
+  const [doneTransfers, setDoneTransfers] = useState<Pick<Totals, 'transferIn' | 'transferOut'>>({ transferIn: 0, transferOut: 0 });
   const [committing, setCommitting] = useState(false);
   const initialChoices = useRef<Record<string, Choice>>({});
   const confirm = useConfirm();
@@ -101,6 +105,7 @@ export default function ImportPage() {
     setCommitting(true);
     try {
       const res = await api.post<CommitResult>(`/budget/imports/${encodeURIComponent(preview.token)}/commit`, body);
+      setDoneTransfers(totalsOf(preview.rows.filter((r) => choices[r.row_id]?.include), choices));
       setResult(res);
       void invalidate();
       go('done');
@@ -161,7 +166,7 @@ export default function ImportPage() {
           </div>
         </Card>
       )}
-      {step === 'done' && result && <DoneStep result={result} onAgain={reset} />}
+      {step === 'done' && result && <DoneStep result={result} transfers={doneTransfers} onAgain={reset} />}
     </div>
   );
 }
@@ -417,7 +422,7 @@ function ReviewStep({
 
   return (
     <div className="flex flex-col gap-4">
-      <StatementHeader preview={preview} />
+      <StatementHeader preview={preview} choices={choices} />
 
       <div className="-mx-1 overflow-x-auto px-1 pb-0.5 scrollbar-none">
         <SegmentedControl<Filter>
@@ -488,7 +493,7 @@ function ReviewStep({
       <StickyBar>
         <div className="min-w-0 flex-1 text-[13px]">
           <div className="font-semibold text-fg">{sel.count} of {plural(rows.length, 'transaction')} selected</div>
-          <div className="truncate text-muted tabular"><span className="text-success-soft-fg">+{fmt(sel.income)}</span> · −{fmt(sel.spending)}</div>
+          <div className="truncate text-muted tabular"><span className="text-success-soft-fg">{sgn('+', sel.income)}{fmt(sel.income)}</span> · {sgn('−', sel.spending)}{fmt(sel.spending)}</div>
         </div>
         <Button variant="ghost" icon={ArrowLeft} onClick={onBack} aria-label="Start over"><span className="hidden sm:inline">Start over</span></Button>
         <Button iconRight={ArrowRight} onClick={onNext} disabled={!sel.count}>Continue</Button>
@@ -504,8 +509,8 @@ const ReviewRow = memo(function ReviewRow({
   onCategory: (r: PreviewRow, id: number | null) => void; onToggle: (r: PreviewRow, on: boolean) => void;
   onTransfer: (r: PreviewRow, on: boolean) => void; onPair: (r: PreviewRow, on: boolean) => void;
 }) {
-  // The paired row moves the other way: money out here is money in there.
-  const pairText = r.pair && `${r.pair.account_label} ${r.kind === 'expense' ? '+' : '−'}${fmt(Math.abs(r.pair.amount))} on ${fmtDate(r.pair.date, 'd MMM')}`;
+  // pair.amount is signed from the other account's side (−1,500 = money out of it).
+  const pairText = r.pair && `${r.pair.account_label} ${r.pair.amount < 0 ? '−' : '+'}${fmt(Math.abs(r.pair.amount))} on ${fmtDate(r.pair.date, 'd MMM')}`;
   const menu = (
     <Menu
       label={`More for ${r.description}`}
@@ -593,8 +598,10 @@ const ReviewRow = memo(function ReviewRow({
   );
 });
 
-function StatementHeader({ preview: p }: { preview: ImportPreview }) {
+function StatementHeader({ preview: p, choices }: { preview: ImportPreview; choices: Record<string, Choice> }) {
   const { fmt, currency } = useMoney();
+  // Same rows as the server's summary (duplicates aside), but following the transfer flags as they're edited.
+  const t = totalsOf(p.rows.filter((r) => !r.duplicate), choices);
   // ponytail: no conversion — amounts are imported as numbers in the family's currency.
   const warnings = currency !== p.currency
     ? [`This statement is in ${p.currency} but your family budget uses ${currency}. Amounts are imported as they are, without conversion.`, ...p.warnings]
@@ -612,13 +619,16 @@ function StatementHeader({ preview: p }: { preview: ImportPreview }) {
       <dl className="grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
         <Fact label="Opening balance" value={p.opening_balance == null ? '—' : fmt(p.opening_balance)} />
         <Fact label="Closing balance" value={p.closing_balance == null ? '—' : fmt(p.closing_balance)} />
-        <Fact label="Money in" value={<span className="text-success-soft-fg">+{fmt(p.summary.income)}</span>} />
-        <Fact label="Money out" value={`−${fmt(p.summary.spending)}`} />
+        <Fact label="Money in" value={<span className="text-success-soft-fg">{sgn('+', t.income)}{fmt(t.income)}</span>} note={t.transferIn > 0 ? `+${fmt(t.transferIn)} in transfers not counted` : undefined} />
+        <Fact label="Money out" value={`${sgn('−', t.spending)}${fmt(t.spending)}`} note={t.transferOut > 0 ? `−${fmt(t.transferOut)} in transfers not counted` : undefined} />
       </dl>
       <p className="text-[13px] text-muted">
         {plural(p.summary.count, 'transaction')}
         {p.summary.duplicates > 0 && ` · ${p.summary.duplicates} already in Hearth (unticked)`}
       </p>
+      {p.summary.duplicates > 0 && (
+        <p className="-mt-2 text-xs text-subtle">Lines match entries you added yourself only when the amount is the same.</p>
+      )}
       {warnings.length > 0 && (
         <ul className="flex flex-col gap-1.5">
           {warnings.map((w, i) => (
@@ -632,11 +642,12 @@ function StatementHeader({ preview: p }: { preview: ImportPreview }) {
   );
 }
 
-function Fact({ label, value }: { label: string; value: React.ReactNode }) {
+function Fact({ label, value, note }: { label: string; value: React.ReactNode; note?: string }) {
   return (
     <div className="min-w-0 rounded-xl bg-surface-2/70 px-3 py-2">
       <dt className="text-xs text-muted">{label}</dt>
       <dd className="truncate font-semibold text-fg tabular">{value}</dd>
+      {note && <dd className="text-[11px] leading-tight text-muted">({note})</dd>}
     </div>
   );
 }
@@ -724,14 +735,39 @@ function RecurringStep({
   );
 }
 
+/** Money in/out of the given rows, with transfers between own accounts kept apart (they aren't counted). */
+function totalsOf(rows: PreviewRow[], choices: Record<string, Choice>) {
+  const t = { income: 0, spending: 0, transferIn: 0, transferOut: 0 };
+  for (const r of rows) {
+    const income = r.kind === 'income';
+    if (choices[r.row_id]?.transfer) income ? (t.transferIn += r.amount) : (t.transferOut += r.amount);
+    else income ? (t.income += r.amount) : (t.spending += r.amount);
+  }
+  return t;
+}
+type Totals = ReturnType<typeof totalsOf>;
+
+/** "+$1,500.00 / −$200.00 in transfers not counted" (null when there are none). */
+function transferNote(t: Pick<Totals, 'transferIn' | 'transferOut'>, fmt: (n: number) => string) {
+  const parts = [t.transferIn > 0 && `+${fmt(t.transferIn)}`, t.transferOut > 0 && `−${fmt(t.transferOut)}`].filter(Boolean);
+  return parts.length ? `${parts.join(' / ')} in transfers not counted` : null;
+}
+
 const ordinal = (n: number) => `${n}${n % 10 === 1 && n !== 11 ? 'st' : n % 10 === 2 && n !== 12 ? 'nd' : n % 10 === 3 && n !== 13 ? 'rd' : 'th'}`;
 
 function ImportSummary({ preview, choices, bills }: { preview: ImportPreview; choices: Record<string, Choice>; bills: number }) {
+  const { fmt } = useMoney();
   const n = preview.rows.filter((r) => choices[r.row_id]?.include).length;
+  const t = totalsOf(preview.rows.filter((r) => choices[r.row_id]?.include), choices);
+  const note = transferNote(t, fmt);
   const uncat = preview.rows.filter((r) => choices[r.row_id]?.include && choices[r.row_id]?.category_id == null && !choices[r.row_id]?.transfer).length;
   return (
     <ul className="flex flex-col gap-1 rounded-2xl bg-surface-2/70 px-4 py-3 text-sm text-fg">
       <li><b>{plural(n, 'transaction')}</b> from {preview.account?.label ?? BANK_LABEL[preview.bank]}</li>
+      <li className="tabular">
+        Money in <span className="font-semibold text-success-soft-fg">{sgn('+', t.income)}{fmt(t.income)}</span> · Money out <span className="font-semibold">{sgn('−', t.spending)}{fmt(t.spending)}</span>
+        {note && <span className="text-muted"> ({note})</span>}
+      </li>
       {preview.rows.some((r) => choices[r.row_id]?.include && choices[r.row_id]?.transfer) && <li className="text-muted">{preview.rows.filter((r) => choices[r.row_id]?.include && choices[r.row_id]?.transfer).length} marked as transfers between your accounts — not counted as income or spending</li>}
       {uncat > 0 && <li className="text-muted">{uncat} without a category — you can sort them later</li>}
       {bills > 0 && <li>{plural(bills, 'monthly bill')} to create</li>}
@@ -741,7 +777,9 @@ function ImportSummary({ preview, choices, bills }: { preview: ImportPreview; ch
 
 // ---- done -------------------------------------------------------------------------------------
 
-function DoneStep({ result, onAgain }: { result: CommitResult; onAgain: () => void }) {
+function DoneStep({ result, transfers, onAgain }: { result: CommitResult; transfers: Pick<Totals, 'transferIn' | 'transferOut'>; onAgain: () => void }) {
+  const { fmt } = useMoney();
+  const note = transferNote(transfers, fmt);
   return (
     <Card>
       <EmptyState
@@ -756,6 +794,10 @@ function DoneStep({ result, onAgain }: { result: CommitResult; onAgain: () => vo
               result.bills_created ? `${plural(result.bills_created, 'monthly bill')} created` : null,
               `visible to ${result.import.visibility === 'private' ? 'only you' : 'adults only'}`,
             ].filter(Boolean).join(' · ')}
+            <span className="mt-1 block tabular">
+              Money in <span className="font-semibold text-success-soft-fg">{sgn('+', result.import.total_income)}{fmt(result.import.total_income)}</span> · Money out <span className="font-semibold text-fg">{sgn('−', result.import.total_spending)}{fmt(result.import.total_spending)}</span>
+              {note && <> ({note})</>}
+            </span>
           </span>
         }
         action={
@@ -827,7 +869,7 @@ function HistoryRow({ i }: { i: ImportOut }) {
           {fmtDate(i.period_from, 'd MMM')} – {fmtDate(i.period_to, 'd MMM yyyy')} · {plural(i.row_count, 'transaction')}
         </div>
         <div className="text-xs text-subtle tabular">
-          <span className="whitespace-nowrap text-success-soft-fg">+{fmt(i.total_income)}</span> · <span className="whitespace-nowrap">−{fmt(i.total_spending)}</span> · {by ? `${firstName(by.name)}, ` : ''}{fmtRelative(i.created_at)}
+          <span className="whitespace-nowrap text-success-soft-fg">{sgn('+', i.total_income)}{fmt(i.total_income)}</span> · <span className="whitespace-nowrap">{sgn('−', i.total_spending)}{fmt(i.total_spending)}</span> · {by ? `${firstName(by.name)}, ` : ''}{fmtRelative(i.created_at)}
         </div>
       </div>
       <Button size="sm" variant="ghost" icon={Undo2} loading={busy} onClick={undo} className="ml-auto text-danger hover:bg-danger-soft hover:text-danger">Undo import</Button>

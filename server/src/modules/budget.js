@@ -13,7 +13,7 @@ import {
   recordBillPayment, requestToday, toCents, txOut, upgradeMeta,
 } from './budget/lib.js';
 import {
-  ImportError, MAX_FILE_BYTES, MAX_ROWS, MESSAGES, detectRecurring, maskDigits, merchantKey, normDesc, parseInWorker, prettyMerchant, ruleCategory,
+  ImportError, MAX_FILE_BYTES, MAX_ROWS, MESSAGES, detectRecurring, pdfImportSelfTest, maskDigits, merchantKey, normDesc, parseInWorker, prettyMerchant, ruleCategory,
 } from './budget/import.js';
 
 export { seed } from './budget/seed.js';
@@ -257,6 +257,14 @@ export function sealLegacyBudget(ctx) {
       const fields = ['description', 'notes'].filter((k) => b[k] != null && !box.isSealed(b[k]));
       if (!fields.length) continue;
       db.prepare(`UPDATE budget_recurring SET ${fields.map((k) => `${k} = ?`).join(', ')} WHERE id = ?`).run(...fields.map((k) => box.seal(b[k])), b.id);
+      n++;
+    }
+    // Links from before the audience rule (canLinkPayment): unlink them and drop the paid month.
+    for (const l of db.prepare(`SELECT t.id, t.visibility, t.created_by, b.id AS bill_id, b.visibility AS b_visibility, b.created_by AS b_created_by
+        FROM budget_transactions t JOIN budget_recurring b ON b.id = t.recurring_id`).all()) {
+      if (canLinkPayment(l, { visibility: l.b_visibility, created_by: l.b_created_by })) continue;
+      db.prepare('UPDATE budget_transactions SET recurring_id = NULL WHERE id = ?').run(l.id);
+      db.prepare('DELETE FROM budget_recurring_runs WHERE recurring_id = ? AND transaction_id = ?').run(l.bill_id, l.id);
       n++;
     }
   });
@@ -809,6 +817,8 @@ export function sweep(ctx, todayOverride = null) {
 
 // --------------------------------------------------------------------------------------------
 
+let pdfChecked = false;
+
 /** @param {import('./index.js').ModuleContext} ctx */
 export function router(ctx) {
   const { db } = ctx;
@@ -819,6 +829,13 @@ export function router(ctx) {
   // ponytail: connection-wide, so every module's deletes pay the (small) cost.
   db.exec('PRAGMA secure_delete = ON');
   sealLegacyBudget(ctx);
+  // Once per process: say clearly when PDF statements can't be read here (CSV/Excel still work).
+  if (!pdfChecked) {
+    pdfChecked = true;
+    pdfImportSelfTest().then((ok) => {
+      if (!ok) console.warn('[budget] PDF statement import is unavailable on this server: the PDF parser could not start (check that pdfjs-dist is installed and readable). CSV and Excel imports still work.');
+    });
+  }
 
   // Background housekeeping (unref'd so it never keeps a process alive).
   const runSweep = () => {
@@ -853,6 +870,22 @@ export function router(ctx) {
   /** [description, notes] as stored: sealed when `seal`, else plain. */
   const sealText = (t, seal) => [t.description ?? null, t.notes ?? null].map((v) => (seal ? ctx.box.seal(v) : v));
   /** A transaction for `req`: sealed text opened, and the bill it pays only when they can see that bill. */
+  /**
+   * Live event about a bill for its month: everyone who can see the bill hears about it, but the
+   * payment's details (transaction_id, paid_amount, paid_date — computed for the actor) only go to
+   * those who can also see that transaction; the others get them as null.
+   */
+  const emitBill = (req, type, bill) => {
+    const fam = req.family.id;
+    const everyone = allIds(db, fam);
+    const billAud = audienceOf(db, fam, bill.visibility ?? 'family', bill.created_by) ?? everyone;
+    const tx = bill.transaction_id && db.prepare('SELECT visibility, created_by FROM budget_transactions WHERE id = ?').get(bill.transaction_id);
+    const txAud = tx ? audienceOf(db, fam, tx.visibility, tx.created_by) ?? everyone : billAud;
+    const full = billAud.filter((u) => txAud.includes(u));
+    const rest = billAud.filter((u) => !txAud.includes(u));
+    if (full.length) ctx.sendToUsers(full, `budget.${type}`, bill, fam);
+    if (rest.length) ctx.sendToUsers(rest, `budget.${type}`, { ...bill, transaction_id: null, paid_amount: null, paid_date: null }, fam);
+  };
   const txJson = (row, req) => {
     const t = openTx(ctx.box, row);
     const out = { ...txOut(t), merchant: t.import_id ? prettyMerchant(merchantKey(t.description)) || null : null };
@@ -1094,7 +1127,8 @@ export function router(ctx) {
     // Text is stored sealed or plain to match the row's (new) visibility.
     const plain = openTx(ctx.box, existing);
     const text = { description: f.description !== undefined ? f.description : plain.description, notes: f.notes !== undefined ? f.notes : plain.notes };
-    [f.description, f.notes] = sealText(text, sealsTx({ import_id: existing.import_id, visibility: f.visibility ?? existing.visibility }));
+    const sealNow = sealsTx({ import_id: existing.import_id, visibility: f.visibility ?? existing.visibility });
+    [f.description, f.notes] = sealText(text, sealNow);
     updateRow(db, 'budget_transactions', existing.id, f, `updated_at = ${ISO_NOW}`);
     const row = txJson(loadTx(db, req, existing.id), req);
     if (f.visibility && f.visibility !== existing.visibility) {
@@ -1112,6 +1146,7 @@ export function router(ctx) {
         if (acts.length) ctx.sendToUsers(gone, 'activity.removed', { ids: acts }, req.family.id);
       }
     }
+    if (sealNow && !sealsTx(existing)) scrubFreedPages(db); // the plaintext it replaced (row + Wall line) leaves the WAL too
     emitRow(req, 'transaction.updated', row);
     checkOverBudget(ctx, req, next.category_id, month, before);
     res.json(row);
@@ -1192,7 +1227,7 @@ export function router(ctx) {
     const today = requestToday(ctx, req);
     const created = generateDue(db, req.family.id, today, ctx.time.tz(req));
     const bill = billForMonth(req, id, monthOf(today), today);
-    emit(req, 'bill.created', bill);
+    emitBill(req, 'bill.created', bill);
     if (created.length) emit(req, 'transaction.created', { ids: created, auto: true });
     ctx.logActivity({
       familyId: req.family.id, userId: req.user.id, module: 'budget', verb: 'bill', entityId: id,
@@ -1211,7 +1246,7 @@ export function router(ctx) {
     const today = requestToday(ctx, req);
     generateDue(db, req.family.id, today, ctx.time.tz(req));
     const bill = billForMonth(req, existing.id, parseMonth(req.query.month ?? req.body?.month, monthOf(today)), today);
-    emitRow(req, 'bill.updated', bill);
+    emitBill(req, 'bill.updated', bill);
     res.json(bill);
   });
 
@@ -1248,7 +1283,7 @@ export function router(ctx) {
       return recordBillPayment(db, bill, month, { amountCents, date, userId: req.user.id, paidBy, description: sealsBill(bill) ? ctx.box.seal(bill.description) : bill.description });
     });
     const out = billForMonth(req, bill.id, month);
-    emitRow(req, 'bill.paid', out);
+    emitBill(req, 'bill.paid', out);
     emitRow(req, 'transaction.created', txJson(loadTx(db, req, txId), req));
     ctx.logActivity({
       familyId: req.family.id, userId: req.user.id, module: 'budget', verb: 'paid', entityId: bill.id,
@@ -1283,7 +1318,7 @@ export function router(ctx) {
       ).run(bill.id, req.family.id, month);
     });
     const out = billForMonth(req, bill.id, month);
-    emitRow(req, 'bill.updated', out);
+    emitBill(req, 'bill.updated', out);
     emitRow(req, 'transaction.deleted', { recurring_id: bill.id }, bill);
     res.json(out);
   });
@@ -1306,7 +1341,7 @@ export function router(ctx) {
       }
     });
     const out = billForMonth(req, bill.id, month);
-    emitRow(req, 'bill.updated', out);
+    emitBill(req, 'bill.updated', out);
     emitRow(req, 'transaction.deleted', { recurring_id: bill.id }, bill);
     res.json(out);
   });
@@ -1618,6 +1653,15 @@ export function router(ctx) {
     return (A[0] === B[0] && A[0].length >= 3) || A.every((w) => B.includes(w)) || B.every((w) => A.includes(w));
   };
   const TRANSFER_WORD = /\b(?:TRANSFER|TRF|FAST|PAYNOW|IBG)\b|\bGIRO\b.*\b(?:TO|FROM) OWN\b|\bOWN ACCOUNT\b|\b(?:TO|FROM) A\/C\b/i;
+  // DBS and POSB are one bank.
+  const bankRe = (b) => (b === 'uob' ? /\bUOB\b|UNITED OVERSEAS/i : /\b(?:DBS|POSB)\b/i);
+  /** "TO UOB A/C", "FROM DBS", "TO POSB A/C" in another bank's statement: most likely the family's own money moving. */
+  const otherBankAccount = (desc, bank) => {
+    const m = /\b(?:TO|FROM)\s+(?:OWN\s+)?(UOB|DBS|POSB)\b|\b(UOB|DBS|POSB)\s+A\/C\b/i.exec(desc ?? '');
+    if (!m) return false;
+    const named = (m[1] ?? m[2]).toUpperCase();
+    return !bank || !bankRe(bank).test(named);
+  };
   const OWN_TRANSFER = /\b(?:(?:TO|FROM) OWN|OWN (?:A\/C|ACCOUNT|ACCT|DBS|POSB|UOB)|BETWEEN (?:MY|OWN) ACCOUNTS)\b/i;
 
   /**
@@ -1629,7 +1673,7 @@ export function router(ctx) {
    * ("TO OWN ACCOUNT", or the opposite amount in another imported account within 3 days).
    * Only rows the importer can see count.
    */
-  const markDuplicates = (req, rows, last4) => {
+  const markDuplicates = (req, rows, last4, bank = null) => {
     const dates = rows.map((r) => r.date).sort();
     const known = new Set();
     const manual = [];
@@ -1655,13 +1699,15 @@ export function router(ctx) {
       r.duplicate = dup;
       // The other side of a transfer: opposite amount in another of the importer's accounts within 3 days,
       // with a transfer-like word on at least one side.
-      // Best candidate: one that itself looks like a transfer, then the closest date.
+      // Best candidate: the closest date, then one naming this statement's bank, then one that looks like a transfer.
+      const names = (t) => (bank && bankRe(bank).test(t.description) ? 1 : 0);
       const pair = others.filter((t) => t.kind !== r.kind && !t.transfer && t.amount_cents === r.amount_cents && dayGap(t.date, r.date) <= 3
         && (TRANSFER_WORD.test(r.description) || TRANSFER_WORD.test(t.description)))
-        .sort((a, b) => TRANSFER_WORD.test(b.description) - TRANSFER_WORD.test(a.description) || dayGap(a.date, r.date) - dayGap(b.date, r.date))[0];
+        .sort((a, b) => dayGap(a.date, r.date) - dayGap(b.date, r.date) || names(b) - names(a)
+          || TRANSFER_WORD.test(b.description) - TRANSFER_WORD.test(a.description))[0];
       r.transfer_pair = pair?.id ?? null;
       r.pair = pair ? { account_label: pair.account_label, date: pair.date, amount: fromCents(pair.kind === 'income' ? pair.amount_cents : -pair.amount_cents), description: pair.description } : null;
-      if (r.transfer === undefined) r.transfer = OWN_TRANSFER.test(r.description) || !!pair;
+      if (r.transfer === undefined) r.transfer = OWN_TRANSFER.test(r.description) || otherBankAccount(r.description, bank) || !!pair;
     }
   };
 
@@ -1751,7 +1797,7 @@ export function router(ctx) {
           category_id: learned ? learned.category_id : rule, category_source: learned ? 'learned' : rule ? 'rule' : 'none', duplicate: false, recurring_group: null,
         };
       });
-      markDuplicates(req, rows, parsed.last4);
+      markDuplicates(req, rows, parsed.last4, parsed.bank);
       const recurring = recurringFor(req, rows, parsed.period);
       const p = savePreview(req, {
         bank: parsed.bank, format: parsed.format, last4: parsed.last4, label: `${BANK_NAMES[parsed.bank]}${parsed.last4 ? ` ••${parsed.last4}` : ''}`,
@@ -1788,7 +1834,7 @@ export function router(ctx) {
     };
     // Re-check duplicates now: another import may have landed since the preview.
     const rows = p.rows.map((x) => ({ ...x }));
-    markDuplicates(req, rows, p.last4);
+    markDuplicates(req, rows, p.last4, p.bank);
     const catIds = new Set(db.prepare('SELECT id FROM budget_categories WHERE family_id = ?').all(fam).map((c) => c.id));
     for (const x of rows) if (x.category_id && !catIds.has(x.category_id)) x.category_id = null; // deleted since the preview
     const create = [];
@@ -2057,11 +2103,10 @@ export function router(ctx) {
         const cut = Math.min(shortfall, Math.round((c.a * 0.25) / 100) * 100);
         if (cut < 1000) continue;
         const gap = shortfall - cut;
-        // Same comparison as spikes: this month so far against what's usual by today.
-        const vs = c.td ? ` (${c.change_pct >= 0 ? '+' : ''}${c.change_pct}%)` : '';
+        // Only the saving (how this month compares with usual is in Categories / spikes).
         options.push({
           gap,
-          text: `${c.name}: ${fmt(c.t)} so far — usually ${fmt(c.td)} by now${vs}. Spending ${fmt(cut)} less on ${c.name} each month would ${gap > 0 ? `leave you ${fmt(gap)} a month short.` : 'close the gap.'}`,
+          text: `Spending ${fmt(cut)} less on ${c.name} each month would ${gap > 0 ? `leave you ${fmt(gap)} a month short.` : 'close the gap.'}`,
         });
       }
       options.sort((a, b) => a.gap - b.gap);

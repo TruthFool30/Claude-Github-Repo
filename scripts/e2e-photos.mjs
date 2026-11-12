@@ -138,7 +138,7 @@ try {
   for (const k of ['ArrowRight', 'ArrowLeft', 'ArrowRight', 'ArrowRight', 'ArrowLeft']) await a.keyboard.press(k);
   await a.getByRole('dialog', { name: /Photo 2 of 3/ }).waitFor();
   await a.waitForTimeout(400);
-  await a.getByRole('dialog', { name: /Photo 2 of 3/ }).waitFor({ timeout: 100 });
+  assert.ok(await a.getByRole('dialog', { name: /Photo 2 of 3/ }).isVisible(), 'still on photo 2 (no drift)');
   await a.keyboard.press('ArrowRight');
   await a.keyboard.press('ArrowLeft');
   await a.keyboard.press('ArrowLeft');

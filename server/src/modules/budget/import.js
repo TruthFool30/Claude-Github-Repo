@@ -17,6 +17,7 @@
 //                  statement with "Balance Brought/Carried Forward", UOB with "BALANCE B/F"), dates
 //                  "01 Nov" (year from "Period: … to …" / "as at …") or "01/11/2026".
 import { fork } from 'node:child_process';
+import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -63,8 +64,8 @@ const asciiDigit = (c) => {
 export const normText = (s) => String(s ?? '').normalize('NFKC').replace(/\p{Cf}/gu, '') // zero-width space, soft hyphen, …
   .replace(/(?![0-9])\p{Nd}/gu, asciiDigit).replace(/\s+/g, ' ').trim();
 
-// ≥ 8 digits with up to 3 separator characters (space . , - / _ * dashes) between any two of them.
-const LONG_NUMBER = /\d(?:[\s.,\-/_*‐-―−]{0,3}\d){7,}/g;
+// ≥ 8 digits with up to 3 separator characters (space . , ; - / _ * dashes) between any two of them.
+const LONG_NUMBER = /\d(?:[\s.,;\-/_*‐-―−]{0,3}\d){7,}/g;
 // Singapore NRIC/FIN, spaces and check letter optional ("S1234567A", "s 1234567 a", "S1234567").
 const NRIC = /\b[STFGM]\s?\d{7}(?:\s?[A-Z])?\b/gi;
 // Pieces of such a run kept as they are: amounts ("1,234.56", "12.30") and dates.
@@ -765,8 +766,37 @@ const CHILD_RSS_LIMIT = 320 * 1024 * 1024;
 export function parserFlags() {
   const require = createRequire(import.meta.url);
   const here = path.dirname(fileURLToPath(import.meta.url));
-  const reads = [here, path.resolve(here, '../../../package.json'), path.dirname(require.resolve('pdfjs-dist/package.json'))];
+  // pdf.js as Node finds it (node_modules may be a symlink: both that path and its target are needed).
+  let linked = null;
+  for (let dir = here; !linked && dir !== path.dirname(dir); dir = path.dirname(dir)) {
+    if (fs.existsSync(path.join(dir, 'node_modules', 'pdfjs-dist', 'package.json'))) linked = path.join(dir, 'node_modules', 'pdfjs-dist');
+  }
+  const real = (p) => { try { return fs.realpathSync(p); } catch { return p; } };
+  // Node resolves modules with realpath, which looks at each symlink on the way: those need read access too.
+  // ponytail: a symlinked node_modules is then readable as a whole (it holds no secrets).
+  const links = [];
+  for (const p of [here, linked].filter(Boolean)) {
+    for (let q = p; q !== path.dirname(q); q = path.dirname(q)) {
+      try { if (fs.lstatSync(q).isSymbolicLink()) links.push(q); } catch { /* gone */ }
+    }
+  }
+  const paths = [here, path.resolve(here, '../../../package.json'), path.dirname(require.resolve('pdfjs-dist/package.json')), linked, ...links].filter(Boolean);
+  // Shorter paths first: Node 22 ignores an allowed folder listed after a path inside it.
+  const reads = [...new Set(paths.flatMap((p) => [p, real(p)]))].sort((a, b) => a.length - b.length);
   return ['--permission', ...reads.map((p) => `--allow-fs-read=${p}`), '--allow-worker', '--disable-warning=SecurityWarning'];
+}
+
+// The smallest PDF pdf.js will open (one empty page; it rebuilds the missing cross-reference table).
+const MINI_PDF = '%PDF-1.4\n1 0 obj <</Type /Catalog /Pages 2 0 R>> endobj\n2 0 obj <</Type /Pages /Kids [3 0 R] /Count 1>> endobj\n'
+  + '3 0 obj <</Type /Page /Parent 2 0 R /MediaBox [0 0 10 10]>> endobj\ntrailer <</Root 1 0 R>>\n%%EOF\n';
+let selfTest = null;
+/**
+ * Can this server read PDF statements? Opens a tiny built-in PDF through the real parser process
+ * (permission flags, worker thread, pdf.js) once per process; resolves true/false, never throws.
+ */
+export function pdfImportSelfTest() {
+  selfTest ??= parseInWorker(Buffer.from(MINI_PDF), { selfTest: true }).then((r) => r === 'ok', () => false);
+  return selfTest;
 }
 
 /**
@@ -776,7 +806,7 @@ export function parserFlags() {
  * the memory watch keeps ticking. At most 2 parses at a time, 4 waiting, and one per `owner` —
  * anything more is refused right away with code BUSY. The caller's buffer is zeroed.
  */
-export async function parseInWorker(buffer, { password = null, filename = '', owner = null } = {}) {
+export async function parseInWorker(buffer, { password = null, filename = '', owner = null, selfTest: test = false } = {}) {
   if ((owner != null && busy.has(owner)) || (running >= MAX_WORKERS && waiting.length >= MAX_QUEUE)) {
     buffer.fill(0);
     throw new ImportError('BUSY', MESSAGES.BUSY);
@@ -810,7 +840,7 @@ export async function parseInWorker(buffer, { password = null, filename = '', ow
       child.on('message', (m) => (m?.ok ? finish(resolve, m.result) : finish(reject, new ImportError(m?.code ?? 'UNSUPPORTED', m?.message ?? MESSAGES.UNSUPPORTED))));
       child.on('error', () => finish(reject, new ImportError('UNSUPPORTED', MESSAGES.UNSUPPORTED)));
       child.on('exit', (code) => finish(reject, code === 3 ? tooBig() : new ImportError('UNSUPPORTED', MESSAGES.UNSUPPORTED)));
-      child.send({ data, password, filename }, () => data.fill(0));
+      child.send({ data, password, filename, selfTest: test }, () => data.fill(0));
     });
   } finally {
     if (owner != null) busy.delete(owner);
@@ -823,10 +853,10 @@ export async function parseInWorker(buffer, { password = null, filename = '', ow
 
 // The parser process: watch our own memory, parse on a worker thread, answer once, exit.
 if (isMainThread && process.env[CHILD_FLAG] && process.send) {
-  process.once('message', ({ data, password, filename }) => {
+  process.once('message', ({ data, password, filename, selfTest: test }) => {
     setInterval(() => { if (process.memoryUsage.rss() > CHILD_RSS_LIMIT) process.exit(3); }, 10);
     const worker = new Worker(new URL(import.meta.url), {
-      workerData: { hearthStatement: true, data, password, filename },
+      workerData: { hearthStatement: true, data, password, filename, selfTest: test },
       resourceLimits: { maxOldGenerationSizeMb: 256, maxYoungGenerationSizeMb: 32, stackSizeMb: 4 },
     });
     worker.on('message', (m) => process.send(m, () => process.exit(0)));
@@ -835,7 +865,10 @@ if (isMainThread && process.env[CHILD_FLAG] && process.send) {
   });
 }
 
-if (!isMainThread && workerData?.hearthStatement) {
+if (!isMainThread && workerData?.hearthStatement && workerData.selfTest) {
+  pdfLines(Buffer.from(workerData.data.buffer, workerData.data.byteOffset, workerData.data.byteLength), null)
+    .then(() => parentPort.postMessage({ ok: true, result: 'ok' }), () => parentPort.postMessage({ ok: false, code: 'UNSUPPORTED', message: MESSAGES.PDF }));
+} else if (!isMainThread && workerData?.hearthStatement) {
   const { data, password, filename } = workerData;
   parseStatement(Buffer.from(data.buffer, data.byteOffset, data.byteLength), { password, filename }).then(
     (result) => parentPort.postMessage({ ok: true, result }),

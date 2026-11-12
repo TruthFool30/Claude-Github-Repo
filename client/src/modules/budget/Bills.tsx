@@ -85,6 +85,8 @@ export function BillRow({ b, month, compact }: { b: Bill; month: string; compact
   const [paying, setPaying] = useState(false);
   const st = STATUS[b.status] ?? STATUS.upcoming;
   const done = b.status === 'paid' || b.status === 'skipped';
+  const amountClass = cn(b.kind === 'income' ? 'text-success-soft-fg' : done ? 'text-muted' : 'text-fg', b.status === 'skipped' && 'line-through');
+  const amountText = `${b.kind === 'income' ? '+' : ''}${fmt(b.status === 'paid' && b.paid_amount != null ? b.paid_amount : b.amount)}`;
 
   const remove = async () => {
     if (!(await confirm({ title: `Delete ${b.description}?`, message: 'Future months stop being tracked. Past payments stay in your transactions.', confirmLabel: 'Delete bill', danger: true }))) return;
@@ -108,11 +110,14 @@ export function BillRow({ b, month, compact }: { b: Bill; month: string; compact
         )}
       </div>
       <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-1.5">
-          <span className={cn('truncate text-[15px] font-semibold', done ? 'text-muted' : 'text-fg')}>{b.description}</span>
-          {b.auto_create && <AutoBadge />}
+        <div className="flex items-start gap-1.5">
+          {/* Two lines on phones so names stay readable ("College fund transfer", not "Colle…"). */}
+          <span className={cn('min-w-0 break-words text-[15px] font-semibold leading-snug line-clamp-2', !compact && 'sm:line-clamp-1', done ? 'text-muted' : 'text-fg')}>{b.description}</span>
+          {b.auto_create && <span className="mt-0.5 shrink-0"><AutoBadge /></span>}
         </div>
         <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-muted">
+          {/* Phones: the amount moves under the name, next to the status. */}
+          <span className={cn('font-semibold tabular sm:hidden', amountClass)}>{amountText}</span>
           <Badge tone={st.tone} size="sm">{b.status === 'overdue' && <CircleAlert size={11} />}{st.label}</Badge>
           <span className="truncate">
             {b.status === 'paid' && b.paid_date
@@ -125,9 +130,7 @@ export function BillRow({ b, month, compact }: { b: Bill; month: string; compact
         </div>
       </div>
       <div className="flex shrink-0 items-center gap-1.5">
-        <span className={cn('text-[15px] font-semibold tabular', b.kind === 'income' ? 'text-success-soft-fg' : done ? 'text-muted' : 'text-fg', b.status === 'skipped' && 'line-through')}>
-          {b.kind === 'income' ? '+' : ''}{fmt(b.status === 'paid' && b.paid_amount != null ? b.paid_amount : b.amount)}
-        </span>
+        <span className={cn('hidden text-[15px] font-semibold tabular sm:inline', amountClass)}>{amountText}</span>
         {canManage && !done && (
           <Button size="sm" variant="soft" icon={Check} onClick={() => actions.pay(b)} aria-label={`Mark ${b.description} ${b.kind === 'income' ? 'received' : 'paid'}`} className={compact ? 'px-2' : 'max-sm:px-2'}>
             <span className={compact ? 'sr-only' : 'max-sm:sr-only'}>{b.kind === 'income' ? 'Mark received' : 'Mark paid'}</span>

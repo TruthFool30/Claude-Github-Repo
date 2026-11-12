@@ -12,6 +12,10 @@ const server = app.listen(config.port, () => {
   console.log(`Hearth listening on http://localhost:${config.port}`);
   console.log(`  db: ${config.dbPath}\n  uploads: ${config.uploadDir}`);
 });
+// Keep idle connections open longer than clients and reverse proxies do (Node's default is 5 s), so a
+// request sent on a just-closed keep-alive socket doesn't fail with ECONNRESET.
+server.keepAliveTimeout = 65_000;
+server.headersTimeout = 66_000;
 
 function shutdown() {
   app.locals.hub.close();

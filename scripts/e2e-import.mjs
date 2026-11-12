@@ -102,7 +102,7 @@ async function upload(page, f, { password, wrongFirst, tag } = {}) {
 }
 
 /** review → recurring → visibility → commit. Returns the import id. */
-async function finish(page, { visibility, tag, label }) {
+async function finish(page, { visibility, tag, label, note }) {
   await page.getByRole('button', { name: 'Continue' }).click();
   await page.getByText(/Step [34] of 4/).waitFor();
   if (await page.getByText('Step 3 of 4').count()) {
@@ -116,6 +116,7 @@ async function finish(page, { visibility, tag, label }) {
     await page.getByRole('button', { name: 'Continue' }).click();
   }
   await page.getByText('Step 4 of 4').waitFor();
+  if (note) await page.getByText(note).waitFor(); // step 4 summary
   assert.equal(await page.getByRole('radio', { name: /Adults only/ }).getAttribute('aria-checked'), 'true', 'adults default');
   assert.equal(await page.getByRole('radio', { name: /Everyone/ }).count(), 0, 'no Everyone option for imports');
   if (visibility === 'private') {
@@ -136,6 +137,7 @@ async function finish(page, { visibility, tag, label }) {
   assert.equal(body.import.visibility, visibility);
   await page.getByText(`Imported ${body.created} transaction`).waitFor();
   await page.getByText(visibility === 'private' ? 'visible to only you' : 'visible to adults only').waitFor();
+  if (note) await page.getByText(note).waitFor(); // success screen
   if (tag) await shot(page, `07-done-${tag}`);
   return body;
 }
@@ -304,6 +306,7 @@ try {
   const mobDark = await open('alex@hearth.test', { viewport: { width: 390, height: 844 }, theme: 'dark' });
   await upload(mobDark.page, file('uob.pdf', PDF));
   await mobDark.page.getByText(/17 already in Hearth/).waitFor();
+  await mobDark.page.getByText('Lines match entries you added yourself only when the amount is the same.').waitFor();
   await segment(mobDark.page, /Duplicates 17/).click();
   assert.equal(await mobDark.page.getByText('Already in Hearth · skipped').count(), 17);
   assert.equal(await mobDark.page.getByRole('checkbox', { name: /^Import / }).first().isChecked(), false, 'duplicates pre-excluded');
@@ -348,6 +351,7 @@ try {
     await p.getByText("Transfers between your own accounts aren't counted.").waitFor();
     await p.getByText('Last 3 months + this month so far').nth(1).waitFor(); // top merchants say they include this month
     await p.getByText(/•• ?(4821|1357|7890)/).first().waitFor(); // latest balances
+    await p.getByText('across 3 accounts').waitFor(); // balance headline = total of all accounts
     await noHorizontalScroll(p, `insights ${tag}`);
     await p.waitForFunction(() => document.querySelectorAll('.recharts-bar-rectangle path').length >= 4, null, { timeout: 10_000 });
     await shot(p, `10-insights-${tag}`);
@@ -360,26 +364,47 @@ try {
   await A.waitForURL('**/budget/insights?months=6');
   ok('insights render real averages, balances, partial month; 3/6/12 window');
 
-  // Round-3 server fields: assert when present, otherwise say what was skipped.
+  // ---- 6b. Round-3 numbers: "usually by now", family-local today, expected bills ---------
   {
     const ins = await alex.api('/budget/insights?months=3');
+    assert.match(ins.today, /^\d{4}-\d{2}-\d{2}$/, 'insights.today (family-local date)');
+    assert.ok(ins.categories.length && ins.categories.every((c) => typeof c.avg_to_date === 'number'), 'categories[].avg_to_date');
+    assert.ok(ins.spikes.every((x) => typeof x.usual_by_now === 'number'), 'spikes[].usual_by_now');
     await A.goto(`${BASE}/budget/insights`);
     await A.getByText('Can we afford our goals?').waitFor();
-    if (ins.spikes?.some((s) => s.usual_by_now !== undefined)) {
-      const s = ins.spikes.find((x) => x.usual_by_now !== undefined);
-      await A.getByText(new RegExp(`so far — usually .+ by now \\(\\+${Math.round(s.change_pct)}%\\)`)).first().waitFor();
-    } else console.log('    ⚠ skipped: no spikes[].usual_by_now from the server (spike wording not checked against real data)');
-    // A % is never printed next to the full-month average.
+    // Spike banner and category lines word the comparison against the figure the % came from.
+    for (const x of ins.spikes) {
+      await A.getByText(new RegExp(`so far — usually .+ by now \\(\\+${Math.round(x.change_pct)}%\\)`)).first().waitFor();
+    }
     assert.equal(await A.getByText(/% above your .* average/).count(), 0, 'no % next to a full-month average');
-    if (!('today' in ins)) console.log('    ⚠ skipped: server has no insights.today yet (browser date used for the early-month rule)');
-    const bills = await alex.api(`/budget/recurring?month=${new Date().toISOString().slice(0, 7)}`);
-    if (bills.some((b) => b.status === 'expected')) {
-      await A.goto(`${BASE}/budget/bills`);
-      await A.getByText('Expected', { exact: true }).first().waitFor();
-      await A.getByText(/Not due yet · around/).first().waitFor();
-      await shot(A, '16-bills-expected-desktop-light');
-    } else console.log("    ⚠ skipped: no bill with status 'expected' from the server");
+    const early = Number(ins.today.slice(8, 10)) < 5;
+    assert.equal(await A.getByText(/^usually .+ by now$/).count() > 0, !early, `"usually … by now" lines follow insights.today (${ins.today})`);
+    // insights.today — not the browser clock — drives the early-month rule: shift only the server's
+    // date (the browser stays on its own day) and the lines must follow it.
+    for (const day of ['02', '20']) {
+      await A.route('**/api/budget/insights*', async (route) => {
+        const res = await route.fetch();
+        const d = await res.json();
+        await route.fulfill({ response: res, body: JSON.stringify({ ...d, today: `${d.today.slice(0, 8)}${day}` }) });
+      });
+      await A.reload();
+      await A.getByText('Can we afford our goals?').waitFor();
+      await A.getByText(day === '02' ? /in a typical month$/ : /^usually .+ by now$/).first().waitFor();
+      assert.equal(await A.getByText(/^usually .+ by now$/).count() > 0, day !== '02', `today=…-${day} drives the early-month rule`);
+      await A.unroute('**/api/budget/insights*');
+    }
+    // Bills created from the imports are 'expected' for months no statement covers yet — never overdue.
+    const bills = await alex.api(`/budget/recurring?month=${ins.today.slice(0, 7)}`);
+    const expected = bills.filter((b) => b.status === 'expected');
+    assert.ok(expected.length > 0, "an imported bill has status 'expected'");
+    await A.goto(`${BASE}/budget/bills`);
+    const row = A.locator('li', { hasText: expected[0].description }).first();
+    await row.getByText('Expected', { exact: true }).waitFor();
+    await row.getByText(/Not due yet · around/).waitFor();
+    assert.equal(await row.getByText('Overdue').count(), 0);
+    await shot(A, '16-bills-expected-desktop-light');
   }
+  ok('insights: spike/category wording vs "usually by now", insights.today drives the early-month rule, imported bills "Expected"');
 
   // ---- 7. undo, then the same file is no longer a duplicate ---------------------------------
   await A.goto(`${BASE}/budget/import`);
@@ -397,6 +422,69 @@ try {
   assert.equal(await A.getByText('Already in Hearth · skipped').count(), 0, 'undone rows are not duplicates');
   await A.getByText('17 of 17 transactions selected').waitFor();
   ok('undo removes the import and its rows; re-uploading it is no longer flagged as duplicate');
+
+  // ---- 7b. transfer pairing across two accounts --------------------------------------------
+  {
+    const dbsTx = async (importId) => (await alex.api(`/budget/transactions?import_id=${importId}`)).find((t) => /FUNDS TRANSFER/.test(t.description));
+    // DBS side first: "FUNDS TRANSFER TO UOB A/C" −1,500 on 10 Oct. Whether the server pre-flags it as a
+    // transfer on its own wording is the server's call (round 4 does, earlier rounds didn't): the review
+    // must simply show what the preview says. Then we untick it, so the DBS row goes in as a normal
+    // expense and the pairing below (which only flags rows that aren't transfers yet) has something to do.
+    const preview = A.waitForResponse((r) => r.url().endsWith('/api/budget/imports/preview') && r.ok());
+    await upload(A, file('dbs-pair.csv', 'text/csv'));
+    const dbsPreview = (await (await preview).json()).rows.find((r) => /FUNDS TRANSFER/.test(r.description));
+    assert.equal(dbsPreview.pair ?? null, null, 'nothing to pair with yet');
+    const dbsRow = A.locator('div.px-3', { hasText: 'FUNDS TRANSFER TO UOB A/C' }).first();
+    const dbsChip = dbsRow.getByRole('button', { name: /^Transfer between my accounts/ });
+    assert.equal(await dbsChip.count(), dbsPreview.transfer ? 1 : 0, `UI transfer flag matches the preview (transfer: ${dbsPreview.transfer})`);
+    if (dbsPreview.transfer) {
+      await dbsChip.click();
+      await dbsRow.getByRole('combobox', { name: /^Category for / }).waitFor(); // back to a normal, categorised row
+    }
+    const dbsPair = await finish(A, { visibility: 'adults', label: 'DBS ••4821' });
+    assert.equal(dbsPair.sent.rows.find((r) => r.row_id === dbsPreview.row_id).transfer, false, 'DBS row committed as not a transfer');
+    assert.equal((await dbsTx(dbsPair.import.id)).transfer, false, 'DBS side starts as a normal expense');
+
+    const uobPair = async (accept) => {
+      await upload(A, file('uob-pair.csv', 'text/csv'));
+      const row = A.locator('div.px-3', { hasText: 'FUNDS TRANSFER FROM DBS' }).first();
+      assert.equal(await row.getByRole('button', { name: /^Transfer between my accounts/ }).getAttribute('aria-pressed'), 'true', 'pre-flagged by pairing');
+      await row.getByText('Also marks DBS ••4821 −$1,500.00 on 10 Oct as a transfer').waitFor();
+      if (!accept) {
+        await row.getByRole('button', { name: "Don't mark that one" }).click();
+        await row.getByText(/Only this row is marked — DBS ••4821 −\$1,500\.00 on 10 Oct stays as it is/).waitFor();
+        await shot(A, '17-pair-declined-desktop-light', false);
+      } else await shot(A, '17-pair-desktop-light', false);
+      // Excluded transfers are shown beside the totals: review header, step 4 summary and the success screen.
+      await A.getByText('(+$1,500.00 in transfers not counted)').waitFor();
+      const res = await finish(A, { visibility: 'adults', label: 'UOB ••7890', note: '+$1,500.00 in transfers not counted' });
+      const sent = res.sent.rows.find((r) => r.transfer);
+      assert.ok(sent, 'UOB row committed as a transfer');
+      assert.equal(sent.pair, accept ? undefined : false, accept ? 'pair accepted (no pair:false)' : 'pair: false sent');
+      return res;
+    };
+    const undo = async (label, count) => {
+      await A.goto(`${BASE}/budget/import`);
+      await A.getByText('Past imports').waitFor();
+      const li = A.locator('li', { hasText: label }).filter({ hasText: `${count} transaction` }).first();
+      await li.getByRole('button', { name: 'Undo import' }).click();
+      await A.getByRole('dialog').getByRole('button', { name: 'Undo import' }).click();
+      await A.getByText(/^Removed \d+ transaction/).first().waitFor();
+    };
+
+    const declined = await uobPair(false);
+    assert.equal((await dbsTx(dbsPair.import.id)).transfer, false, 'declined: DBS row is NOT a transfer');
+    await undo('UOB ••7890', 2);
+    assert.equal((await alex.api(`/budget/transactions?import_id=${declined.import.id}`)).length, 0);
+
+    await uobPair(true);
+    assert.equal((await dbsTx(dbsPair.import.id)).transfer, true, 'accepted: DBS row marked as a transfer too');
+    await A.goto(`${BASE}/budget/transactions?import=${dbsPair.import.id}`);
+    await A.locator('li', { hasText: /Funds Transfer|FUNDS TRANSFER/ }).getByText('Transfer', { exact: true }).waitFor();
+    await undo('UOB ••7890', 2);
+    assert.equal((await dbsTx(dbsPair.import.id)).transfer, false, 'undo: DBS row is no longer a transfer');
+  }
+  ok('transfer pairing: line shown; declined → other row untouched; accepted → both transfers; undo restores the other row');
 
   // ---- 8. friendly errors + insecure context -----------------------------------------------
   await A.goto(`${BASE}/budget/import`);

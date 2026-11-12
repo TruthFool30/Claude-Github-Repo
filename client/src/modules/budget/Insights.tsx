@@ -193,6 +193,14 @@ export default function Insights() {
   const partial = data.months.find((m) => m.partial)?.month;
   const trend = data.months.map((m) => ({ month: m.month, income: m.income, spent: m.spending }));
   const [firstBalance, ...moreBalances] = data.balances;
+  const balanceTotal = data.balances.reduce((t, b) => t + b.balance, 0);
+  const staleCount = data.balances.filter((b) => b.stale).length;
+  const balanceHint = !firstBalance
+    ? 'Import a statement to see it'
+    : [
+        moreBalances.length ? `across ${data.balances.length} accounts` : `${firstBalance.account_label} · ${fmtDate(firstBalance.as_of, 'MMM d')}`,
+        staleCount ? (moreBalances.length ? `${staleCount} not up to date` : 'older statement') : null,
+      ].filter(Boolean).join(' · ');
   const maxMerchant = Math.max(1, ...data.merchants.map((m) => m.total));
   // Day of month in the family's time zone (server's `today`); the browser's clock only as a fallback.
   const early = (data.today ? Number(data.today.slice(8, 10)) : new Date().getDate()) < 5;
@@ -222,11 +230,11 @@ export default function Insights() {
           hint={data.avg_surplus >= 0 ? 'left over each month' : 'more out than in'}
         />
         <Stat
-          label="Latest balance"
+          label={moreBalances.length ? 'Balance, all accounts' : 'Latest balance'}
           icon={<Landmark size={14} />}
           tone="#0090FF"
-          value={firstBalance ? fmt(firstBalance.balance) : '—'}
-          hint={firstBalance ? `${firstBalance.account_label} · ${firstBalance.stale ? 'as of ' : ''}${fmtDate(firstBalance.as_of, 'MMM d')}${moreBalances.length ? ` · +${moreBalances.length} more` : ''}` : 'Import a statement to see it'}
+          value={firstBalance ? fmt(balanceTotal) : '—'}
+          hint={staleCount ? <span className="text-warning-soft-fg">{balanceHint}</span> : balanceHint}
         />
       </div>
 

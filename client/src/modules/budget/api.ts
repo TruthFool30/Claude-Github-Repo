@@ -157,7 +157,7 @@ export interface PreviewRow {
   recurring_group: string | null;
   /** Server's guess that this is a move between own accounts (older servers: absent = false). */
   transfer?: boolean;
-  /** When `transfer` came from pairing: the already-imported row in another account that commit ALSO marks as a transfer. */
+  /** When `transfer` came from pairing: the already-imported row in another account that commit ALSO marks as a transfer (`amount` signed, from that account's side). */
   pair?: { account_label: string; date: string; amount: number; description: string } | null;
 }
 
