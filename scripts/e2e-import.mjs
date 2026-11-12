@@ -218,8 +218,12 @@ try {
   // Transfer between own accounts: muted, not counted in the selected totals.
   const landlord = A.locator('div.px-3', { hasText: 'SAMPLE LANDLORD' }).first();
   const outBefore = await A.getByText(/transactions selected/).locator('xpath=..').innerText();
-  await landlord.getByRole('button', { name: 'Transfer between my accounts' }).click();
-  assert.equal(await landlord.getByRole('button', { name: 'Transfer between my accounts' }).getAttribute('aria-pressed'), 'true');
+  // No transfer chip on ordinary rows: marking one lives in the row's ⋯ menu (reachable by keyboard and touch).
+  assert.equal(await A.getByRole('button', { name: /^Transfer between my accounts/ }).count(), 0, 'no transfer chips before marking');
+  await landlord.getByRole('button', { name: /^More for / }).click();
+  await A.getByRole('menuitem', { name: 'Mark as transfer' }).click();
+  assert.equal(await landlord.getByRole('button', { name: /^Transfer between my accounts/ }).getAttribute('aria-pressed'), 'true');
+  assert.equal(await A.getByRole('button', { name: /^Transfer between my accounts/ }).count(), 1, 'chip only on the transfer row');
   await landlord.getByText('Not counted as income or spending').waitFor();
   assert.notEqual(await A.getByText(/transactions selected/).locator('xpath=..').innerText(), outBefore, 'transfer left out of the totals');
   await shot(A, '04b-transfer-desktop-light', false);
@@ -267,6 +271,9 @@ try {
     if (rows.length && 'merchant' in rows[0]) {
       const m = rows.find((t) => t.merchant && t.merchant !== t.description);
       if (m) await A.getByText(m.description, { exact: true }).first().waitFor(); // raw bank text as subtitle
+      // Title casing keeps acronyms / vowel-less short tokens in capitals ("NTUC FP Sample…", "AIA Sample…").
+      if (rows.some((t) => /ntuc/i.test(t.merchant ?? ''))) await A.getByText(/^NTUC FP\b/).first().waitFor();
+      if (rows.some((t) => /aia/i.test(t.merchant ?? ''))) await A.getByText(/^AIA Sample/).first().waitFor();
     } else console.log('    ⚠ skipped: server has no transactions[].merchant yet (merchant title not checked)');
   }
   ok('import filter link (?import=) with "Imported from DBS ••4821 · Clear filter" chip, badges, detail, edit visibility');
@@ -352,6 +359,27 @@ try {
   await segment(A, '6 months').click();
   await A.waitForURL('**/budget/insights?months=6');
   ok('insights render real averages, balances, partial month; 3/6/12 window');
+
+  // Round-3 server fields: assert when present, otherwise say what was skipped.
+  {
+    const ins = await alex.api('/budget/insights?months=3');
+    await A.goto(`${BASE}/budget/insights`);
+    await A.getByText('Can we afford our goals?').waitFor();
+    if (ins.spikes?.some((s) => s.usual_by_now !== undefined)) {
+      const s = ins.spikes.find((x) => x.usual_by_now !== undefined);
+      await A.getByText(new RegExp(`so far — usually .+ by now \\(\\+${Math.round(s.change_pct)}%\\)`)).first().waitFor();
+    } else console.log('    ⚠ skipped: no spikes[].usual_by_now from the server (spike wording not checked against real data)');
+    // A % is never printed next to the full-month average.
+    assert.equal(await A.getByText(/% above your .* average/).count(), 0, 'no % next to a full-month average');
+    if (!('today' in ins)) console.log('    ⚠ skipped: server has no insights.today yet (browser date used for the early-month rule)');
+    const bills = await alex.api(`/budget/recurring?month=${new Date().toISOString().slice(0, 7)}`);
+    if (bills.some((b) => b.status === 'expected')) {
+      await A.goto(`${BASE}/budget/bills`);
+      await A.getByText('Expected', { exact: true }).first().waitFor();
+      await A.getByText(/Not due yet · around/).first().waitFor();
+      await shot(A, '16-bills-expected-desktop-light');
+    } else console.log("    ⚠ skipped: no bill with status 'expected' from the server");
+  }
 
   // ---- 7. undo, then the same file is no longer a duplicate ---------------------------------
   await A.goto(`${BASE}/budget/import`);

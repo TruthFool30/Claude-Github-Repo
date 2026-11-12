@@ -169,6 +169,12 @@ export const migrations = [
   'ALTER TABLE budget_merchant_rules ADD COLUMN import_id INTEGER',
   // Money moved between the family's own accounts: listed, but left out of every income/spending total.
   'ALTER TABLE budget_transactions ADD COLUMN transfer INTEGER NOT NULL DEFAULT 0',
+  // The import that marked a bill month paid (undo unlinks it again).
+  'ALTER TABLE budget_recurring_runs ADD COLUMN import_id INTEGER',
+  // The import whose commit flagged this row as the other side of a transfer (undo clears it again).
+  'ALTER TABLE budget_transactions ADD COLUMN transfer_by_import INTEGER',
+  // The import a bill was suggested from ('expected' months until a statement covers them).
+  'ALTER TABLE budget_recurring ADD COLUMN import_id INTEGER',
 ];
 
 // --------------------------------------------------------------------------------------------
@@ -196,18 +202,94 @@ function visibleSql(req, a = 't') {
   return `(${a}.visibility = 'family' OR ${a}.created_by = ${uid} OR (${a}.visibility = 'adults' AND ${canManage(req) ? 1 : 0}))`;
 }
 
-/** Imported rows hold their description + balance sealed; open them for output (manual rows pass through). */
+/**
+ * Encryption at rest (ctx.box) for budget text only some members may see: the description and
+ * notes of imported rows and of 'adults'/'private' rows (plus imported rows' balance), and the
+ * description and notes of 'adults'/'private' bills (the ones made from an import). Family-visible
+ * manual rows and bills stay plaintext (SQL search). open() passes plaintext through.
+ */
+const sealsTx = (row) => !!row.import_id || (row.visibility ?? 'family') !== 'family';
+const sealsBill = (row) => (row.visibility ?? 'family') !== 'family';
+// ponytail: module-level db → box registry, so the db-only helpers (billsForMonth, loadBill) can open bills.
+const BOXES = new WeakMap();
+const boxFor = (db) => BOXES.get(db) ?? { open: (v) => v, seal: (v) => v };
+
 function openTx(box, row) {
-  if (!row?.import_id) return row;
+  if (!row) return row;
   try {
-    return { ...row, description: box.open(row.description), balance: box.open(row.balance) };
+    return {
+      ...row, description: box.open(row.description), notes: box.open(row.notes), balance: box.open(row.balance),
+      ...(row.bill_description !== undefined ? { bill_description: box.open(row.bill_description) } : {}),
+    };
   } catch {
-    return { ...row, description: '(unreadable)', balance: null };
+    return { ...row, description: '(unreadable)', notes: null, balance: null, bill_description: null };
   }
+}
+function openBill(db, row) {
+  if (!row) return row;
+  const box = boxFor(db);
+  try {
+    return { ...row, description: box.open(row.description), notes: box.open(row.notes) };
+  } catch {
+    return { ...row, description: '(unreadable)', notes: null };
+  }
+}
+
+/**
+ * Seal budget text written before it was encrypted (rows/bills that are imported, adults-only or
+ * private), once per database at startup. Runs with secure_delete on and truncates the WAL after,
+ * so the replaced plaintext doesn't linger in the file.
+ */
+const sealed = new WeakSet();
+export function sealLegacyBudget(ctx) {
+  const { db, box } = ctx;
+  if (sealed.has(db)) return 0;
+  sealed.add(db);
+  let n = 0;
+  ctx.tx(db, () => {
+    for (const t of db.prepare("SELECT id, description, notes, balance FROM budget_transactions WHERE import_id IS NOT NULL OR visibility != 'family'").all()) {
+      const fields = ['description', 'notes', 'balance'].filter((k) => t[k] != null && !box.isSealed(t[k]));
+      if (!fields.length) continue;
+      db.prepare(`UPDATE budget_transactions SET ${fields.map((k) => `${k} = ?`).join(', ')} WHERE id = ?`).run(...fields.map((k) => box.seal(t[k])), t.id);
+      n++;
+    }
+    for (const b of db.prepare("SELECT id, description, notes FROM budget_recurring WHERE visibility != 'family'").all()) {
+      const fields = ['description', 'notes'].filter((k) => b[k] != null && !box.isSealed(b[k]));
+      if (!fields.length) continue;
+      db.prepare(`UPDATE budget_recurring SET ${fields.map((k) => `${k} = ?`).join(', ')} WHERE id = ?`).run(...fields.map((k) => box.seal(b[k])), b.id);
+      n++;
+    }
+  });
+  if (n) scrubFreedPages(db);
+  return n;
+}
+
+/** Push deleted/replaced pages out of the WAL (secure_delete already zeroes them in the db file). */
+function scrubFreedPages(db) {
+  try {
+    db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+  } catch { /* busy: the next checkpoint does it */ }
 }
 
 const adultIds = (db, familyId) => memberIds(db, familyId).filter((m) => m.role !== 'child').map((m) => m.user_id);
 const allIds = (db, familyId) => memberIds(db, familyId).map((m) => m.user_id);
+
+/** JS twin of visibleSql: may the requester see a row with this visibility / creator? */
+const canSee = (req, visibility, createdBy) =>
+  visibility === 'family' || createdBy === req.user.id || (visibility === 'adults' && canManage(req));
+
+const RANK = { private: 0, adults: 1, family: 2 };
+/**
+ * May transaction `t` be recorded as a payment of bill `b`? Only when everyone who can see the
+ * transaction can also see the bill (so recurring_id never points somewhere they can't follow), and
+ * private ones only within one person's own data: a private row pays only its owner's private bill,
+ * and a private bill is paid only by its owner's private rows. (An adults-only row may pay a family
+ * bill: others then see the month as paid, without the payment's details.)
+ */
+export const canLinkPayment = (t, b) => {
+  if (t.visibility === 'private' || b.visibility === 'private') return t.visibility === b.visibility && t.created_by === b.created_by;
+  return RANK[t.visibility] <= RANK[b.visibility];
+};
 
 /** Who may see a row with this visibility; null = the whole family. */
 function audienceOf(db, familyId, visibility, createdBy) {
@@ -235,7 +317,7 @@ function loadTx(db, req, id) {
 function loadBill(db, req, id) {
   const row = db.prepare(`${BILL_SELECT} WHERE b.id = ? AND b.family_id = ? AND ${visibleSql(req, 'b')}`).get(id, req.family.id);
   if (!row) throw httpError(404, 'Bill not found');
-  return row;
+  return openBill(db, row);
 }
 
 function loadGoal(db, familyId, id) {
@@ -357,7 +439,6 @@ function parseTxBody(db, req, body, existing, today = dateKey()) {
     if (v !== 'family' && !canManage(req)) throw httpError(403, 'Ask a parent to hide a transaction');
     if (v === 'private' && existing && existing.created_by !== req.user.id) throw httpError(403, 'Only the person who added it can make it private');
     // Showing a row to more people (and any change on an imported row) is up to whoever added it.
-    const RANK = { private: 0, adults: 1, family: 2 };
     if (existing && v !== existing.visibility && existing.created_by !== req.user.id && (existing.import_id || RANK[v] > RANK[existing.visibility])) {
       throw httpError(403, 'Only the person who added it can share it more widely');
     }
@@ -468,9 +549,17 @@ function buildSummary(db, req, month) {
   };
 }
 
+const shiftDay = (d, days) => new Date(Date.parse(`${d}T12:00:00Z`) + days * 864e5).toISOString().slice(0, 10);
+
 /** Bills for a month; with `req` only the ones that person may see (the sweep passes none: all). */
 function billsForMonth(db, familyId, month, today = dateKey(), req = null) {
-  const rows = db.prepare(`${BILL_SELECT} WHERE b.family_id = ? ${req ? `AND ${visibleSql(req, 'b')}` : ''} ORDER BY b.day_of_month, b.id`).all(familyId);
+  // covered_to: for a bill suggested by an import, the end of the latest statement of that account.
+  const rows = db.prepare(
+    `SELECT x.*, (SELECT MAX(i.period_to) FROM budget_imports i WHERE i.family_id = x.family_id AND i.deleted_at IS NULL
+         AND i.account_last4 IS (SELECT s.account_last4 FROM budget_imports s WHERE s.id = x.import_id)) AS covered_to,
+       (SELECT s.period_to FROM budget_imports s WHERE s.id = x.import_id) AS source_to
+     FROM (${BILL_SELECT} WHERE b.family_id = ? ${req ? `AND ${visibleSql(req, 'b')}` : ''}) x ORDER BY x.day_of_month, x.id`,
+  ).all(familyId).map((b) => openBill(db, b));
   const runs = new Map(
     db
       .prepare(
@@ -487,8 +576,12 @@ function billsForMonth(db, familyId, month, today = dateKey(), req = null) {
     // A paid run whose transaction was deleted counts as not recorded (the date decides the status).
     if (run && run.status === 'paid' && !run.t_amount) run = undefined;
     if (!b.active && !run) continue;
-    const status = billStatus(b, month, run, today);
+    let status = billStatus(b, month, run, today);
     if (status === 'inactive') continue;
+    // A bill from an import isn't overdue before a statement covering its due date arrives (until 5 days late).
+    const covered = b.covered_to ?? b.source_to;
+    const due = dueDate(month, b.day_of_month);
+    if (b.import_id && covered && !run && ['overdue', 'due_today', 'upcoming'].includes(status) && due > covered && today <= shiftDay(due, 5)) status = 'expected';
     out.push(
       billOut(b, {
         month,
@@ -671,6 +764,7 @@ export function autoContribute(ctx, familyId, today, { goalId = null, req = null
 /** Periodic housekeeping: auto bills, auto goal contributions, due-today reminders, purge of soft-deleted transactions. */
 export function sweep(ctx, todayOverride = null) {
   const { db } = ctx;
+  if (ctx.box) BOXES.set(db, ctx.box);
   const families = db
     .prepare('SELECT family_id FROM budget_recurring WHERE active = 1 UNION SELECT family_id FROM budget_goals WHERE auto_monthly = 1')
     .all().map((r) => r.family_id);
@@ -697,7 +791,7 @@ export function sweep(ctx, todayOverride = null) {
         familyId,
         userIds: mine.length ? mine : allowed,
         module: 'budget',
-        title: `${bill.description} is due today`,
+        title: bill.visibility === 'family' ? `${bill.description} is due today` : 'A bill is due today', // no private names at rest
         body: `${money(Math.round(bill.amount * 100), family?.currency)} — mark it paid once it's done`,
         link: `/budget/bills?month=${month}`,
       });
@@ -709,7 +803,8 @@ export function sweep(ctx, todayOverride = null) {
     if (row.receipt_url) ctx.removeFile(row.receipt_url);
     db.prepare('DELETE FROM budget_transactions WHERE id = ?').run(row.id);
   }
-  db.prepare('DELETE FROM budget_imports WHERE deleted_at IS NOT NULL AND deleted_at < ?').run(cutoff); // undone imports (sealed balances)
+  const gone = db.prepare('DELETE FROM budget_imports WHERE deleted_at IS NOT NULL AND deleted_at < ?').run(cutoff).changes; // undone imports (sealed balances)
+  if (gone) scrubFreedPages(db);
 }
 
 // --------------------------------------------------------------------------------------------
@@ -719,6 +814,11 @@ export function router(ctx) {
   const { db } = ctx;
   const r = Router();
   upgradeMeta(db);
+  BOXES.set(db, ctx.box);
+  // Deleted budget rows (a member leaving, purged undo) are zeroed in the file, not just unlinked.
+  // ponytail: connection-wide, so every module's deletes pay the (small) cost.
+  db.exec('PRAGMA secure_delete = ON');
+  sealLegacyBudget(ctx);
 
   // Background housekeeping (unref'd so it never keeps a process alive).
   const runSweep = () => {
@@ -750,9 +850,14 @@ export function router(ctx) {
     if (audience) ctx.sendToUsers(audience, `budget.${type}`, payload, req.family.id);
     else emit(req, type, payload);
   };
-  const txJson = (row) => {
+  /** [description, notes] as stored: sealed when `seal`, else plain. */
+  const sealText = (t, seal) => [t.description ?? null, t.notes ?? null].map((v) => (seal ? ctx.box.seal(v) : v));
+  /** A transaction for `req`: sealed text opened, and the bill it pays only when they can see that bill. */
+  const txJson = (row, req) => {
     const t = openTx(ctx.box, row);
-    return { ...txOut(t), merchant: t.import_id ? prettyMerchant(merchantKey(t.description)) || null : null };
+    const out = { ...txOut(t), merchant: t.import_id ? prettyMerchant(merchantKey(t.description)) || null : null };
+    if (out.recurring_id && t.rb_visibility && !canSee(req, t.rb_visibility, t.rb_created_by)) out.recurring_id = null;
+    return out;
   };
 
   // ---- overview ------------------------------------------------------------------------------
@@ -903,8 +1008,9 @@ export function router(ctx) {
       args.push(toId(req.query.paid_by, 'member'));
     }
     if (req.query.recurring_id) {
+      const bill = loadBill(db, req, toId(req.query.recurring_id, 'bill')); // 404 for a bill they can't see
       where.push('t.recurring_id = ?');
-      args.push(toId(req.query.recurring_id, 'bill'));
+      args.push(bill.id);
     }
     if (req.query.import_id) {
       where.push('t.import_id = ?');
@@ -912,7 +1018,7 @@ export function router(ctx) {
     }
     if (q) {
       // Imported descriptions are sealed: those rows are matched in JS (sealedMatches).
-      where.push(`((t.import_id IS NULL AND t.description LIKE '%' || ? || '%') OR t.notes LIKE '%' || ? || '%' OR c.name LIKE '%' || ? || '%'
+      where.push(`((t.import_id IS NULL AND t.visibility = 'family' AND (t.description LIKE '%' || ? || '%' OR t.notes LIKE '%' || ? || '%')) OR c.name LIKE '%' || ? || '%'
         OR t.id IN (SELECT value FROM json_each(?)))`);
       args.push(q, q, q, JSON.stringify(sealedMatches(req, q)));
     }
@@ -927,7 +1033,7 @@ export function router(ctx) {
     const limit = Math.min(Math.max(Number(req.query.limit) || 100, 1), 500);
     const rows = db.prepare(`${TX_SELECT} WHERE ${where.join(' AND ')} ORDER BY t.date DESC, t.id DESC LIMIT ?`).all(...args, limit + 1);
     const more = rows.length > limit;
-    const items = rows.slice(0, limit).map(txJson);
+    const items = rows.slice(0, limit).map((t) => txJson(t, req));
     if (req.query.page === '1') {
       const last = items[items.length - 1];
       return res.json({ items, next_cursor: more && last ? `${last.date}~${last.id}` : null });
@@ -936,7 +1042,7 @@ export function router(ctx) {
   });
 
   r.get('/transactions/:id', (req, res) => {
-    res.json(txJson(loadTx(db, req, toId(req.params.id))));
+    res.json(txJson(loadTx(db, req, toId(req.params.id)), req));
   });
 
   r.post('/transactions', (req, res) => {
@@ -946,20 +1052,21 @@ export function router(ctx) {
     const before = f.category_id && f.kind === 'expense' ? spentIn(db, req.family.id, f.category_id, month) : 0;
     const { lastInsertRowid } = db
       .prepare(
-        `INSERT INTO budget_transactions (family_id, kind, amount_cents, category_id, description, date, paid_by, notes, created_by, visibility, transfer)
+        `INSERT INTO budget_transactions (family_id, kind, amount_cents, category_id, description, notes, date, paid_by, created_by, visibility, transfer)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(req.family.id, f.kind, f.amount_cents, f.category_id, f.description, f.date, f.paid_by, f.notes, req.user.id, f.visibility, f.transfer);
-    const row = txJson(loadTx(db, req, Number(lastInsertRowid)));
+      .run(req.family.id, f.kind, f.amount_cents, f.category_id, ...sealText(f, f.visibility !== 'family'), f.date, f.paid_by, req.user.id, f.visibility, f.transfer);
+    const row = txJson(loadTx(db, req, Number(lastInsertRowid)), req);
     emitRow(req, 'transaction.created', row);
-    const label = row.description || row.category?.name || (row.kind === 'income' ? 'Income' : 'Expense');
+    // Rows not everyone sees keep their description out of the Wall (it's sealed in the row itself).
+    const label = f.visibility === 'family' ? row.description || row.category?.name || (row.kind === 'income' ? 'Income' : 'Expense') : null;
     ctx.logActivity({
       familyId: req.family.id,
       userId: req.user.id,
       module: 'budget',
       verb: row.kind === 'income' ? 'income' : 'expense',
       entityId: row.id,
-      summary: `${row.kind === 'income' ? 'added income' : 'added an expense'}: ${label} · ${money(f.amount_cents, req.family.currency)}`,
+      summary: `${row.kind === 'income' ? 'added income' : 'added an expense'}${label ? `: ${label}` : ''} · ${money(f.amount_cents, req.family.currency)}`,
       link: `/budget/transactions?month=${month}&tx=${row.id}`,
       audience: audienceOf(db, req.family.id, f.visibility, req.user.id),
     });
@@ -970,20 +1077,35 @@ export function router(ctx) {
   r.patch('/transactions/:id', (req, res) => {
     const existing = loadTx(db, req, toId(req.params.id));
     if (!canEditTx(req, existing)) throw httpError(403, 'You can only edit transactions you added');
+    // Imported rows: other grown-ups may re-file them (category, amount, date…), but their wording,
+    // transfer flag and who sees them stay with the person who imported them.
     const f = parseTxBody(db, req, req.body ?? {}, existing, requestToday(ctx, req));
+    if (existing.import_id && existing.created_by !== req.user.id) {
+      const was = openTx(ctx.box, existing);
+      if ((f.description !== undefined && f.description !== was.description) || (f.transfer !== undefined && f.transfer !== (existing.transfer ? 1 : 0))) {
+        throw httpError(403, 'Only the person who imported it can change its description or transfer flag');
+      }
+    }
     const next = { ...existing, ...f };
     const month = monthOf(next.date);
     const before = next.category_id && next.kind === 'expense'
       ? spentIn(db, req.family.id, next.category_id, month) - (existing.category_id === next.category_id && monthOf(existing.date) === month && existing.kind === 'expense' ? existing.amount_cents : 0)
       : 0;
-    if (existing.import_id && f.description !== undefined) f.description = ctx.box.seal(maskDigits(f.description ?? '') || null);
+    // Text is stored sealed or plain to match the row's (new) visibility.
+    const plain = openTx(ctx.box, existing);
+    const text = { description: f.description !== undefined ? f.description : plain.description, notes: f.notes !== undefined ? f.notes : plain.notes };
+    [f.description, f.notes] = sealText(text, sealsTx({ import_id: existing.import_id, visibility: f.visibility ?? existing.visibility }));
     updateRow(db, 'budget_transactions', existing.id, f, `updated_at = ${ISO_NOW}`);
-    const row = txJson(loadTx(db, req, existing.id));
+    const row = txJson(loadTx(db, req, existing.id), req);
     if (f.visibility && f.visibility !== existing.visibility) {
       // Its Wall entry follows the new audience; whoever can't see it any more drops it.
       const audience = audienceOf(db, req.family.id, f.visibility, existing.created_by);
       const acts = db.prepare("SELECT id FROM activity WHERE family_id = ? AND module = 'budget' AND entity_id = ? AND verb IN ('expense','income')").all(req.family.id, existing.id).map((a) => a.id);
       for (const id of acts) db.prepare('UPDATE activity SET audience = ? WHERE id = ?').run(audience ? JSON.stringify(audience) : null, id);
+      if (f.visibility !== 'family') { // its Wall line loses the description too
+        const generic = `${existing.kind === 'income' ? 'added income' : 'added an expense'} · ${money(existing.amount_cents, req.family.currency)}`;
+        for (const id of acts) db.prepare('UPDATE activity SET summary = ? WHERE id = ?').run(generic, id);
+      }
       const gone = audience ? allIds(db, req.family.id).filter((u) => !audience.includes(u)) : [];
       if (gone.length) {
         ctx.sendToUsers(gone, 'budget.transaction.deleted', { id: existing.id }, req.family.id);
@@ -1018,7 +1140,7 @@ export function router(ctx) {
       if (!linked) throw httpError(409, 'That bill has been paid or skipped again since — this payment can’t be restored');
     }
     db.prepare('UPDATE budget_transactions SET deleted_at = NULL WHERE id = ?').run(id);
-    const out = txJson(loadTx(db, req, id));
+    const out = txJson(loadTx(db, req, id), req);
     emitRow(req, 'transaction.created', out);
     res.json(out);
   });
@@ -1030,7 +1152,7 @@ export function router(ctx) {
     if (!/^image\//.test(req.file.mimetype) && req.file.mimetype !== 'application/pdf') throw httpError(400, 'Receipts must be an image or a PDF');
     if (existing.receipt_url) ctx.removeFile(existing.receipt_url);
     db.prepare(`UPDATE budget_transactions SET receipt_url = ?, updated_at = ${ISO_NOW} WHERE id = ?`).run(req.file.url, existing.id);
-    const row = txJson(loadTx(db, req, existing.id));
+    const row = txJson(loadTx(db, req, existing.id), req);
     emitRow(req, 'transaction.updated', row);
     res.json(row);
   });
@@ -1040,7 +1162,7 @@ export function router(ctx) {
     if (!canEditTx(req, existing)) throw httpError(403, 'You can only change transactions you added');
     if (existing.receipt_url) ctx.removeFile(existing.receipt_url);
     db.prepare(`UPDATE budget_transactions SET receipt_url = NULL, updated_at = ${ISO_NOW} WHERE id = ?`).run(existing.id);
-    const row = txJson(loadTx(db, req, existing.id));
+    const row = txJson(loadTx(db, req, existing.id), req);
     emitRow(req, 'transaction.updated', row);
     res.json(row);
   });
@@ -1084,6 +1206,7 @@ export function router(ctx) {
     requireManager(req, 'change bills');
     const existing = loadBill(db, req, toId(req.params.id));
     const f = parseBillBody(db, req, req.body ?? {}, existing);
+    if (sealsBill(existing)) for (const k of ['description', 'notes']) if (f[k] !== undefined) f[k] = ctx.box.seal(f[k]);
     updateRow(db, 'budget_recurring', existing.id, f);
     const today = requestToday(ctx, req);
     generateDue(db, req.family.id, today, ctx.time.tz(req));
@@ -1121,19 +1244,31 @@ export function router(ctx) {
     const before = bill.category_id && bill.kind === 'expense' ? spentIn(db, req.family.id, bill.category_id, monthOf(date)) : 0;
     const txId = ctx.tx(db, () => {
       if (current.transaction_id) db.prepare('UPDATE budget_recurring_runs SET transaction_id = NULL WHERE recurring_id = ? AND month = ?').run(bill.id, month);
-      return recordBillPayment(db, bill, month, { amountCents, date, userId: req.user.id, paidBy });
+      // (loadBill opened the name; a non-family bill's payment stores it sealed again.)
+      return recordBillPayment(db, bill, month, { amountCents, date, userId: req.user.id, paidBy, description: sealsBill(bill) ? ctx.box.seal(bill.description) : bill.description });
     });
     const out = billForMonth(req, bill.id, month);
     emitRow(req, 'bill.paid', out);
-    emitRow(req, 'transaction.created', txJson(loadTx(db, req, txId)));
+    emitRow(req, 'transaction.created', txJson(loadTx(db, req, txId), req));
     ctx.logActivity({
       familyId: req.family.id, userId: req.user.id, module: 'budget', verb: 'paid', entityId: bill.id,
-      summary: `${bill.kind === 'income' ? 'recorded' : 'paid'} ${bill.description} · ${money(amountCents, req.family.currency)}`,
+      summary: `${bill.kind === 'income' ? 'recorded' : 'paid'} ${sealsBill(bill) ? 'a bill' : bill.description} · ${money(amountCents, req.family.currency)}`,
       link: `/budget/bills?month=${month}`, audience: audienceOf(db, req.family.id, bill.visibility, bill.created_by),
     });
     checkOverBudget(ctx, req, bill.category_id, monthOf(date), before);
     res.json(out);
   });
+
+  /**
+   * A month's payment is taken back: a payment recorded for the bill is deleted (undo-able), but an
+   * imported statement row that was linked to it is only unlinked — it stays in its import.
+   */
+  const releasePayment = (run) => {
+    const t = db.prepare('SELECT id, import_id FROM budget_transactions WHERE id = ?').get(run.transaction_id);
+    if (!t) return;
+    if (t.import_id) db.prepare('UPDATE budget_transactions SET recurring_id = NULL WHERE id = ? AND recurring_id = ?').run(t.id, run.recurring_id);
+    else db.prepare(`UPDATE budget_transactions SET deleted_at = ${ISO_NOW} WHERE id = ? AND deleted_at IS NULL`).run(t.id);
+  };
 
   r.post('/recurring/:id/skip', (req, res) => {
     requireManager(req, 'skip bills');
@@ -1141,7 +1276,7 @@ export function router(ctx) {
     const month = parseMonth(req.body?.month, monthOf(requestToday(ctx, req)));
     ctx.tx(db, () => {
       const run = db.prepare('SELECT * FROM budget_recurring_runs WHERE recurring_id = ? AND month = ?').get(bill.id, month);
-      if (run?.transaction_id) db.prepare(`UPDATE budget_transactions SET deleted_at = ${ISO_NOW} WHERE id = ? AND deleted_at IS NULL`).run(run.transaction_id);
+      if (run?.transaction_id) releasePayment(run);
       db.prepare(
         `INSERT INTO budget_recurring_runs (recurring_id, family_id, month, status, transaction_id) VALUES (?, ?, ?, 'skipped', NULL)
          ON CONFLICT(recurring_id, month) DO UPDATE SET status = 'skipped', transaction_id = NULL`,
@@ -1161,7 +1296,7 @@ export function router(ctx) {
     ctx.tx(db, () => {
       const run = db.prepare('SELECT * FROM budget_recurring_runs WHERE recurring_id = ? AND month = ?').get(bill.id, month);
       if (!run) throw httpError(404, 'Nothing recorded for that month');
-      if (run.transaction_id) db.prepare(`UPDATE budget_transactions SET deleted_at = ${ISO_NOW} WHERE id = ? AND deleted_at IS NULL`).run(run.transaction_id);
+      if (run.transaction_id) releasePayment(run);
       db.prepare('DELETE FROM budget_recurring_runs WHERE recurring_id = ? AND month = ?').run(bill.id, month);
       // An auto bill already due (for this member or for the family's sweep) would be re-created by the
       // next sweep, so undoing its payment means "skipped".
@@ -1375,7 +1510,7 @@ export function router(ctx) {
     });
     const row = allowanceOut(db.prepare('SELECT * FROM budget_allowances WHERE id = ?').get(allowance.id));
     emit(req, 'allowance.paid', row);
-    if (txId) emit(req, 'transaction.created', txJson(loadTx(db, req, txId)));
+    if (txId) emit(req, 'transaction.created', txJson(loadTx(db, req, txId), req));
     if (goal) afterEntry(ctx, req, goal, 0, reached);
     ctx.logActivity({
       familyId: req.family.id, userId: req.user.id, module: 'budget', verb: 'allowance', entityId: allowance.id,
@@ -1457,8 +1592,10 @@ export function router(ctx) {
   /** Transactions (opened) the requester can see in [from, to]. */
   const visibleTx = (req, from, to) => db
     .prepare(
-      `SELECT t.id, t.kind, t.amount_cents, t.date, t.description, t.import_id, t.recurring_id, t.transfer, i.account_last4, rb.description AS bill_description
-       FROM budget_transactions t LEFT JOIN budget_imports i ON i.id = t.import_id LEFT JOIN budget_recurring rb ON rb.id = t.recurring_id
+      `SELECT t.id, t.kind, t.amount_cents, t.date, t.description, t.import_id, t.recurring_id, t.transfer, t.created_by, t.visibility,
+         i.account_last4, i.account_label, rb.description AS bill_description
+       FROM budget_transactions t LEFT JOIN budget_imports i ON i.id = t.import_id
+       LEFT JOIN budget_recurring rb ON rb.id = t.recurring_id AND ${visibleSql(req, 'rb')}
        WHERE t.family_id = ? AND t.deleted_at IS NULL AND ${visibleSql(req)} AND t.date BETWEEN ? AND ? LIMIT 20000`,
     )
     .all(req.family.id, from, to)
@@ -1480,6 +1617,7 @@ export function router(ctx) {
     const [A, B] = [a.split(' '), b.split(' ')];
     return (A[0] === B[0] && A[0].length >= 3) || A.every((w) => B.includes(w)) || B.every((w) => A.includes(w));
   };
+  const TRANSFER_WORD = /\b(?:TRANSFER|TRF|FAST|PAYNOW|IBG)\b|\bGIRO\b.*\b(?:TO|FROM) OWN\b|\bOWN ACCOUNT\b|\b(?:TO|FROM) A\/C\b/i;
   const OWN_TRANSFER = /\b(?:(?:TO|FROM) OWN|OWN (?:A\/C|ACCOUNT|ACCT|DBS|POSB|UOB)|BETWEEN (?:MY|OWN) ACCOUNTS)\b/i;
 
   /**
@@ -1499,7 +1637,8 @@ export function router(ctx) {
     for (const t of visibleTx(req, shiftDate(dates[0], -4), shiftDate(dates[dates.length - 1], 4))) {
       if (t.import_id) {
         known.add(`${t.account_last4 ?? ''}|${t.date}|${t.kind}|${t.amount_cents}|${dupKey(t.description)}`);
-        if ((t.account_last4 ?? '') !== (last4 ?? '')) others.push(t);
+        // Transfer pairs: only the importer's own imported rows (it may flag the other side).
+        if ((t.account_last4 ?? '') !== (last4 ?? '') && t.created_by === req.user.id) others.push(t);
       } else manual.push({ ...t, keys: [merchantKey(t.description), merchantKey(t.bill_description)].filter(Boolean), used: false });
     }
     const seen = new Map();
@@ -1514,8 +1653,14 @@ export function router(ctx) {
         if (m) { m.used = true; dup = true; }
       }
       r.duplicate = dup;
-      const pair = others.find((t) => t.kind !== r.kind && t.amount_cents === r.amount_cents && dayGap(t.date, r.date) <= 3);
+      // The other side of a transfer: opposite amount in another of the importer's accounts within 3 days,
+      // with a transfer-like word on at least one side.
+      // Best candidate: one that itself looks like a transfer, then the closest date.
+      const pair = others.filter((t) => t.kind !== r.kind && !t.transfer && t.amount_cents === r.amount_cents && dayGap(t.date, r.date) <= 3
+        && (TRANSFER_WORD.test(r.description) || TRANSFER_WORD.test(t.description)))
+        .sort((a, b) => TRANSFER_WORD.test(b.description) - TRANSFER_WORD.test(a.description) || dayGap(a.date, r.date) - dayGap(b.date, r.date))[0];
       r.transfer_pair = pair?.id ?? null;
+      r.pair = pair ? { account_label: pair.account_label, date: pair.date, amount: fromCents(pair.kind === 'income' ? pair.amount_cents : -pair.amount_cents), description: pair.description } : null;
       if (r.transfer === undefined) r.transfer = OWN_TRANSFER.test(r.description) || !!pair;
     }
   };
@@ -1525,9 +1670,11 @@ export function router(ctx) {
     const hist = visibleTx(req, monthStart(addMonths(monthOf(period.to), -7)), period.to);
     const items = [
       ...rows.filter((r) => !r.duplicate && !r.transfer).map((r) => ({ key: r.key, kind: r.kind, amount_cents: r.amount_cents, date: r.date, ref: r.row_id, statement: true })),
-      ...hist.filter((t) => !t.transfer).map((t) => ({ key: merchantKey(t.description), kind: t.kind, amount_cents: t.amount_cents, date: t.date, ref: `t${t.id}`, statement: false })),
+      // History: only the importer's own rows (an import never attaches other members' rows to a bill).
+      ...hist.filter((t) => !t.transfer && t.created_by === req.user.id)
+        .map((t) => ({ key: merchantKey(t.description), kind: t.kind, amount_cents: t.amount_cents, date: t.date, ref: `t${t.id}`, statement: false })),
     ];
-    const bills = db.prepare(`${BILL_SELECT} WHERE b.family_id = ? AND b.active = 1 AND ${visibleSql(req, 'b')}`).all(req.family.id);
+    const bills = db.prepare(`${BILL_SELECT} WHERE b.family_id = ? AND b.active = 1 AND ${visibleSql(req, 'b')}`).all(req.family.id).map((b) => openBill(db, b));
     const byId = new Map(rows.map((r) => [r.row_id, r]));
     return detectRecurring(items).slice(0, 30).map((g, i) => {
       const group = `g${i + 1}`;
@@ -1556,7 +1703,7 @@ export function router(ctx) {
         row_id: r.row_id, date: r.date, description: r.description, merchant: prettyMerchant(r.key), amount: fromCents(r.amount_cents), kind: r.kind,
         balance: fromCents(r.balance_cents),
         category_id: r.category_id, category_source: r.category_source, duplicate: r.duplicate, recurring_group: r.recurring_group,
-        transfer: !!r.transfer,
+        transfer: !!r.transfer, pair: r.pair ?? null,
       })),
       recurring: p.recurring.map((g) => ({
         group: g.group, merchant: g.merchant, description: g.description, amount: fromCents(g.amount_cents), kind: g.kind,
@@ -1630,6 +1777,7 @@ export function router(ctx) {
       if (!c || typeof c.row_id !== 'string' || !byId.has(c.row_id)) throw httpError(400, 'Unknown row in this import');
       if (c.include !== undefined && typeof c.include !== 'boolean') throw httpError(400, 'include must be true or false');
       if (c.transfer !== undefined && typeof c.transfer !== 'boolean') throw httpError(400, 'transfer must be true or false');
+      if (c.pair !== undefined && c.pair !== false) throw httpError(400, 'pair can only be false (leave the other row as it is)');
       choices.set(c.row_id, c);
     }
     const catOf = (raw, kind) => {
@@ -1651,6 +1799,7 @@ export function router(ctx) {
       x.suggested = x.category_id; // what the preview proposed (learned or built-in)
       if (c && Object.prototype.hasOwnProperty.call(c, 'category_id')) x.category_id = catOf(c.category_id, x.kind);
       if (typeof c?.transfer === 'boolean') x.transfer = c.transfer;
+      if (c?.pair === false) x.transfer_pair = null;
       if (x.duplicate && c?.include !== true) { skipped++; continue; } // duplicates only when ticked explicitly
       if (c?.include === false) { excluded++; continue; }
       create.push(x);
@@ -1666,22 +1815,23 @@ export function router(ctx) {
     if (!create.length) return res.status(400).json({ error: 'Nothing to import — every row is a duplicate or unticked', code: 'EMPTY' });
 
     const sum = (kind) => create.filter((x) => x.kind === kind && !x.transfer).reduce((s, x) => s + x.amount_cents, 0);
-    const bills = db.prepare(`${BILL_SELECT} WHERE b.family_id = ? AND b.active = 1 AND ${visibleSql(req, 'b')}`).all(fam);
+    const bills = db.prepare(`${BILL_SELECT} WHERE b.family_id = ? AND b.active = 1 AND ${visibleSql(req, 'b')}`).all(fam).map((b) => openBill(db, b));
     /**
      * Record transaction `txId` as the payment of bill `bill` for its month — unless that month is
-     * already paid (by a live transaction) or skipped, and only with a payment everyone who sees the
-     * bill may see (a private row never pays a shared bill).
+     * already paid (by a live transaction) or skipped. Only the importer's own rows, and only where
+     * canLinkPayment allows it. The run remembers the import, so undoing it unlinks again.
      */
-    const linkPayment = (bill, txId) => {
-      const t = txId && db.prepare('SELECT id, date, recurring_id, visibility FROM budget_transactions WHERE id = ? AND family_id = ? AND deleted_at IS NULL').get(txId, fam);
-      if (!t || t.recurring_id || (t.visibility === 'private' && bill.visibility !== 'private')) return;
+    const linkPayment = (bill, txId, importId) => {
+      const t = txId && db.prepare('SELECT id, date, recurring_id, visibility, created_by FROM budget_transactions WHERE id = ? AND family_id = ? AND deleted_at IS NULL').get(txId, fam);
+      if (!t || t.recurring_id || t.created_by !== req.user.id || !canLinkPayment(t, bill)) return;
       const month = monthOf(t.date);
       const run = db.prepare(`SELECT r.status, x.id AS live FROM budget_recurring_runs r
         LEFT JOIN budget_transactions x ON x.id = r.transaction_id AND x.deleted_at IS NULL WHERE r.recurring_id = ? AND r.month = ?`).get(bill.id, month);
       if (run && (run.status === 'skipped' || run.live)) return;
       db.prepare('UPDATE budget_transactions SET recurring_id = ? WHERE id = ?').run(bill.id, t.id);
-      db.prepare(`INSERT INTO budget_recurring_runs (recurring_id, family_id, month, status, transaction_id) VALUES (?, ?, ?, 'paid', ?)
-        ON CONFLICT(recurring_id, month) DO UPDATE SET status = 'paid', transaction_id = excluded.transaction_id`).run(bill.id, fam, month, t.id);
+      db.prepare(`INSERT INTO budget_recurring_runs (recurring_id, family_id, month, status, transaction_id, import_id) VALUES (?, ?, ?, 'paid', ?, ?)
+        ON CONFLICT(recurring_id, month) DO UPDATE SET status = 'paid', transaction_id = excluded.transaction_id, import_id = excluded.import_id`)
+        .run(bill.id, fam, month, t.id, importId);
     };
     /** The existing bill a statement line pays: its group's match, else same merchant, amount ± 10%, due day ± 5. */
     const billOf = (x) => {
@@ -1708,12 +1858,13 @@ export function router(ctx) {
         ids.set(x.row_id, Number(insert.run(fam, x.kind, x.amount_cents, x.category_id, ctx.box.seal(maskDigits(x.description)), x.date,
           req.user.id, req.user.id, visibility, id, seal(x.balance_cents), x.transfer ? 1 : 0).lastInsertRowid));
         // The other side of a transfer between two of the family's imported accounts.
-        if (x.transfer && x.transfer_pair) db.prepare('UPDATE budget_transactions SET transfer = 1 WHERE id = ? AND family_id = ? AND import_id IS NOT NULL').run(x.transfer_pair, fam);
+        if (x.transfer && x.transfer_pair) db.prepare('UPDATE budget_transactions SET transfer = 1, transfer_by_import = ? WHERE id = ? AND family_id = ? AND import_id IS NOT NULL AND created_by = ? AND transfer = 0')
+          .run(id, x.transfer_pair, fam, req.user.id);
       }
       // Statement lines that pay a bill already in the budget mark that month paid.
       for (const x of create) {
         const bill = !x.transfer && billOf(x);
-        if (bill) linkPayment(bill, ids.get(x.row_id));
+        if (bill) linkPayment(bill, ids.get(x.row_id), id);
       }
       // Learn from the final choices (a learned rule wins over the built-in ones next time), seen by
       // the same people as this import: the grown-ups, or only the importer for a private import.
@@ -1745,12 +1896,12 @@ export function router(ctx) {
           category_id: b.category_id !== undefined ? b.category_id : g.category_id, auto_create: false, start_month: addMonths(monthOf(g.latest.date), 1),
         });
         const billId = Number(db.prepare(
-          `INSERT INTO budget_recurring (family_id, kind, description, amount_cents, category_id, day_of_month, auto_create, start_month, created_by, visibility)
-           VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
-        ).run(fam, f.kind, maskDigits(f.description), f.amount_cents, f.category_id, f.day_of_month, f.start_month, req.user.id, visibility).lastInsertRowid);
+          `INSERT INTO budget_recurring (family_id, kind, description, amount_cents, category_id, day_of_month, auto_create, start_month, created_by, visibility, import_id)
+           VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)`,
+        ).run(fam, f.kind, ctx.box.seal(maskDigits(f.description)), f.amount_cents, f.category_id, f.day_of_month, f.start_month, req.user.id, visibility, id).lastInsertRowid);
         billsCreated++;
         // Its payments seen in the statement (and already in the budget) mark those months paid.
-        for (const ref of g.refs) linkPayment({ id: billId, visibility }, ref.startsWith('t') ? Number(ref.slice(1)) : ids.get(ref));
+        for (const ref of g.refs) linkPayment({ id: billId, visibility, created_by: req.user.id }, ref.startsWith('t') ? Number(ref.slice(1)) : ids.get(ref), id);
       }
       return id;
     });
@@ -1783,8 +1934,16 @@ export function router(ctx) {
     const removed = ctx.tx(db, () => {
       db.prepare(`UPDATE budget_imports SET deleted_at = ${ISO_NOW} WHERE id = ?`).run(imp.id);
       db.prepare('DELETE FROM budget_merchant_rules WHERE family_id = ? AND import_id = ?').run(req.family.id, imp.id); // rules it set last
-      // Bill months it marked paid go back to unpaid (the bills themselves stay).
-      db.prepare('DELETE FROM budget_recurring_runs WHERE transaction_id IN (SELECT id FROM budget_transactions WHERE import_id = ?)').run(imp.id);
+      // The other sides of transfers it flagged count again.
+      db.prepare('UPDATE budget_transactions SET transfer = 0, transfer_by_import = NULL WHERE family_id = ? AND transfer_by_import = ?').run(req.family.id, imp.id);
+      // Bill months it marked paid go back to unpaid, and rows it linked to bills (its own and earlier
+      // ones) are unlinked; the bills themselves stay.
+      for (const run of db.prepare(`SELECT recurring_id, transaction_id FROM budget_recurring_runs
+        WHERE family_id = ? AND (import_id = ? OR transaction_id IN (SELECT id FROM budget_transactions WHERE import_id = ?))`).all(req.family.id, imp.id, imp.id)) {
+        db.prepare('UPDATE budget_transactions SET recurring_id = NULL WHERE id = ? AND recurring_id = ?').run(run.transaction_id, run.recurring_id);
+      }
+      db.prepare(`DELETE FROM budget_recurring_runs WHERE family_id = ? AND (import_id = ? OR transaction_id IN (SELECT id FROM budget_transactions WHERE import_id = ?))`)
+        .run(req.family.id, imp.id, imp.id);
       return Number(db.prepare(`UPDATE budget_transactions SET deleted_at = ${ISO_NOW} WHERE import_id = ? AND deleted_at IS NULL`).run(imp.id).changes);
     });
     const audience = audienceOf(db, req.family.id, imp.visibility, imp.created_by);
@@ -1812,7 +1971,8 @@ export function router(ctx) {
     const cur = monthOf(today);
     const first = addMonths(cur, -n);
     const full = Array.from({ length: n }, (_, i) => addMonths(first, i));
-    const per = new Map([...full, cur].map((m) => [m, { income: 0, spending: 0, count: 0, cats: new Map() }]));
+    const per = new Map([...full, cur].map((m) => [m, { income: 0, spending: 0, count: 0, cats: new Map(), byNow: new Map() }]));
+    const dayNow = Number(today.slice(8, 10));
     const merchants = new Map();
     const rows = db.prepare(
       `SELECT t.kind, t.amount_cents, t.date, t.category_id, t.description, t.import_id FROM budget_transactions t
@@ -1825,6 +1985,8 @@ export function router(ctx) {
       if (t.kind === 'income') { m.income += t.amount_cents; continue; }
       m.spending += t.amount_cents;
       m.cats.set(t.category_id ?? 0, (m.cats.get(t.category_id ?? 0) ?? 0) + t.amount_cents);
+      // Spent by this day of the month (the 9th → days 1–9; a shorter month counts in full).
+      if (Number(t.date.slice(8, 10)) <= Math.min(dayNow, daysInMonth(monthOf(t.date)))) m.byNow.set(t.category_id ?? 0, (m.byNow.get(t.category_id ?? 0) ?? 0) + t.amount_cents);
       const key = merchantKey(t.description);
       if (key) merchants.set(key, { total: (merchants.get(key)?.total ?? 0) + t.amount_cents, count: (merchants.get(key)?.count ?? 0) + 1 });
     }
@@ -1841,8 +2003,9 @@ export function router(ctx) {
     ].map((c) => {
       const a = avg((x) => x.cats.get(c.id) ?? 0);
       const t = now.cats.get(c.id) ?? 0;
-      // This month so far is compared with the average up to the same day of the month.
-      const td = Math.round((a * Number(today.slice(8, 10))) / daysInMonth(cur));
+      // This month so far is compared with what earlier full months had spent by the same day
+      // (a mortgage paid on the 1st is "usual" all month long).
+      const td = avg((x) => x.byNow.get(c.id) ?? 0);
       return { ...c, a, t, td, change_pct: td ? Math.round(((t - td) / td) * 100) : null };
     }).filter((c) => c.a || c.t).sort((x, y) => y.a - x.a || y.t - x.t);
     const spikes = cats.filter((c) => c.td > 0 && c.t >= c.td * 1.3 && c.t - c.td >= 5000);
@@ -1894,7 +2057,12 @@ export function router(ctx) {
         const cut = Math.min(shortfall, Math.round((c.a * 0.25) / 100) * 100);
         if (cut < 1000) continue;
         const gap = shortfall - cut;
-        options.push({ gap, text: `Spend ${fmt(cut)} less on ${c.name} each month (usually ${fmt(c.a)})${gap > 0 ? ` — you'd still be ${fmt(gap)} a month short.` : ' — that closes the gap.'}` });
+        // Same comparison as spikes: this month so far against what's usual by today.
+        const vs = c.td ? ` (${c.change_pct >= 0 ? '+' : ''}${c.change_pct}%)` : '';
+        options.push({
+          gap,
+          text: `${c.name}: ${fmt(c.t)} so far — usually ${fmt(c.td)} by now${vs}. Spending ${fmt(cut)} less on ${c.name} each month would ${gap > 0 ? `leave you ${fmt(gap)} a month short.` : 'close the gap.'}`,
+        });
       }
       options.sort((a, b) => a.gap - b.gap);
     }
@@ -1911,6 +2079,7 @@ export function router(ctx) {
       category_id: c.id || null, name: c.name, icon: c.icon, color: c.color, avg: fromCents(c.a), avg_to_date: fromCents(c.td), this_month: fromCents(c.t), change_pct: c.change_pct,
     });
     return {
+      today,
       months: [...full, cur].map((m) => {
         const x = per.get(m);
         return { month: m, income: fromCents(x.income), spending: fromCents(x.spending), surplus: fromCents(x.income - x.spending), partial: m === cur };
@@ -1919,7 +2088,7 @@ export function router(ctx) {
       balances,
       categories: cats.map(catOut),
       merchants: [...merchants].sort((a, b) => b[1].total - a[1].total).slice(0, 8).map(([k, v]) => ({ merchant: prettyMerchant(k), total: fromCents(v.total), count: v.count })),
-      spikes: spikes.map((c) => ({ category_id: c.id || null, name: c.name, this_month: fromCents(c.t), avg: fromCents(c.a), change_pct: c.change_pct })),
+      spikes: spikes.map((c) => ({ category_id: c.id || null, name: c.name, this_month: fromCents(c.t), avg: fromCents(c.a), usual_by_now: fromCents(c.td), change_pct: c.change_pct })),
       recurring: { total_monthly: fromCents(billCents), bills: bills.map((b) => ({ id: b.id, description: b.description, amount: b.amount })) },
       goals: {
         needed_monthly: fromCents(needed), surplus: fromCents(avgSurplus), status, shortfall: fromCents(shortfall),
@@ -1943,16 +2112,18 @@ export function router(ctx) {
 // ---- hooks ----------------------------------------------------------------------------------
 
 /**
- * Ids of imported transactions the requester can see whose sealed description matches `q`.
- * ponytail: decrypts the latest 5000 imported rows per search; add an encrypted index if that gets slow.
+ * Ids of sealed transactions (imported, adults-only or private) the requester can see whose
+ * description or notes match `q`.
+ * ponytail: decrypts the latest 5000 such rows per search; add an encrypted index if that gets slow.
  */
 function sealedMatchIds(ctx, req, q) {
   return ctx.db
-    .prepare(`SELECT id, description FROM budget_transactions t WHERE family_id = ? AND deleted_at IS NULL AND import_id IS NOT NULL AND ${visibleSql(req)} ORDER BY date DESC, id DESC LIMIT 5000`)
+    .prepare(`SELECT id, description, notes FROM budget_transactions t WHERE family_id = ? AND deleted_at IS NULL
+      AND (import_id IS NOT NULL OR visibility != 'family') AND ${visibleSql(req)} ORDER BY date DESC, id DESC LIMIT 5000`)
     .all(req.family.id)
     .filter((t) => {
       try {
-        return searchMatch(ctx.box.open(t.description), q);
+        return searchMatch(ctx.box.open(t.description), q) || searchMatch(ctx.box.open(t.notes), q);
       } catch {
         return false;
       }
@@ -1966,7 +2137,7 @@ export function search(ctx, familyId, q, req) {
   const txs = ctx.db
     .prepare(
       `${TX_SELECT} WHERE t.family_id = ? AND t.deleted_at IS NULL AND ${visibleSql(req)}
-       AND ((t.import_id IS NULL AND search_match(t.description, ?)) OR search_match(t.notes, ?) OR t.id IN (SELECT value FROM json_each(?)))
+       AND ((t.import_id IS NULL AND t.visibility = 'family' AND (search_match(t.description, ?) OR search_match(t.notes, ?))) OR t.id IN (SELECT value FROM json_each(?)))
        ORDER BY t.date DESC LIMIT 5`,
     )
     .all(familyId, q, q, JSON.stringify(sealed))
@@ -1980,9 +2151,14 @@ export function search(ctx, familyId, q, req) {
     .prepare("SELECT * FROM budget_goals WHERE family_id = ? AND search_match(name, ?) LIMIT 3")
     .all(familyId, q)
     .map((g) => ({ title: `${g.emoji ? `${g.emoji} ` : ''}${g.name}`, subtitle: `Savings goal · ${money(g.target_cents, family?.currency)}`, link: `/budget/goals?goal=${g.id}` }));
+  // Family bills match in SQL; sealed ones (from an import) are opened and matched in JS.
   const bills = ctx.db
-    .prepare(`SELECT * FROM budget_recurring b WHERE family_id = ? AND active = 1 AND ${visibleSql(req, 'b')} AND search_match(description, ?) LIMIT 3`)
+    .prepare(`SELECT * FROM budget_recurring b WHERE family_id = ? AND active = 1 AND ${visibleSql(req, 'b')}
+      AND (visibility != 'family' OR search_match(description, ?)) ORDER BY id DESC LIMIT 500`)
     .all(familyId, q)
+    .map((b) => openBill(ctx.db, { ...b, description: ctx.box.open(b.description) }))
+    .filter((b) => searchMatch(b.description, q))
+    .slice(0, 3)
     .map((b) => ({ title: b.description, subtitle: `Monthly bill · ${money(b.amount_cents, family?.currency)} on day ${b.day_of_month}`, link: '/budget/bills' }));
   return [...txs, ...goals, ...bills].slice(0, 8);
 }
@@ -2006,6 +2182,7 @@ export function onMemberLeft(ctx, { familyId, userId }) {
     db.prepare("DELETE FROM budget_recurring WHERE family_id = ? AND created_by = ? AND visibility = 'private'").run(familyId, userId);
     db.prepare("DELETE FROM budget_imports WHERE family_id = ? AND created_by = ? AND visibility = 'private'").run(familyId, userId);
   });
+  scrubFreedPages(db); // secure_delete zeroed the rows; flush the old pages out of the WAL too
 }
 
 export function dashboard(ctx, req) {

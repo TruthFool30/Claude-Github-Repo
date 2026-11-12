@@ -10,7 +10,7 @@ import { Badge, Button, Card, CardHeader, EmptyState, SegmentedControl, Skeleton
 import { useInsights, useMoney, type Insights as InsightsData } from './api';
 import { TrendChart } from './Charts';
 import { useBudget } from './context';
-import { CategoryIcon, Progress, Stat } from './shared';
+import { CategoryIcon, Progress, Stat, merchantCase } from './shared';
 import mod from './index';
 
 const WINDOWS = [3, 6, 12] as const;
@@ -24,7 +24,7 @@ function Change({ pct }: { pct: number | null }) {
     <span className={cn('inline-flex items-center gap-0.5 text-xs font-semibold tabular', r > 0 ? 'text-danger' : 'text-success-soft-fg')}>
       {r > 0 ? <ArrowUpRight size={12} aria-hidden /> : <ArrowDownLeft size={12} aria-hidden />}
       {r > 0 ? '+' : '−'}{Math.abs(r)}%
-      <span className="sr-only"> vs average</span>
+      <span className="sr-only"> vs usual by now</span>
     </span>
   );
 }
@@ -194,7 +194,8 @@ export default function Insights() {
   const trend = data.months.map((m) => ({ month: m.month, income: m.income, spent: m.spending }));
   const [firstBalance, ...moreBalances] = data.balances;
   const maxMerchant = Math.max(1, ...data.merchants.map((m) => m.total));
-  const early = new Date().getDate() < 5;
+  // Day of month in the family's time zone (server's `today`); the browser's clock only as a fallback.
+  const early = (data.today ? Number(data.today.slice(8, 10)) : new Date().getDate()) < 5;
 
   return (
     <div className={cn('flex flex-col gap-5 transition-opacity', isFetching && 'opacity-80')}>
@@ -257,7 +258,12 @@ export default function Insights() {
             <div key={`${s.category_id}-${s.name}`} className="flex items-start gap-3 rounded-2xl border border-warning/30 bg-warning-soft px-4 py-3 text-sm text-warning-soft-fg">
               <Flame size={18} className="mt-0.5 shrink-0" aria-hidden />
               <span>
-                <span className="font-semibold">{s.name}</span> is at {fmt(s.this_month)} this month — {Math.round(s.change_pct)}% above your {fmt(s.avg)} average.
+                {s.usual_by_now !== undefined ? (
+                  <><span className="font-semibold">{s.name}:</span> {fmt(s.this_month)} so far — usually {fmt(s.usual_by_now)} by now (+{Math.round(s.change_pct)}%)</>
+                ) : (
+                  // Older server: no "usual by now" figure, so no % (it wasn't computed against the full-month average shown).
+                  <><span className="font-semibold">{s.name}:</span> {fmt(s.this_month)} so far this month — a typical month is {fmt(s.avg)}</>
+                )}
               </span>
             </div>
           ))}
@@ -310,14 +316,23 @@ export default function Insights() {
                   <CategoryIcon category={c} size="sm" />
                   <div className="min-w-0 flex-1">
                     <div className="truncate text-sm font-medium text-fg">{c.name}</div>
-                    <div className="text-xs text-muted tabular">
-                      avg {fmt(c.avg)}/mo{c.avg_to_date !== undefined && !early && <> · usually {fmt(c.avg_to_date)} by now</>}
+                    {/* The % sits next to the figure it was computed from ("usually $645 by now"), never next to the full-month average.
+                        ponytail: early in the month, or with a tiny baseline, a % is noise ("−100%" on the 2nd says nothing). */}
+                    <div className="flex flex-wrap items-center gap-x-1.5 text-xs text-muted tabular">
+                      {c.avg_to_date !== undefined && !early ? (
+                        <>
+                          <span>usually {fmt(c.avg_to_date)} by now</span>
+                          {c.this_month > 0 && c.avg_to_date >= 5 && <Change pct={c.change_pct} />}
+                          <span className="basis-full text-subtle">{fmt(c.avg)} in a full month</span>
+                        </>
+                      ) : (
+                        <span>{fmt(c.avg)} in a typical month</span>
+                      )}
                     </div>
                   </div>
                   <div className="shrink-0 text-right">
                     <div className="text-sm font-semibold text-fg tabular">{fmt(c.this_month)}</div>
-                    {/* ponytail: early in the month (or with a tiny baseline) a % is noise — "−100%" on the 2nd says nothing. */}
-                    {c.this_month === 0 ? <span className="text-xs text-subtle">none yet</span> : early || (c.avg_to_date ?? c.avg) < 5 ? null : <Change pct={c.change_pct} />}
+                    {c.this_month === 0 && <span className="text-xs text-subtle">none yet</span>}
                   </div>
                 </li>
               ))}
@@ -333,7 +348,7 @@ export default function Insights() {
               {data.merchants.map((m) => (
                 <li key={m.merchant}>
                   <div className="mb-1 flex items-baseline justify-between gap-3 text-sm">
-                    <span className="min-w-0 truncate font-medium text-fg">{m.merchant}</span>
+                    <span className="min-w-0 truncate font-medium text-fg">{merchantCase(m.merchant)}</span>
                     <span className="shrink-0 tabular"><span className="font-semibold text-fg">{fmt(m.total)}</span> <span className="text-xs text-muted">· {plural(m.count, 'payment')}</span></span>
                   </div>
                   <div className="h-1.5 overflow-hidden rounded-full bg-surface-2 dark:bg-surface-3"><div className="h-full rounded-full bg-[#8E4EC6]" style={{ width: `${(m.total / maxMerchant) * 100}%` }} /></div>

@@ -115,10 +115,14 @@ server tests, and Wall activity entries for meaningful actions.
     on broken XML). pdf.js's native `@napi-rs/canvas` is never loaded (blocked in the parser; removed from
     the Docker image). Errors: `400 { error, code }`, code `UNSUPPORTED | PASSWORD_REQUIRED | BAD_PASSWORD
     | EMPTY | TOO_LARGE` (timeouts/zip bombs/out of memory → `TOO_LARGE`).
-  - Masking (imports, manual transactions on POST/PATCH, bill names): NFKC + every Unicode digit as 0–9 +
-    whitespace collapsed; NRIC/FIN (`[STFGM]1234567X`) → `•••••••••`; ≥ 8 digits with up to 3 separator
-    characters (space . - / _ * dashes) between digits → `••` + last 4. Amounts (`1,234.56`) and dates
-    (`01/11/2026`, `2026-11-01`) are kept. The holder's name from a "Name:" header line becomes "(you)".
+  - Masking (imports, manual transactions on POST/PATCH, bill names): NFKC, format characters (zero-width
+    space, soft hyphen) dropped, every Unicode digit as 0–9, whitespace collapsed; NRIC/FIN (`S1234567A`,
+    `s 1234567 a`, `S1234567`) → `•••••••••`; ≥ 8 digits with up to 3 separator characters (space . , - / _ *
+    dashes) between digits → `••` + last 4 (a trailing `.00` is not part of the number). Inside such a run,
+    space-separated amounts (`1,234.56`, `12.30`) and dates (`01/11/2026`, `2026-11-01`) are kept unless they
+    follow ≥ 4 digits of the number (`4111 1111 1111 1111.00` → `••1111`). The holder's name — from a "Name:"
+    header line, or the unlabelled first line of the PDF address block (all capitals, then an address line
+    with a number) — becomes "(you)", its words in any order.
   - `POST /api/budget/imports/preview` (multipart `file`, `password?`) → the contract's preview (token,
     bank, format, account `{label,last4}|null`, currency `SGD`, period, opening/closing balance, rows with
     `row_id, date, description, merchant, amount, kind, balance, category_id, category_source
@@ -140,8 +144,14 @@ server tests, and Wall activity entries for meaningful actions.
     each manual row absorbing one line — among rows the importer can see; within one file, an identical
     line unless the running balances differ.
   - Transfers: rows have `transfer` (preview + commit rows + POST/PATCH /transactions, boolean; txOut
-    `transfer`). Pre-flagged for "TO/FROM OWN …", "OWN ACCOUNT" lines and for the opposite amount in another
-    imported account within ±3 days (the other side is flagged on commit). Transfers stay listed but count in
+    `transfer`). Pre-flagged for "TO/FROM OWN …", "OWN ACCOUNT" lines and for the opposite amount in another of
+    the importer's imported accounts within ±3 days when either side has a transfer-like word (TRANSFER, TRF,
+    FAST, PAYNOW, IBG, GIRO … TO/FROM OWN, OWN ACCOUNT, TO/FROM A/C). Such preview rows carry `pair:
+    { account_label, date, amount, description }` — the existing row that is ALSO marked a transfer on commit;
+    `amount` is that row's signed amount (income positive, expense negative). Commit rows accept `pair: false`
+    to leave it alone; the import that flagged it is remembered (`transfer_by_import`) and undo clears it.
+    Fixtures: `dbs-pair.csv` (DBS ••4821, −1,500.00 "FUNDS TRANSFER TO UOB A/C" on 10 Oct) then
+    `uob-pair.csv` (UOB ••7890, +1,500.00 "FUNDS TRANSFER FROM DBS" on 11 Oct). Transfers stay listed but count in
     no income/spending total (summary, charts, category totals/limits, dashboard, insights, import totals,
     preview summary) and aren't bill/recurring candidates.
   - Dates `a/b/yyyy`: month-first when any second part > 12, else day-first; all ≤ 12 → day-first plus a
@@ -151,14 +161,31 @@ server tests, and Wall activity entries for meaningful actions.
     `existing_bill_id`, else same merchant + amount ±10% + due day ±5) when that month isn't paid/skipped
     yet; a private import never pays a shared bill. New bills from suggestions start the month after their
     latest payment, with every payment seen linked as a paid month. Undo removes paid months pointing at the
-    import's rows (the bills stay).
+    import's rows (the bills stay). Bill status `expected` (bills from an import): a month whose due date is
+    after the latest statement of that account, until 5 days after the due date — never `overdue` meanwhile.
   - txOut `merchant`: clean merchant name for imported rows (FOREIGN/AMT/currency codes and amounts dropped),
     null for manual rows.
   - Learned rules carry the import's visibility: from an 'adults' import all grown-ups' previews use it,
     from a 'private' one only the importer's (whose private rule wins over a shared one). Undoing an import
     deletes the rules it last set; someone leaving takes their private rules.
   - Visibility changes: only the creator may widen a row's visibility, and only the importer may change an
-    imported row's at all (managers may still narrow manual rows to 'adults').
+    imported row's at all (managers may still narrow manual rows to 'adults'). Other grown-ups may re-file an
+    imported row (category, amount, date, paid by, notes) but not change its description or transfer flag (403).
+  - Bill links: a transaction pays a bill only when everyone who can see the row can see the bill — a
+    private row only its owner's private bill and vice versa; an adults row may pay an adults or family bill
+    (others then see the month paid with `transaction_id`/`paid_amount`/`paid_date` null). An import links
+    only the importer's own rows (recurring history is built from them alone; transfer pairing too), and its
+    paid months remember it (`budget_recurring_runs.import_id`): undo removes them and unlinks every row it
+    linked. Taking back a month's payment (skip / undo paid) unlinks an imported row instead of deleting it.
+    txOut `recurring_id` is null when the viewer can't see that bill, `?recurring_id=` 404s for such a bill,
+    and duplicate detection only uses bill names the importer can see.
+  - Encryption at rest also covers adults-only/private manual rows (description, notes) and bills made from
+    an import (description, notes); legacy rows are sealed at startup (`sealLegacyBudget`). Their Wall line
+    and bill reminders leave the name out. Budget turns on `PRAGMA secure_delete` (connection-wide) and
+    truncates the WAL after member removal, purges and the legacy sealing.
+  - The parser child runs under Node's permission model: `--permission`, read access only to
+    `server/src/modules/budget`, `server/package.json` and `pdfjs-dist`, `--allow-worker` for its one parsing
+    thread; no writes, child processes or addons.
   - Categories: learned per family (`budget_merchant_rules`, merchant key sealed) beat built-in Singapore
     rules mapped onto existing categories by name (NTUC/FairPrice/Cold Storage/Sheng Siong/Giant →
     Groceries; Grab/Gojek/ComfortDelGro/SimplyGo/TransitLink/EZ-Link/BUS/MRT/fuel → Transport; Singtel/
@@ -182,15 +209,18 @@ server tests, and Wall activity entries for meaningful actions.
 - **Insights** `GET /api/budget/insights?months=3` (1–12, grown-ups): the contract's shape, from every
   transaction the requester can see. `months[]` = the last N full months + the current one with
   `partial: true`; averages over the full months that have any transaction (`full_months` says how many);
-  categories (expense) with `avg`, `avg_to_date` (avg × today's day ÷ days in the month), `this_month`,
-  `change_pct` (this month vs `avg_to_date`); top 8 merchants over the window; spikes = this month ≥ +30% and
-  ≥ 50 (currency units) above `avg_to_date`; recurring = active visible expense bills; balances = latest
+  `today` (the family-local date used); categories (expense) with `avg`, `avg_to_date` (what earlier full
+  months had spent by today's day of the month — cumulative, so a mortgage on the 1st is usual all month),
+  `this_month`, `change_pct` (this month vs `avg_to_date`); top 8 merchants over the window; spikes = this
+  month ≥ 1.3 × and ≥ 50 (currency units) above `usual_by_now` (= `avg_to_date`, included in each spike); recurring = active visible expense bills; balances = latest
   closing balance per imported account with `statement_to` (newest import's period end) and `stale` (that
   newest import had no closing balance, so an older one's is shown); goals: `needed_monthly` = Σ `autoAmount`
   of active dated goals whose target month hasn't passed (an auto goal already paid this month counts from
   next month), `overdue` = `[{id, name, emoji, target_date, left}]` for those whose target date has passed,
   status `on_track | short | no_data`, `shortfall`, `suggestions` = alternatives, best first, each a complete
-  sentence (push the biggest goal's date — closes the gap; or trim one non-essential category by ≤ 25%),
+  sentence (push the biggest goal's date — closes the gap; or trim one non-essential category by ≤ 25%,
+  worded like spikes: "Dining: $344.90 so far — usually $213.28 by now (+62%). Spending $X less on Dining each
+  month would …" — never a percentage against a full month),
   `remaining_gap` = what's still short after the best one (0 when on track).
 
 ## locator

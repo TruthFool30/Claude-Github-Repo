@@ -8,9 +8,9 @@ import { cn } from '../../lib/cn';
 import { fmtDate, fmtRelative, firstName } from '../../lib/format';
 import { Avatar, Badge, Button, Lightbox, Modal, Skeleton, VISIBILITY, VisibilityBadge, toast } from '../../ui';
 import { keys, useCanManage, useMoney, type Transaction, type TxPage } from './api';
-import { Amount, CategoryIcon, ImportedTag, UNCATEGORIZED } from './shared';
+import { Amount, CategoryIcon, ImportedTag, UNCATEGORIZED, merchantCase } from './shared';
 
-export const txTitle = (t: Transaction) => t.merchant || t.description || t.category?.name || (t.kind === 'income' ? 'Income' : 'Expense');
+export const txTitle = (t: Transaction) => (t.merchant ? merchantCase(t.merchant) : t.description || t.category?.name || (t.kind === 'income' ? 'Income' : 'Expense'));
 /** The bank's own text, shown under a cleaned-up merchant title. */
 const bankText = (t: Transaction) => (t.merchant && t.description && t.description !== t.merchant ? t.description : null);
 

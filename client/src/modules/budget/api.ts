@@ -69,7 +69,8 @@ export interface Summary {
   bills: { total: number; paid: number; due: number; remaining: number };
 }
 
-export type BillStatus = 'paid' | 'skipped' | 'overdue' | 'due_today' | 'upcoming';
+/** 'expected': created from an import, for a month no statement covers yet — never overdue. */
+export type BillStatus = 'paid' | 'skipped' | 'overdue' | 'due_today' | 'upcoming' | 'expected';
 
 export interface Bill {
   id: number;
@@ -156,6 +157,8 @@ export interface PreviewRow {
   recurring_group: string | null;
   /** Server's guess that this is a move between own accounts (older servers: absent = false). */
   transfer?: boolean;
+  /** When `transfer` came from pairing: the already-imported row in another account that commit ALSO marks as a transfer. */
+  pair?: { account_label: string; date: string; amount: number; description: string } | null;
 }
 
 export interface RecurringSuggestion {
@@ -188,7 +191,8 @@ export interface ImportPreview {
 
 export interface CommitBody {
   visibility: 'adults' | 'private';
-  rows: Array<{ row_id: string; category_id: number | null; include: boolean; transfer: boolean }>;
+  /** `pair: false` declines marking the paired row in the other account. */
+  rows: Array<{ row_id: string; category_id: number | null; include: boolean; transfer: boolean; pair?: false }>;
   bills: Array<{ group: string; description?: string; amount?: number; day_of_month?: number; category_id?: number | null }>;
 }
 
@@ -225,10 +229,13 @@ export interface Insights {
   avg_surplus: number;
   /** `stale`: the newest statement of that account (ending `statement_to`) had no closing balance. */
   balances: Array<{ account_label: string; balance: number; as_of: string; stale?: boolean; statement_to?: string }>;
-  /** `avg_to_date`: the average pro-rated to today's day of month (what `change_pct` compares with). */
+  /** `avg_to_date`: what the category had typically spent by this day of the month in earlier full months (what `change_pct` compares with). */
   categories: Array<{ category_id: number | null; name: string; icon: string; color: string; avg: number; avg_to_date?: number; this_month: number; change_pct: number | null }>;
   merchants: Array<{ merchant: string; total: number; count: number }>;
-  spikes: Array<{ category_id: number | null; name: string; this_month: number; avg: number; change_pct: number }>;
+  /** `change_pct` compares `this_month` with `usual_by_now` (typical spend by this day in earlier months). */
+  spikes: Array<{ category_id: number | null; name: string; this_month: number; avg: number; usual_by_now?: number; change_pct: number }>;
+  /** Family-local date the numbers were computed for (YYYY-MM-DD). */
+  today?: string;
   recurring: { total_monthly: number; bills: Array<{ id: number; description: string; amount: number }> };
   goals: {
     needed_monthly: number;

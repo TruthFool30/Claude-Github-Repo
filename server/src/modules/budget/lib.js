@@ -144,8 +144,10 @@ export function money(cents, currency = 'USD') {
 // ---- serialization -----------------------------------------------------------------------
 
 export const TX_SELECT = `
-  SELECT t.*, c.name AS c_name, c.icon AS c_icon, c.color AS c_color, c.kind AS c_kind, bi.account_label AS import_label
-  FROM budget_transactions t LEFT JOIN budget_categories c ON c.id = t.category_id LEFT JOIN budget_imports bi ON bi.id = t.import_id`;
+  SELECT t.*, c.name AS c_name, c.icon AS c_icon, c.color AS c_color, c.kind AS c_kind, bi.account_label AS import_label,
+    rb.visibility AS rb_visibility, rb.created_by AS rb_created_by
+  FROM budget_transactions t LEFT JOIN budget_categories c ON c.id = t.category_id LEFT JOIN budget_imports bi ON bi.id = t.import_id
+  LEFT JOIN budget_recurring rb ON rb.id = t.recurring_id`;
 
 export function txOut(row) {
   if (!row) return null;
@@ -251,12 +253,12 @@ export const BILL_SELECT = `
  * Record a payment of `bill` for `month` (transaction + run row). Returns the transaction row id.
  * Caller wraps in a transaction.
  */
-export function recordBillPayment(db, bill, month, { amountCents, date, userId, paidBy } = {}) {
+export function recordBillPayment(db, bill, month, { amountCents, date, userId, paidBy, description } = {}) {
   const { lastInsertRowid } = db.prepare(
     `INSERT INTO budget_transactions (family_id, kind, amount_cents, category_id, description, date, paid_by, recurring_id, created_by, visibility)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
-    bill.family_id, bill.kind, amountCents ?? bill.amount_cents, bill.category_id, bill.description,
+    bill.family_id, bill.kind, amountCents ?? bill.amount_cents, bill.category_id, description ?? bill.description,
     date ?? dueDate(month, bill.day_of_month), paidBy === undefined ? bill.paid_by : paidBy, bill.id,
     // Payments of a private bill (from a private import) stay private to its creator.
     bill.visibility === 'private' ? bill.created_by : userId ?? bill.created_by, bill.visibility ?? 'family',

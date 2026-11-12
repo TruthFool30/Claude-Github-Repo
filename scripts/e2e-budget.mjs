@@ -147,9 +147,15 @@ try {
   await S.getByRole('button', { name: new RegExp(`${label}.*\\$30\\.00`) }).waitFor({ timeout: 8000 });
   ok('edit amount → Sam sees $30.00 live');
 
-  // search filter
+  // search filter. The heading flips as soon as the debounced query changes, but the list keeps the
+  // previous results (placeholderData) until the search response lands — so wait for that response
+  // and for React to render it before counting (under load the old 17 rows were still on screen).
+  const searched = A.waitForResponse((r) => r.url().includes('/api/budget/transactions?') && new URL(r.url()).searchParams.get('q') === label && r.ok());
   await A.getByLabel('Search transactions').fill(label);
   await A.getByText(`Results for “${label}”`).waitFor();
+  const expected = (await (await searched).json()).items.length;
+  assert.equal(expected, 1, 'server returns exactly the new expense');
+  await A.waitForFunction((n) => document.querySelectorAll('section ul li button').length === n, expected, { timeout: 8000 }).catch(() => {});
   assert.equal(await A.locator('section ul li button').count(), 1);
   await A.getByLabel('Clear search').click();
   ok('search filters the list');

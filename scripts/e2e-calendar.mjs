@@ -105,6 +105,9 @@ await step('create an event (live in second browser)', async () => {
   await d.locator('input[placeholder="Add a place"]').fill("Tony's Pizza");
   await A.screenshot({ path: `${SHOTS}/e2e-editor-filled.png` });
   await d.getByRole('button', { name: 'Add event' }).click();
+  await A.getByText('E2E Pizza night added').first().waitFor();
+  // A busy day folds extra events under "+N more" in month view, so A works in the agenda, which lists them all.
+  await A.goto(`${BASE}/calendar?view=agenda`);
   await pill(A, 'E2E Pizza night').first().waitFor();
   await pill(S, 'E2E Pizza night').first().waitFor({ timeout: 8000 }); // live, no reload
 });

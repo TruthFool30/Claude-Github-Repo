@@ -18,6 +18,7 @@
 //                  "01 Nov" (year from "Period: … to …" / "as at …") or "01/11/2026".
 import { fork } from 'node:child_process';
 import { createRequire } from 'node:module';
+import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Worker, isMainThread, parentPort, workerData } from 'node:worker_threads';
 import zlib from 'node:zlib';
@@ -59,26 +60,58 @@ const asciiDigit = (c) => {
   return String((end - cp) % 10);
 };
 /** NFKC (full-width → ASCII), every decimal digit as 0–9, whitespace collapsed; private-use characters dropped. */
-export const normText = (s) => String(s ?? '').normalize('NFKC').replace(/[-]/g, '')
+export const normText = (s) => String(s ?? '').normalize('NFKC').replace(/\p{Cf}/gu, '') // zero-width space, soft hyphen, …
   .replace(/(?![0-9])\p{Nd}/gu, asciiDigit).replace(/\s+/g, ' ').trim();
 
-// Amounts ("1,234.56") and dates ("01/11/2026", "2026-11-01") are kept as they are.
-const PROTECTED = /\d{1,3}(?:,\d{3})*\.\d{2}(?![\d.])|\b\d{1,2}\/\d{1,2}\/(?:\d{4}|\d{2})\b(?![/\d])|\b\d{4}-\d{2}-\d{2}\b(?![-\d])/g;
-// ≥ 8 digits with up to 3 separator characters (space . - / _ * dashes) between any two of them.
-const LONG_NUMBER = /\d(?:[\s.\-/_*‐-―−]{0,3}\d){7,}/g;
-const NRIC = /\b[STFGM]\d{7}[A-Z]\b/gi;
+// ≥ 8 digits with up to 3 separator characters (space . , - / _ * dashes) between any two of them.
+const LONG_NUMBER = /\d(?:[\s.,\-/_*‐-―−]{0,3}\d){7,}/g;
+// Singapore NRIC/FIN, spaces and check letter optional ("S1234567A", "s 1234567 a", "S1234567").
+const NRIC = /\b[STFGM]\s?\d{7}(?:\s?[A-Z])?\b/gi;
+// Pieces of such a run kept as they are: amounts ("1,234.56", "12.30") and dates.
+const AMOUNT_PIECE = /^\d{1,3}(?:,\d{3})*\.\d{2}$/;
+const DATE_PIECE = /^(?:\d{1,2}\/\d{1,2}\/(?:\d{4}|\d{2})|\d{4}-\d{2}-\d{2})$/;
+
+/**
+ * One long digit run: its space-separated pieces that are amounts or dates stay, the rest is
+ * grouped and every group with ≥ 8 digits becomes "••" + its last 4 (a trailing ".00" is not part
+ * of the number). An amount right after a group of ≥ 4 digits joins it ("4111 1111 1111 1111.00"
+ * is a card number, not $1111.00), so the guard never reveals the tail of a number.
+ */
+function maskRun(run) {
+  const out = [];
+  let group = [];
+  let ws = '';
+  const digits = (t) => t.replace(/\D/g, '').length;
+  const flush = () => {
+    if (!group.length) return;
+    const text = group.join('');
+    const cents = /\.\d{2}$/.test(text) && !text.slice(0, -3).includes('.'); // "….00" after a number without dots
+    const d = (cents ? text.slice(0, -3) : text).replace(/\D/g, '');
+    out.push(d.length >= 8 ? `••${d.slice(-4)}` : text);
+    group = [];
+  };
+  for (const tok of run.split(/(\s+)/)) {
+    if (!tok) continue;
+    if (/^\s+$/.test(tok)) { ws += tok; continue; }
+    const piece = tok.replace(/[,;]$/, '');
+    if ((AMOUNT_PIECE.test(piece) || DATE_PIECE.test(piece)) && !(group.length && digits(group.join('')) >= 4)) {
+      flush();
+      out.push(ws, tok);
+    } else if (group.length) group.push(ws, tok);
+    else { out.push(ws); group.push(tok); }
+    ws = '';
+  }
+  flush();
+  out.push(ws);
+  return out.join('');
+}
 
 /**
  * Text as stored: normalised (normText), Singapore NRIC/FIN numbers fully masked, and every run of
  * ≥ 8 digits (account, card and phone numbers, separators allowed) → "••" + its last 4 digits.
  */
 export function maskDigits(s) {
-  const kept = [];
-  return normText(s)
-    .replace(NRIC, '•••••••••')
-    .replace(PROTECTED, (m) => String.fromCharCode(0xe000 + Math.min(kept.push(m) - 1, 0x18ff)))
-    .replace(LONG_NUMBER, (m) => `••${m.replace(/\D/g, '').slice(-4)}`)
-    .replace(/[-]/g, (c) => kept[c.charCodeAt(0) - 0xe000] ?? '');
+  return normText(s).replace(NRIC, '•••••••••').replace(LONG_NUMBER, maskRun);
 }
 
 const clean = (s) => maskDigits(s).slice(0, 140);
@@ -409,6 +442,22 @@ function readXlsx(buf) {
 // ---- table (CSV / XLSX) statements ---------------------------------------------------------------
 
 const lc = (c) => String(c ?? '').trim().toLowerCase();
+
+const TITLES = /^(?:MR|MRS|MS|MDM|MISS|DR|MADAM)\.?\s+/i;
+const NOT_A_NAME = /\b(?:BANK|DBS|POSB|UOB|STATEMENT|ACCOUNT|CONSOLIDATED|PERIOD|PAGE|DETAILS|SINGAPORE|LTD|LIMITED|SAMPLE STATEMENT|CONTACT|EMAIL|WWW|TOTAL|BALANCE)\b/i;
+/**
+ * The holder's name in a PDF header without a "Name:" label: DBS and UOB print it as the first line
+ * of the address block — an all-capitals line of 2–6 words (optionally "MR"/"MS"…) followed by an
+ * address line with a number in it ("88 SENGKANG SQUARE", "BLK 123 …", "#12-31 …").
+ */
+function unlabelledHolder(lines) {
+  for (let i = 0; i < lines.length - 1; i++) {
+    const t = (lines[i].cells[0]?.s ?? '').trim(); // the left column only ("Contact Us" sits on the right)
+    if (!/^[A-Z][A-Z'.-]*(?:\s+[A-Z][A-Z'.-]*){1,5}$/.test(t) || NOT_A_NAME.test(t)) continue;
+    if (/\d/.test(lines[i + 1].cells[0]?.s ?? '')) return t.replace(TITLES, '');
+  }
+  return null;
+}
 const BALANCE_LINE = /balance b\/f|balance c\/f|brought forward|carried forward|opening balance|closing balance|previous balance/i;
 const HOLDER_LABEL = /^(?:account holder|customer name|account name|name)\s*:?$/i;
 const isHeaderRow = (r) => {
@@ -589,7 +638,7 @@ async function parsePdf(buf, password) {
     const w = at(/withdraw/i);
     const d = at(/deposit/i);
     const b = at(/balance/i);
-    cols = { w: center(w), d: center(d), b: center(b), desc: at(/description/i)?.x ?? w.x / 2 };
+    cols = { w: center(w), d: center(d), b: center(b), desc: at(/description|details|particulars/i)?.x ?? w.x / 2 };
   };
   const rows = [];
   const warnings = [];
@@ -662,7 +711,8 @@ async function parsePdf(buf, password) {
   }
   if (!rows.length && undated) fail('UNSUPPORTED', MESSAGES.UNSUPPORTED);
   for (const r of rows) r.description = clean(r.description);
-  const holder = preamble.split('\n').map((t) => /^(?:account holder|customer name|account name|name)\s*:\s*(.+)$/i.exec(t)?.[1]).find(Boolean) ?? null;
+  const holder = preamble.split('\n').map((t) => /^(?:account holder|customer name|account name|name)\s*:\s*(.+)$/i.exec(t)?.[1]).find(Boolean)
+    ?? unlabelledHolder(lines.slice(0, hi));
   return { bank, format: 'pdf', last4, period, opening, closing: closing ?? rows[rows.length - 1]?.balance_cents ?? null, rows, warnings, holder };
 }
 
@@ -679,11 +729,14 @@ export async function parseStatement(buf, { password = null, filename = '' } = {
   else res = parseTable(parseCsv(decodeText(buf)), ext === 'xls' ? 'xls' : 'csv');
   if (!res.rows.length) fail('EMPTY', MESSAGES.EMPTY);
   if (res.rows.length > MAX_ROWS) fail('TOO_LARGE', MESSAGES.TOO_COMPLEX);
-  // The statement holder's own name (self-transfers: "FROM ALEX RIVERA") becomes "(you)"; it's never kept.
-  const words = normText(res.holder ?? '').split(' ').filter((w) => /\p{L}/u.test(w)).slice(0, 6).map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
-  if (words.join('').length >= 3) {
-    const re = new RegExp(`(?<![\\p{L}\\p{N}])${words.join('[\\s,]+')}(?![\\p{L}\\p{N}])`, 'giu');
-    for (const r of res.rows) r.description = r.description.replace(re, '(you)');
+  // The statement holder's own name (self-transfers: "FROM ALEX RIVERA", "RIVERA ALEX") becomes
+  // "(you)", its words in any order; the name itself is never kept.
+  const names = [...new Set(normText(res.holder ?? '').replace(TITLES, '').toUpperCase().split(/[\s,]+/).filter((w) => /\p{L}/u.test(w)))].slice(0, 6);
+  if (names.join('').length >= 3) {
+    const alt = names.map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+    const re = new RegExp(`(?<![\\p{L}\\p{N}])(?:${alt})(?:[\\s,]+(?:${alt})){${names.length - 1}}(?![\\p{L}\\p{N}])`, 'giu');
+    const all = (m) => names.every((w) => m.toUpperCase().split(/[\s,]+/).includes(w));
+    for (const r of res.rows) r.description = r.description.replace(re, (m) => (all(m) ? '(you)' : m));
   }
   delete res.holder;
   const dates = res.rows.map((r) => r.date).sort();
@@ -703,6 +756,18 @@ const CHILD_FLAG = 'HEARTH_STATEMENT_PARSER';
 // pdf.js inflates streams into typed arrays outside V8's heap limit, so the parser process's
 // resident memory is capped too; past it the process exits and the OS takes everything back.
 const CHILD_RSS_LIMIT = 320 * 1024 * 1024;
+/**
+ * Node's permission model for the parser process: it may read only its own code (this folder, the
+ * server's package.json) and pdf.js — not the database, the key file or uploads — and may not
+ * write files, start processes or load native addons. It may start the one worker thread it parses
+ * on (--allow-worker; workers inherit these limits).
+ */
+export function parserFlags() {
+  const require = createRequire(import.meta.url);
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const reads = [here, path.resolve(here, '../../../package.json'), path.dirname(require.resolve('pdfjs-dist/package.json'))];
+  return ['--permission', ...reads.map((p) => `--allow-fs-read=${p}`), '--allow-worker', '--disable-warning=SecurityWarning'];
+}
 
 /**
  * Parse in a separate, short-lived process (this file, run with HEARTH_STATEMENT_PARSER=1): it has
@@ -728,7 +793,7 @@ export async function parseInWorker(buffer, { password = null, filename = '', ow
     return await new Promise((resolve, reject) => {
       const child = fork(fileURLToPath(import.meta.url), [], {
         env: { [CHILD_FLAG]: '1' },
-        execArgv: ['--max-old-space-size=256', '--disable-warning=ExperimentalWarning'],
+        execArgv: ['--max-old-space-size=256', '--disable-warning=ExperimentalWarning', ...parserFlags()],
         stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
         serialization: 'advanced',
       });

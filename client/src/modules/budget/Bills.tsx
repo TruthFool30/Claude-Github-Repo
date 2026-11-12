@@ -43,6 +43,7 @@ const STATUS: Record<Bill['status'], { label: string; tone: 'success' | 'neutral
   overdue: { label: 'Overdue', tone: 'danger' },
   due_today: { label: 'Due today', tone: 'warning' },
   upcoming: { label: 'Upcoming', tone: 'info' },
+  expected: { label: 'Expected', tone: 'neutral' },
 };
 
 /** Optimistic "mark paid" / "skip" / "undo" for a bill in a given month. */
@@ -82,7 +83,7 @@ export function BillRow({ b, month, compact }: { b: Bill; month: string; compact
   const qc = useQueryClient();
   const [editing, setEditing] = useState(false);
   const [paying, setPaying] = useState(false);
-  const st = STATUS[b.status];
+  const st = STATUS[b.status] ?? STATUS.upcoming;
   const done = b.status === 'paid' || b.status === 'skipped';
 
   const remove = async () => {
@@ -114,7 +115,11 @@ export function BillRow({ b, month, compact }: { b: Bill; month: string; compact
         <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-muted">
           <Badge tone={st.tone} size="sm">{b.status === 'overdue' && <CircleAlert size={11} />}{st.label}</Badge>
           <span className="truncate">
-            {b.status === 'paid' && b.paid_date ? fmtDate(b.paid_date, 'MMM d') : `Due ${fmtDate(b.due_date, 'MMM d')}`}
+            {b.status === 'paid' && b.paid_date
+              ? fmtDate(b.paid_date, 'MMM d')
+              : b.status === 'expected'
+                ? `Not due yet · around ${fmtDate(b.due_date, 'MMM d')}`
+                : `Due ${fmtDate(b.due_date, 'MMM d')}`}
           </span>
           {!compact && payer && <Avatar user={payer} size="xs" title={`Usually paid by ${payer.name}`} />}
         </div>
@@ -319,7 +324,8 @@ export default function Bills() {
   const expense = bills.filter((b) => b.kind === 'expense');
   const income = bills.filter((b) => b.kind === 'income');
   const attention = expense.filter((b) => b.status === 'overdue' || b.status === 'due_today');
-  const open = expense.filter((b) => b.status === 'upcoming');
+  // 'expected' (from an imported statement, month not covered yet) is never overdue: it waits here.
+  const open = expense.filter((b) => b.status === 'upcoming' || b.status === 'expected');
   const settled = expense.filter((b) => b.status === 'paid' || b.status === 'skipped');
   const total = expense.reduce((s, b) => s + (b.status === 'paid' && b.paid_amount != null ? b.paid_amount : b.status === 'skipped' ? 0 : b.amount), 0);
   const paidTotal = expense.filter((b) => b.status === 'paid').reduce((s, b) => s + (b.paid_amount ?? b.amount), 0);

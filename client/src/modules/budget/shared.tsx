@@ -144,6 +144,22 @@ export function Stat({ label, value, hint, icon, tone }: { label: string; value:
   );
 }
 
+// ponytail: a fixed acronym list — statement merchants are mostly Singapore names; extend as they show up.
+const ACRONYMS = new Set(['NTUC', 'AIA', 'MRT', 'SP', 'DBS', 'POSB', 'UOB', 'OCBC', 'CPF', 'IRAS', 'HDB', 'LTA', 'SMRT', 'FP']);
+
+/**
+ * Display casing for merchant names ("NTUC FP-SAMPLE" / "Ntuc Fp Sample" → "NTUC FP-Sample"):
+ * title case, except known acronyms and short tokens without vowels, which stay in capitals.
+ */
+export function merchantCase(s: string | null | undefined): string {
+  if (!s) return '';
+  return s.replace(/[A-Za-z]+/g, (w) => {
+    const up = w.toUpperCase();
+    if (ACRONYMS.has(up) || (w.length <= 4 && !/[AEIOUY]/i.test(w))) return up;
+    return up[0] + up.slice(1).toLowerCase();
+  });
+}
+
 /** "Imported · DBS ••4821" marker. */
 export function ImportedTag({ label, className }: { label: string; className?: string }) {
   return (
