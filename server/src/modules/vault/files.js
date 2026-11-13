@@ -1,14 +1,16 @@
 // File storage helpers for the document vault.
 //
-// Uploads arrive through the shared multer instance (`ctx.upload`, which writes to
-// UPLOAD_DIR/<familyId>/<random>) and are then moved into UPLOAD_DIR/<familyId>/vault/.
-// That sub-folder is NOT reachable through the public `/uploads/<familyId>/<file>` route (which
-// only serves direct children), so every vault file — and in particular "private to me"
-// documents — can only be read through `GET /api/vault/documents/:id/file`, which enforces
-// family scoping and privacy. Deleting a family still removes the folder (it lives inside the
-// family's upload directory).
+// Uploads are received in memory (never written to disk in plaintext) and stored *sealed*
+// (ctx.box.sealBuffer, AES-256-GCM) in UPLOAD_DIR/<familyId>/vault/<random key>. That sub-folder is
+// NOT reachable through the public `/uploads/<familyId>/<file>` route (which only serves direct
+// children), so every vault file — and in particular "private to me" documents — can only be read
+// through `GET /api/vault/documents/:id/file`, which enforces family scoping and privacy and
+// decrypts on the fly. Deleting a family still removes the folder (it lives inside the family's
+// upload directory; nothing needs decrypting for that).
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { httpError } from '../../util.js';
 
 const KEY_RE = /^[a-f0-9]{24}(\.[a-z0-9]{1,8})?$/;
 
@@ -22,14 +24,99 @@ export function vaultPath(uploadDir, familyId, key) {
   return path.join(vaultDir(uploadDir, familyId), key);
 }
 
-/** Move a file that multer/storeFile wrote into the family's private vault folder. Returns the storage key. */
-export function moveIntoVault(uploadDir, familyId, absSource) {
-  const key = path.basename(absSource);
-  if (!KEY_RE.test(key)) throw new Error(`Unexpected upload name ${key}`);
+/** Write `plain` sealed to `abs` via a flushed temp file + rename, so a crash never leaves half a file. */
+function writeSealed(box, abs, plain) {
+  const tmp = `${abs}.tmp`;
+  try {
+    fs.writeFileSync(tmp, box.sealBuffer(plain), { flush: true });
+    fs.renameSync(tmp, abs);
+  } catch (err) {
+    fs.rmSync(tmp, { force: true });
+    throw err;
+  }
+}
+
+/** Store file contents sealed in the family's private vault folder. Returns the new storage key. */
+export function writeVaultFile(uploadDir, familyId, box, buffer, ext = '') {
+  // A blob that is already sealed would be stored as-is and then *decrypted* on download — refuse
+  // it, or the server becomes a decryption oracle for stolen vault files.
+  if (box.isSealedBuffer(buffer)) throw httpError(400, "This file can't be stored (it is an encrypted Hearth file)");
+  const key = crypto.randomBytes(12).toString('hex') + (ext ? `.${ext}` : '');
+  if (!KEY_RE.test(key)) throw new Error(`Unexpected storage key ${key}`);
   const dir = vaultDir(uploadDir, familyId);
   fs.mkdirSync(dir, { recursive: true });
-  fs.renameSync(absSource, path.join(dir, key));
+  writeSealed(box, path.join(dir, key), buffer);
   return key;
+}
+
+/**
+ * Decrypted contents of a stored vault file, or null when it is missing. Files stored before
+ * encryption at rest (not yet migrated) pass through unchanged.
+ * ponytail: whole file in memory (uploads are capped at 25 MB); decrypt in chunks if that cap grows.
+ */
+export function readVaultFile(uploadDir, familyId, box, key) {
+  const abs = vaultPath(uploadDir, familyId, key);
+  if (!abs) return null;
+  let raw;
+  try {
+    raw = fs.readFileSync(abs);
+  } catch (err) {
+    if (err.code === 'ENOENT') return null;
+    throw err;
+  }
+  try {
+    return box.openBuffer(raw);
+  } catch {
+    console.error(`[vault] can't decrypt ${abs} (damaged file or different key)`);
+    throw Object.assign(httpError(500, "This file can't be decrypted — restore it from a backup"), { expose: true });
+  }
+}
+
+/** First bytes of a file (enough to recognise the sealed header), or null when it is missing. */
+function readHead(abs) {
+  let fd;
+  try {
+    fd = fs.openSync(abs, 'r');
+  } catch (err) {
+    if (err.code === 'ENOENT') return null;
+    throw err;
+  }
+  try {
+    const head = Buffer.alloc(16);
+    return head.subarray(0, fs.readSync(fd, head, 0, head.length, 0));
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+/**
+ * Seal every plaintext file in every family's vault folder (referenced by a document or not), e.g.
+ * files written before encryption at rest. Idempotent (sealed files are recognised by their header)
+ * and crash-safe (writeSealed). A file that can't be read or rewritten is logged and left as-is.
+ * Returns the number of files sealed.
+ */
+export function sealLegacyFiles(uploadDir, box) {
+  let sealed = 0;
+  const ls = (dir) => {
+    try {
+      return fs.readdirSync(dir);
+    } catch {
+      return [];
+    }
+  };
+  const files = ls(uploadDir).flatMap((fam) => ls(vaultDir(uploadDir, fam)).map((key) => vaultPath(uploadDir, fam, key)));
+  for (const abs of files) {
+    if (!abs) continue; // not a storage key (e.g. a leftover .tmp)
+    try {
+      const head = readHead(abs);
+      if (!head || box.isSealedBuffer(head)) continue;
+      writeSealed(box, abs, fs.readFileSync(abs));
+      sealed++;
+    } catch (err) {
+      console.error(`[vault] could not encrypt ${abs}: ${err.message}`);
+    }
+  }
+  return sealed;
 }
 
 export function removeVaultFile(uploadDir, familyId, key) {

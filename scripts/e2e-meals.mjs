@@ -5,15 +5,19 @@
 //   BASE=http://localhost:4206 SHOTS=/tmp/meals-shots node scripts/e2e-meals.mjs
 // Needs the demo users (alex/sam/mia @hearth.test, password hearth123). Exits non-zero on the first failure.
 // Screenshots of every main screen/dialog (desktop + mobile, light + dark) go to $SHOTS.
+import { existsSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { chromium } from 'playwright';
 
+// Run Node and the browser in the demo family's time zone (seed.js DEMO_TZ), so "today" matches the server.
+process.env.TZ ||= process.env.HEARTH_DEMO_TZ || 'America/Chicago';
+
 const BASE = process.env.BASE || 'http://localhost:4206';
 const SHOTS = process.env.SHOTS || '/tmp/meals-shots';
 fs.mkdirSync(SHOTS, { recursive: true });
-const browser = await chromium.launch({ executablePath: process.env.CHROMIUM || '/opt/pw-browsers/chromium' });
+const browser = await chromium.launch({ executablePath: process.env.CHROMIUM || (existsSync('/opt/pw-browsers/chromium') ? '/opt/pw-browsers/chromium' : undefined) });
 const pageErrors = [];
 let passed = 0;
 const TAG = Math.random().toString(36).slice(2, 7);
@@ -26,7 +30,7 @@ async function newPage({ mobile = false, theme = 'light', email = 'alex@hearth.t
     hasTouch: mobile,
     deviceScaleFactor: mobile ? 2 : 1,
   });
-  await ctx.addInitScript((t) => localStorage.setItem('hearth-theme', t), theme);
+  await ctx.addInitScript((t) => window.localStorage?.setItem('hearth-theme', t), theme);
   await ctx.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: BASE });
   const page = await ctx.newPage();
   page.on('pageerror', (e) => pageErrors.push(`${email}: ${e.message}`));

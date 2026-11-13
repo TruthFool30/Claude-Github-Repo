@@ -74,6 +74,14 @@ export const coreMigrations = [
   `ALTER TABLE users ADD COLUMN timezone TEXT`,
   // Optional activity audience: JSON array of user ids; NULL = visible to the whole family.
   `ALTER TABLE activity ADD COLUMN audience TEXT`,
+  // Two-factor login (TOTP). Secrets are sealed with ctx.box; totp_pending holds a secret during
+  // setup until the first code verifies. totp_last_step blocks code replay. totp_recovery is a JSON
+  // array of sha256 hashes of the unused recovery codes.
+  `ALTER TABLE users ADD COLUMN totp_secret TEXT`,
+  `ALTER TABLE users ADD COLUMN totp_pending TEXT`,
+  `ALTER TABLE users ADD COLUMN totp_last_step INTEGER`,
+  `ALTER TABLE users ADD COLUMN totp_recovery TEXT`,
+  `CREATE INDEX IF NOT EXISTS idx_activity_family_created ON activity(family_id, created_at DESC, id DESC)`,
 ];
 
 const NON_ALNUM = /[^\p{L}\p{N}]+/gu;

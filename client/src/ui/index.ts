@@ -25,3 +25,4 @@ export { ImageUploader, resizeImage, fileForm, type ImageUploaderProps } from '.
 export { Lightbox, type LightboxProps, type LightboxImage } from './Lightbox';
 export { UIProvider } from './UIProvider';
 export { renderIcon, type IconLike } from './icon';
+export { VisibilityPicker, VisibilityBadge, VISIBILITY, type Visibility, type VisibilityPickerProps } from './VisibilityPicker';

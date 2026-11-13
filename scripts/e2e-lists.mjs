@@ -1,11 +1,15 @@
 // Lists module browser smoke test + screenshots.
 //   BASE=http://localhost:4203 SHOTS=/tmp/lists-shots node scripts/e2e-lists.mjs
 // Expects a freshly seeded instance (npm run seed) with HEARTH_RATE_LIMITS=off.
+import { existsSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
+
+// Run Node and the browser in the demo family's time zone (seed.js DEMO_TZ), so "today" matches the server.
+process.env.TZ ||= process.env.HEARTH_DEMO_TZ || 'America/Chicago';
 
 const BASE = process.env.BASE || 'http://localhost:4203';
 const SHOTS = process.env.SHOTS || path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'data', 'e2e-lists');
@@ -17,13 +21,13 @@ fs.mkdirSync(SHOTS, { recursive: true });
 const TZ = process.env.E2E_TZ || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
 const TZ_CTX = { timezoneId: TZ, extraHTTPHeaders: { 'X-Timezone': TZ } };
 
-const browser = await chromium.launch({ executablePath: process.env.CHROMIUM || '/opt/pw-browsers/chromium' });
+const browser = await chromium.launch({ executablePath: process.env.CHROMIUM || (existsSync('/opt/pw-browsers/chromium') ? '/opt/pw-browsers/chromium' : undefined) });
 const errors = [];
 let step = '';
 
 async function newUser(email, { width = 1280, height = 800, theme = 'light', mobile = false } = {}) {
   const ctx = await browser.newContext({ ...TZ_CTX, viewport: { width, height }, isMobile: mobile, hasTouch: mobile, deviceScaleFactor: mobile ? 2 : 1 });
-  await ctx.addInitScript((t) => localStorage.setItem('hearth-theme', t), theme);
+  await ctx.addInitScript((t) => window.localStorage?.setItem('hearth-theme', t), theme);
   const page = await ctx.newPage();
   // The deliberate /lists/999999 visit logs the expected 404 response.
   page.on('console', (m) => { if (m.type() === 'error' && step !== '404') errors.push(`[${email} ${step}] ${m.text()}`); });

@@ -128,6 +128,12 @@ export function makeAuth(db) {
   );
   const touch = db.prepare('UPDATE sessions SET expires_at = ? WHERE token = ?');
   const setTz = db.prepare('UPDATE users SET timezone = ? WHERE id = ?');
+  // A membership with its family row: `familyOf.get(familyId, userId)`, `firstFamily.get(userId)`.
+  const FAMILY_SQL = 'SELECT m.role AS m_role, f.* FROM memberships m JOIN families f ON f.id = m.family_id';
+  const familyOf = db.prepare(`${FAMILY_SQL} WHERE m.family_id = ? AND m.user_id = ?`);
+  const firstFamily = db.prepare(`${FAMILY_SQL} WHERE m.user_id = ? ORDER BY m.created_at, m.family_id LIMIT 1`);
+  const setActive = db.prepare('UPDATE sessions SET active_family_id = ? WHERE token = ?');
+  const resolved = ({ m_role, ...family }, extra) => ({ family, role: m_role, ...extra });
 
   /** Returns null on success (req.user etc. set) or an error message. */
   function authenticate(req, res) {
@@ -172,23 +178,18 @@ export function makeAuth(db) {
   }
 
   function resolveActiveFamily(req) {
-    const userId = req.user.id;
-    let familyId = req.session.active_family_id;
-    let membership = familyId ? getMembership(db, familyId, userId) : null;
-    if (!membership) {
-      const first = db
-        .prepare('SELECT family_id FROM memberships WHERE user_id = ? ORDER BY created_at, family_id LIMIT 1')
-        .get(userId);
-      familyId = first?.family_id ?? null;
-      membership = familyId ? getMembership(db, familyId, userId) : null;
-      if (familyId !== req.session.active_family_id) {
-        db.prepare('UPDATE sessions SET active_family_id = ? WHERE token = ?').run(familyId, req.session.token);
-        req.session.active_family_id = familyId;
+    const familyId = req.session.active_family_id;
+    let row = familyId ? familyOf.get(familyId, req.user.id) : undefined;
+    if (!row) {
+      // Stale or missing default: fall back to (and remember) the user's first family.
+      row = firstFamily.get(req.user.id);
+      const first = row?.id ?? null;
+      if (first !== familyId) {
+        setActive.run(first, req.session.token);
+        req.session.active_family_id = first;
       }
     }
-    if (!familyId || !membership) return null;
-    const family = db.prepare('SELECT * FROM families WHERE id = ?').get(familyId);
-    return family ? { family, role: membership.role } : null;
+    return row ? resolved(row) : null;
   }
 
   /**
@@ -206,10 +207,8 @@ export function makeAuth(db) {
   function resolveRequestFamily(req) {
     const requested = requestedFamilyId(req);
     if (requested === null) return resolveActiveFamily(req);
-    const membership = Number.isNaN(requested) ? null : getMembership(db, requested, req.user.id);
-    if (!membership) return { error: 'NOT_MEMBER' };
-    const family = db.prepare('SELECT * FROM families WHERE id = ?').get(requested);
-    return family ? { family, role: membership.role, explicit: true } : { error: 'NOT_MEMBER' };
+    const row = Number.isNaN(requested) ? null : familyOf.get(requested, req.user.id);
+    return row ? resolved(row, { explicit: true }) : { error: 'NOT_MEMBER' };
   }
 
   function requireFamily(req, res, next) {

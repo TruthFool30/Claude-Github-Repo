@@ -108,6 +108,7 @@ export const migrations = [
      emoji TEXT NOT NULL,
      created_at TEXT NOT NULL DEFAULT ${ISO_NOW},
      PRIMARY KEY (message_id, user_id, emoji))`,
+  `CREATE INDEX IF NOT EXISTS msg_messages_reply ON msg_messages(reply_to_id)`,
 ];
 
 const EMOJI_RE = /\p{Extended_Pictographic}|\p{Regional_Indicator}/u;
@@ -638,8 +639,10 @@ export function search(ctx, familyId, q, req) {
 /** Wall dashboard: my unread count and the latest conversations with news. */
 export function dashboard(ctx, req) {
   const { db } = ctx;
-  const unread = unreadSummary(db, req.family.id, req.user.id);
-  const recent = listConversations(db, req.family.id, req.user.id)
+  const list = listConversations(db, req.family.id, req.user.id);
+  // Same number as unreadSummary().total: unread of every conversation that isn't muted.
+  const unread = list.reduce((n, c) => (c.muted ? n : n + c.unread), 0);
+  const recent = list
     .filter((c) => c.last_message)
     .slice(0, 3)
     .map((c) => ({
@@ -651,5 +654,5 @@ export function dashboard(ctx, req) {
       user_id: c.last_message.user_id,
       at: c.last_message.created_at,
     }));
-  return { unread: unread.total, recent };
+  return { unread, recent };
 }

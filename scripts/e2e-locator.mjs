@@ -1,9 +1,13 @@
 // Locator browser smoke test + screenshots.
 //   BASE=http://localhost:4208 SHOTS=/tmp/shots node scripts/e2e-locator.mjs
 // Needs a freshly seeded instance (npm run seed). Exits non-zero on the first failed assertion.
+import { existsSync } from 'node:fs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+// Run Node and the browser in the demo family's time zone (seed.js DEMO_TZ), so "today" matches the server.
+process.env.TZ ||= process.env.HEARTH_DEMO_TZ || 'America/Chicago';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const { chromium } = await import(path.join(root, 'node_modules/playwright/index.mjs'));
@@ -12,7 +16,7 @@ const BASE = process.env.BASE || 'http://localhost:4208';
 const SHOTS = process.env.SHOTS || path.join(root, 'e2e-shots', 'locator');
 fs.mkdirSync(SHOTS, { recursive: true });
 
-const browser = await chromium.launch({ executablePath: process.env.CHROMIUM || '/opt/pw-browsers/chromium' });
+const browser = await chromium.launch({ executablePath: process.env.CHROMIUM || (existsSync('/opt/pw-browsers/chromium') ? '/opt/pw-browsers/chromium' : undefined) });
 const consoleErrors = [];
 let step = '';
 const ok = (cond, msg) => {
@@ -34,7 +38,7 @@ async function context({ email, width = 1280, height = 800, theme = 'light', mob
     deviceScaleFactor: mobile ? 2 : 1,
     ...(geo ? { geolocation: SPOT, permissions: ['geolocation'] } : {}),
   });
-  await ctx.addInitScript((t) => localStorage.setItem('hearth-theme', t), theme);
+  await ctx.addInitScript((t) => window.localStorage?.setItem('hearth-theme', t), theme);
   if (tiles) await ctx.route(/tile\.openstreetmap\.org/, (r) => r.fulfill({ status: 200, contentType: 'image/svg+xml', body: TILE }));
   const page = await ctx.newPage();
   page.on('console', (m) => {

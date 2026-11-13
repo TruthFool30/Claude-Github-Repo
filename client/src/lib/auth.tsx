@@ -2,12 +2,14 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, ApiError, FAMILY_LOST_EVENT, setApiFamily, UNAUTHORIZED_EVENT } from './api';
 import { onLiveReconnect, startLive, stopLive, subscribeLive, matchesPrefix } from './live';
-import type { Family, FamilySummary, MeResponse, Member, Role, User } from './types';
+import type { Family, FamilySummary, MeResponse, Member, Role, TwoFactorChallenge, User } from './types';
 import { toast } from '../ui/toast';
 
 export interface AuthState {
   /** null when signed out. */
   user: User | null;
+  /** Your two-factor login state (from /auth/me). */
+  twoFactor: { enabled: boolean; recoveryCodesLeft: number };
   /** This tab's active family (with members), or null when the user has none yet. */
   family: Family | null;
   /** Id of this tab's active family (available before `family` has loaded). */
@@ -21,7 +23,10 @@ export interface AuthState {
   refresh: () => Promise<void>;
   /** Switch THIS TAB to another family (also becomes the default for new tabs). */
   switchFamily: (familyId: number) => Promise<void>;
-  login: (email: string, password: string) => Promise<MeResponse>;
+  /** Signs in, or returns a challenge when the account has two-factor login (then call loginWithCode). */
+  login: (email: string, password: string) => Promise<MeResponse | TwoFactorChallenge>;
+  /** Second sign-in step: the challenge's ticket + an authenticator or recovery code. */
+  loginWithCode: (ticket: string, code: string) => Promise<MeResponse>;
   register: (input: { name: string; email: string; password: string; family_name?: string }) => Promise<MeResponse>;
   logout: () => Promise<void>;
   /** Replace cached /auth/me data (e.g. after PATCH /auth/me). */
@@ -229,7 +234,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   );
 
   const login = useCallback(
-    async (email: string, password: string) => afterSignIn(await api.post<MeResponse>('/auth/login', { email, password })),
+    async (email: string, password: string) => {
+      const res = await api.post<MeResponse | TwoFactorChallenge>('/auth/login', { email, password });
+      return 'two_factor_required' in res ? res : afterSignIn(res);
+    },
+    [afterSignIn],
+  );
+
+  const loginWithCode = useCallback(
+    async (ticket: string, code: string) => afterSignIn(await api.post<MeResponse>('/auth/login/2fa', { ticket, code })),
     [afterSignIn],
   );
 
@@ -275,11 +288,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const forgetFamily = useCallback(
     async (familyId: number) => {
-      // Only expect an exit that hasn't happened yet; if the realtime event already dropped the
-      // family (and consumed the expectation), a lingering id would silence a future removal.
+      // The active-family effect is what consumes an expectation. If the realtime event already
+      // dropped this family but that effect hasn't run yet (prevFamily still points at it), keep the
+      // expectation for it; otherwise it was consumed or will never be, so don't leave it lingering.
       const current = qc.getQueryData<MeResponse | null>(ME_KEY);
       if (current?.families.some((f) => f.id === familyId)) expectedExit.current.add(familyId);
-      else expectedExit.current.delete(familyId);
+      else if (prevFamily.current !== familyId) expectedExit.current.delete(familyId);
       dropFamilyLocally(familyId);
       await qc.invalidateQueries({ queryKey: ME_KEY });
     },
@@ -292,6 +306,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const value = useMemo<AuthState>(
     () => ({
       user: me?.user ?? null,
+      twoFactor: { enabled: !!me?.two_factor_enabled, recoveryCodesLeft: me?.recovery_codes_left ?? 0 },
       family,
       familyId: activeFamilyId,
       members: family?.members ?? [],
@@ -302,13 +317,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       refresh,
       switchFamily,
       login,
+      loginWithCode,
       register,
       logout,
       setMe,
       expectFamilyExit,
       forgetFamily,
     }),
-    [me, family, activeFamilyId, loading, refresh, switchFamily, login, register, logout, setMe, expectFamilyExit, forgetFamily],
+    [me, family, activeFamilyId, loading, refresh, switchFamily, login, loginWithCode, register, logout, setMe, expectFamilyExit, forgetFamily],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

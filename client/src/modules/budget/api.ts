@@ -1,11 +1,14 @@
 // Budget data layer: API types, query hooks and month helpers.
-import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
+import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useSearchParams } from 'react-router';
 import { api, qs } from '../../lib/api';
+import type { Visibility } from '../../ui';
 import { useAuth } from '../../lib/auth';
 import { fmtMoney, toDateKey } from '../../lib/format';
 
 export type Kind = 'expense' | 'income';
+/** Who can see a transaction: everyone, adults only, or only its creator. */
+export type TxVisibility = Visibility;
 
 export interface CategoryRef {
   id: number;
@@ -36,6 +39,17 @@ export interface Transaction {
   created_by: number | null;
   created_at: string;
   updated_at: string;
+  visibility: TxVisibility;
+  /** Set on rows that came from a bank statement import. */
+  import_id: number | null;
+  /** "DBS ••4821" for imported rows. */
+  import_label: string | null;
+  /** Clean merchant name for imported rows (null for manual ones); the raw bank text stays in `description`. */
+  merchant?: string | null;
+  /** Money moved between the family's own accounts: listed, but never counted as income or spending. */
+  transfer?: boolean;
+  /** Running balance from the statement (imported rows only). */
+  balance: number | null;
 }
 
 export interface SummaryCategory extends Category {
@@ -55,7 +69,8 @@ export interface Summary {
   bills: { total: number; paid: number; due: number; remaining: number };
 }
 
-export type BillStatus = 'paid' | 'skipped' | 'overdue' | 'due_today' | 'upcoming';
+/** 'expected': created from an import, for a month no statement covers yet — never overdue. */
+export type BillStatus = 'paid' | 'skipped' | 'overdue' | 'due_today' | 'upcoming' | 'expected';
 
 export interface Bill {
   id: number;
@@ -85,7 +100,7 @@ export interface GoalEntry {
   id: number;
   amount: number;
   note: string | null;
-  source: 'manual' | 'allowance';
+  source: 'manual' | 'allowance' | 'auto';
   user_id: number | null;
   created_at: string;
 }
@@ -104,6 +119,10 @@ export interface Goal {
   created_at: string;
   entry_count: number;
   last_entry_at: string | null;
+  /** Contributes (what's left ÷ months to the target date) on the 1st of every month. */
+  auto_monthly: boolean;
+  /** Latest month that got an automatic contribution. */
+  auto_last_month: string | null;
   entries?: GoalEntry[];
 }
 
@@ -117,12 +136,133 @@ export interface Allowance {
   created_at: string;
 }
 
+// ---- statement import + insights (CONTRACT.md) ------------------------------------------------
+
+export type Bank = 'dbs' | 'posb' | 'uob';
+export const BANK_LABEL: Record<Bank, string> = { dbs: 'DBS', posb: 'POSB', uob: 'UOB' };
+export type ImportErrorCode = 'UNSUPPORTED' | 'PASSWORD_REQUIRED' | 'BAD_PASSWORD' | 'EMPTY' | 'TOO_LARGE';
+
+export interface PreviewRow {
+  row_id: string;
+  date: string;
+  description: string;
+  /** Normalised merchant name; rows of the same merchant share it. */
+  merchant: string;
+  amount: number;
+  kind: Kind;
+  balance: number | null;
+  category_id: number | null;
+  category_source: 'rule' | 'learned' | 'none';
+  duplicate: boolean;
+  recurring_group: string | null;
+  /** Server's guess that this is a move between own accounts (older servers: absent = false). */
+  transfer?: boolean;
+  /** When `transfer` came from pairing: the already-imported row in another account that commit ALSO marks as a transfer (`amount` signed, from that account's side). */
+  pair?: { account_label: string; date: string; amount: number; description: string } | null;
+}
+
+export interface RecurringSuggestion {
+  group: string;
+  merchant: string;
+  description: string;
+  amount: number;
+  kind: Kind;
+  day_of_month: number;
+  months_seen: number;
+  category_id: number | null;
+  existing_bill_id: number | null;
+}
+
+export interface ImportPreview {
+  token: string;
+  expires_at: string;
+  bank: Bank;
+  format: 'pdf' | 'csv' | 'xls' | 'xlsx';
+  account: { label: string; last4: string } | null;
+  currency: string;
+  period: { from: string; to: string };
+  opening_balance: number | null;
+  closing_balance: number | null;
+  rows: PreviewRow[];
+  recurring: RecurringSuggestion[];
+  summary: { count: number; income: number; spending: number; duplicates: number };
+  warnings: string[];
+}
+
+export interface CommitBody {
+  visibility: 'adults' | 'private';
+  /** `pair: false` declines marking the paired row in the other account. */
+  rows: Array<{ row_id: string; category_id: number | null; include: boolean; transfer: boolean; pair?: false }>;
+  bills: Array<{ group: string; description?: string; amount?: number; day_of_month?: number; category_id?: number | null }>;
+}
+
+export interface ImportOut {
+  id: number;
+  bank: Bank;
+  account_label: string | null;
+  period_from: string;
+  period_to: string;
+  row_count: number;
+  visibility: 'adults' | 'private';
+  created_by: number | null;
+  created_at: string;
+  total_income: number;
+  total_spending: number;
+}
+
+export interface CommitResult {
+  import: ImportOut;
+  created: number;
+  skipped_duplicates: number;
+  /** Non-duplicate rows the user unticked. */
+  excluded: number;
+  bills_created: number;
+}
+
+export interface Insights {
+  /** The last N full months, then the current one with partial: true. */
+  months: Array<{ month: string; income: number; spending: number; surplus: number; partial?: boolean }>;
+  /** How many full months had any transaction (the averages' denominator). */
+  full_months: number;
+  avg_income: number;
+  avg_spending: number;
+  avg_surplus: number;
+  /** `stale`: the newest statement of that account (ending `statement_to`) had no closing balance. */
+  balances: Array<{ account_label: string; balance: number; as_of: string; stale?: boolean; statement_to?: string }>;
+  /** `avg_to_date`: what the category had typically spent by this day of the month in earlier full months (what `change_pct` compares with). */
+  categories: Array<{ category_id: number | null; name: string; icon: string; color: string; avg: number; avg_to_date?: number; this_month: number; change_pct: number | null }>;
+  merchants: Array<{ merchant: string; total: number; count: number }>;
+  /** `change_pct` compares `this_month` with `usual_by_now` (typical spend by this day in earlier months). */
+  spikes: Array<{ category_id: number | null; name: string; this_month: number; avg: number; usual_by_now?: number; change_pct: number }>;
+  /** Family-local date the numbers were computed for (YYYY-MM-DD). */
+  today?: string;
+  recurring: { total_monthly: number; bills: Array<{ id: number; description: string; amount: number }> };
+  goals: {
+    needed_monthly: number;
+    surplus: number;
+    status: 'on_track' | 'short' | 'no_data';
+    shortfall: number;
+    items: Array<{ id: number; name: string; emoji: string | null; monthly: number; target_date: string | null; auto_monthly: boolean }>;
+    undated: number;
+    /** Alternatives, best first; `remaining_gap` is what's still short after the first one. */
+    suggestions: string[];
+    remaining_gap?: number;
+    /** Active goals whose target date has passed. */
+    overdue?: Array<{ id: number; name: string; emoji: string | null; target_date: string; left: number }>;
+  };
+}
+
+/** "DBS ••4821" (or just the bank) for an import. */
+export const importLabel = (i: Pick<ImportOut, 'bank' | 'account_label'>) => i.account_label || BANK_LABEL[i.bank] || 'Bank';
+
 export interface TxFilters {
   month: string;
   q?: string;
   category_id?: string;
   paid_by?: number | null;
   kind?: Kind | '';
+  /** One import's rows (all months). */
+  import_id?: number;
 }
 
 // ---- keys + hooks -----------------------------------------------------------------------------
@@ -139,6 +279,8 @@ export const keys = {
   goal: (id: number) => ['budget', 'goal', id] as const,
   allowances: ['budget', 'allowances'] as const,
   badge: ['budget', 'badge'] as const,
+  imports: ['budget', 'imports'] as const,
+  insights: (months: number) => ['budget', 'insights', months] as const,
 };
 
 /**
@@ -174,7 +316,7 @@ export const useTransactions = (f: TxFilters) =>
     queryFn: ({ pageParam }) =>
       api.get<TxPage>(
         `/budget/transactions${qs({
-          month: f.month, q: f.q, category_id: f.category_id, paid_by: f.paid_by ?? undefined, kind: f.kind, all: f.q ? 1 : undefined,
+          month: f.import_id ? undefined : f.month, import_id: f.import_id, q: f.q, category_id: f.category_id, paid_by: f.paid_by ?? undefined, kind: f.kind, all: f.q ? 1 : undefined,
           page: 1, limit: 100, cursor: pageParam,
         })}`,
       ),
@@ -191,6 +333,32 @@ export const useGoal = (id: number | null) =>
   useQuery({ queryKey: keys.goal(id ?? 0), queryFn: () => api.get<Goal>(`/budget/goals/${id}`), enabled: !!id });
 
 export const useAllowances = () => useQuery({ queryKey: keys.allowances, queryFn: () => api.get<Allowance[]>('/budget/allowances') });
+
+/** Past statement imports (adults only; disabled for children, whom the server refuses anyway). */
+export const useImports = () => {
+  const canManage = useCanManage();
+  return useQuery({ queryKey: keys.imports, queryFn: () => api.get<ImportOut[]>('/budget/imports'), enabled: canManage, staleTime: 60_000 });
+};
+
+export const useInsights =(months: number) =>
+  useQuery({ queryKey: keys.insights(months), queryFn: () => api.get<Insights>(`/budget/insights${qs({ months })}`), placeholderData: (p) => p });
+
+/** Upload a statement for preview (multipart: file, password?). Throws ApiError with `code`. */
+export function previewImport(file: File, password?: string) {
+  const fd = new FormData();
+  fd.append('file', file);
+  if (password) fd.append('password', password);
+  return api.upload<ImportPreview>('/budget/imports/preview', fd);
+}
+
+/**
+ * After a commit or undo, everything money-shaped may have changed: transactions, summary,
+ * insights, bills, goals (all under ['budget']) and the Wall's dashboard tile.
+ */
+export function useInvalidateAfterImport() {
+  const qc = useQueryClient();
+  return () => Promise.all([qc.invalidateQueries({ queryKey: keys.all }), qc.invalidateQueries({ queryKey: ['wall', 'dashboard'] })]);
+}
 
 /** Currency formatter bound to this family's currency. */
 export function useMoney() {
@@ -254,6 +422,26 @@ export function useMonthParam(): [string, (m: string) => void] {
       { replace: true },
     );
   return [month, setMonth];
+}
+
+/** Monthly auto-contribution for `month` (mirrors the server's autoAmount): left ÷ months to the target month, rounded up to the cent. */
+export function autoAmount(left: number, month: string, targetDate: string) {
+  const [y, m] = month.split('-').map(Number);
+  const [ty, tm] = targetDate.split('-').map(Number);
+  const months = (ty - y) * 12 + tm - m + 1;
+  const cents = Math.round(left * 100);
+  return months < 1 || cents <= 0 ? 0 : Math.ceil(cents / months) / 100;
+}
+
+/** The goal's next automatic contribution: this month (if it hasn't had one) or the 1st of next month; null when there is none. */
+export function nextAuto(g: Pick<Goal, 'target' | 'saved' | 'target_date' | 'completed_at' | 'auto_last_month'>) {
+  if (g.completed_at || !g.target_date) return null;
+  // ponytail: the browser's month stands in for the family's (the server uses the family's time zone);
+  // they differ only for a few hours around midnight on the 1st for someone away from home.
+  const now = currentMonth();
+  const month = g.auto_last_month && g.auto_last_month >= now ? addMonths(now, 1) : now;
+  const amount = autoAmount(g.target - g.saved, month, g.target_date);
+  return amount > 0 ? { month, amount, thisMonth: month === now } : null;
 }
 
 /** The locale's decimal separator ("." or ","). */

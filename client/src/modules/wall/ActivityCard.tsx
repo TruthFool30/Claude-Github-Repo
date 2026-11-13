@@ -6,6 +6,9 @@ import { firstName, fmtDateTime, fmtRelative } from '../../lib/format';
 import type { Activity } from '../../lib/types';
 import { Avatar, Card } from '../../ui';
 
+/** Activity verbs written by background jobs, without a person (budget's automatic goal contributions and the goal they complete). */
+const SYSTEM_VERBS = new Set(['auto_saved', 'goal_reached']);
+
 /** A run of consecutive activity entries from other modules, shown as one compact card. */
 export function ActivityCard({ items }: { items: Activity[] }) {
   const { user } = useAuth();
@@ -22,22 +25,29 @@ export function ActivityCard({ items }: { items: Activity[] }) {
           {items.map((a) => {
             const meta = moduleMeta(a.module);
             const Icon = meta.icon;
-            const actor = a.user ? (a.user.id === user?.id ? 'You' : firstName(a.user.name)) : 'Someone';
+            // Rows Hearth writes itself (automatic savings) read as a sentence with the module icon; a member
+            // who has since been removed reads "A former member …".
+            const system = !a.user && SYSTEM_VERBS.has(a.verb);
+            const actor = a.user ? (a.user.id === user?.id ? 'You' : firstName(a.user.name)) : 'A former member';
             const content = (
               <>
                 <span className="relative mr-1.5 shrink-0">
-                  {a.user ? <Avatar user={a.user} size="md" /> : <span className="block size-9 rounded-full bg-surface-3" />}
-                  <span
+                  {a.user ? <Avatar user={a.user} size="md" /> : system ? (
+                    <span className="flex size-9 items-center justify-center rounded-full" style={{ backgroundColor: `color-mix(in oklab, ${meta.accent} 16%, var(--surface))`, color: meta.accent }} aria-hidden>
+                      <Icon size={16} strokeWidth={2.25} />
+                    </span>
+                  ) : <span className="block size-9 rounded-full bg-surface-3" />}
+                  {!system && <span
                     className="absolute -bottom-1.5 -right-2.5 flex size-[22px] items-center justify-center rounded-full ring-[2.5px] ring-surface"
                     style={{ backgroundColor: `color-mix(in oklab, ${meta.accent} 22%, var(--surface))`, color: meta.accent }}
                     aria-hidden
                   >
                     <Icon size={11} strokeWidth={2.5} />
-                  </span>
+                  </span>}
                 </span>
                 <span className="min-w-0 flex-1">
                   <span className="block text-[14px] leading-snug text-fg">
-                    <span className="font-semibold">{actor}</span> <span className="text-muted">{a.summary}</span>
+                    {system ? a.summary.charAt(0).toUpperCase() + a.summary.slice(1) : <><span className="font-semibold">{actor}</span> <span className="text-muted">{a.summary}</span></>}
                   </span>
                   <span className="mt-0.5 flex items-center gap-1.5 text-xs text-subtle">
                     <span className="font-medium" style={{ color: `color-mix(in oklab, ${meta.accent} 70%, var(--fg))` }}>{meta.label}</span>

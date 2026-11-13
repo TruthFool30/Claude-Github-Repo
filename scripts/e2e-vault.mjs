@@ -1,17 +1,21 @@
 // Playwright smoke test + screenshots for the Contacts & Docs (vault) module.
 //   BASE=http://localhost:4209 SHOTS=/tmp/vault-shots node scripts/e2e-vault.mjs
 // Needs a freshly seeded instance (npm run seed) with HEARTH_RATE_LIMITS=off.
+import { existsSync } from 'node:fs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { chromium } from 'playwright';
+
+// Run Node and the browser in the demo family's time zone (seed.js DEMO_TZ), so "today" matches the server.
+process.env.TZ ||= process.env.HEARTH_DEMO_TZ || 'America/Chicago';
 
 const BASE = process.env.BASE || 'http://localhost:4209';
 const SHOTS = process.env.SHOTS || path.join(os.tmpdir(), 'vault-shots');
 const NO_SHOTS = process.env.NO_SHOTS === '1';
 fs.mkdirSync(SHOTS, { recursive: true });
 
-const browser = await chromium.launch({ executablePath: process.env.CHROMIUM || '/opt/pw-browsers/chromium' });
+const browser = await chromium.launch({ executablePath: process.env.CHROMIUM || (existsSync('/opt/pw-browsers/chromium') ? '/opt/pw-browsers/chromium' : undefined) });
 const errors = [];
 let passed = 0;
 function ok(cond, msg) {
@@ -22,7 +26,9 @@ function ok(cond, msg) {
 
 async function session(email, { width = 1280, height = 800, mobile = false, theme = 'light' } = {}) {
   const ctx = await browser.newContext({ viewport: { width, height }, isMobile: mobile, hasTouch: mobile, deviceScaleFactor: mobile ? 2 : 1 });
-  await ctx.addInitScript((t) => localStorage.setItem('hearth-theme', t), theme);
+  // Runs in every frame — including the built-in PDF viewer's inner frames, which have no localStorage
+  // (window.localStorage is null there), so guard it rather than throw a pageerror into the run.
+  await ctx.addInitScript((t) => window.localStorage?.setItem('hearth-theme', t), theme);
   const page = await ctx.newPage();
   page.on('console', (m) => { if (m.type() === 'error') errors.push(`[${email}] ${m.text()}`); });
   page.on('pageerror', (e) => errors.push(`[${email}] pageerror ${e.message}`));
@@ -246,6 +252,7 @@ if (!NO_SHOTS) {
       const n = (s) => `${vp.tag}-${theme}-${s}`;
       await page.goto(`${BASE}/vault/contacts`);
       await page.getByRole('heading', { name: 'Emergency' }).waitFor();
+      ok(await page.evaluate(() => document.documentElement.classList.contains('dark')) === (theme === 'dark'), `${vp.tag} ${theme}: theme from the init script applied`);
       await settle(page, 700);
       await shot(page, n('01-contacts'));
       await page.locator('a[href^="/vault/contacts/"]', { hasText: "Dr. Priya Patel" }).last().click();

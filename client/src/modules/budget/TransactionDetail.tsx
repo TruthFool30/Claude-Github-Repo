@@ -1,16 +1,18 @@
 // Transaction detail sheet + list row + delete-with-undo helper.
 import { useState } from 'react';
 import { useQuery, useQueryClient, type InfiniteData } from '@tanstack/react-query';
-import { CalendarDays, FileText, Paperclip, Pencil, Repeat, StickyNote, Trash2, UserRound } from 'lucide-react';
+import { ArrowLeftRight, CalendarDays, Eye, FileText, Landmark, Paperclip, Pencil, Repeat, Scale, StickyNote, Trash2, UserRound } from 'lucide-react';
 import { api, errorMessage } from '../../lib/api';
 import { useAuth, useMember } from '../../lib/auth';
 import { cn } from '../../lib/cn';
 import { fmtDate, fmtRelative, firstName } from '../../lib/format';
-import { Avatar, Button, Lightbox, Modal, Skeleton, toast } from '../../ui';
+import { Avatar, Badge, Button, Lightbox, Modal, Skeleton, VISIBILITY, VisibilityBadge, toast } from '../../ui';
 import { keys, useCanManage, useMoney, type Transaction, type TxPage } from './api';
-import { Amount, CategoryIcon, UNCATEGORIZED } from './shared';
+import { Amount, CategoryIcon, ImportedTag, UNCATEGORIZED, merchantCase } from './shared';
 
-export const txTitle = (t: Transaction) => t.description || t.category?.name || (t.kind === 'income' ? 'Income' : 'Expense');
+export const txTitle = (t: Transaction) => (t.merchant ? merchantCase(t.merchant) : t.description || t.category?.name || (t.kind === 'income' ? 'Income' : 'Expense'));
+/** The bank's own text, shown under a cleaned-up merchant title. */
+const bankText = (t: Transaction) => (t.merchant && t.description && t.description !== t.merchant ? t.description : null);
 
 /** Remove optimistically from every cached list, with an Undo toast that restores it. */
 export function useDeleteTransaction() {
@@ -57,13 +59,14 @@ export function useCanEditTx() {
 export function TransactionRow({ t, onOpen, showDate }: { t: Transaction; onOpen: (t: Transaction) => void; showDate?: boolean }) {
   const { fmt } = useMoney();
   const member = useMember(t.paid_by);
+  const imported = t.import_label;
   return (
     <li>
       <button
         type="button"
         onClick={() => onOpen(t)}
         className="group flex w-full items-center gap-3 rounded-xl px-2 py-2.5 text-left transition-colors hover:bg-surface-2 focus-visible:bg-surface-2 focus-visible:outline-none"
-        aria-label={`${txTitle(t)}, ${t.kind === 'income' ? 'income' : 'expense'} ${fmt(t.amount)}, ${fmtDate(t.date)}`}
+        aria-label={`${txTitle(t)}, ${t.kind === 'income' ? 'income' : 'expense'} ${fmt(t.amount)}, ${fmtDate(t.date)}${t.visibility && t.visibility !== 'family' ? `, ${VISIBILITY[t.visibility].label.toLowerCase()}` : ''}${imported ? `, imported from ${imported}` : ''}${t.transfer ? ', transfer' : ''}`}
       >
         <CategoryIcon category={t.category} />
         <div className="min-w-0 flex-1">
@@ -71,14 +74,18 @@ export function TransactionRow({ t, onOpen, showDate }: { t: Transaction; onOpen
             <span className="truncate text-[15px] font-semibold text-fg">{txTitle(t)}</span>
             {t.recurring_id && <Repeat size={13} className="shrink-0 text-subtle" aria-label="Recurring" />}
             {t.receipt_url && <Paperclip size={13} className="shrink-0 text-subtle" aria-label="Has receipt" />}
+            <VisibilityBadge value={t.visibility} iconOnly />
+            {t.transfer && <Badge tone="neutral" className="shrink-0">Transfer</Badge>}
           </div>
-          <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[13px] text-muted">
+          <div className="mt-0.5 flex min-w-0 flex-wrap items-center gap-x-1.5 text-[13px] text-muted">
             <span className="truncate">{t.category?.name ?? UNCATEGORIZED.name}</span>
             {showDate && <span className="shrink-0">· {fmtDate(t.date, 'MMM d')}</span>}
+            {imported && <ImportedTag label={imported} className="max-w-full" />}
           </div>
+          {bankText(t) && <div className="mt-0.5 truncate text-xs text-subtle">{bankText(t)}</div>}
         </div>
         <div className="flex shrink-0 items-center gap-2.5">
-          <Amount kind={t.kind} value={t.amount} fmt={fmt} className="text-[15px]" />
+          <Amount kind={t.kind} value={t.amount} fmt={fmt} className={cn('text-[15px]', t.transfer && 'text-muted')} />
           {member && <Avatar user={member} size="xs" title={`Paid by ${member.name}`} />}
         </div>
       </button>
@@ -102,6 +109,7 @@ export function TransactionDetail({
   const t = data;
   const payer = useMember(t?.paid_by);
   const creator = useMember(t?.created_by);
+  const imported = t?.import_label;
   const isPdf = !!t?.receipt_url && /\.pdf$/i.test(t.receipt_url);
 
   return (
@@ -155,6 +163,13 @@ export function TransactionDetail({
                 value={payer ? (<span className="inline-flex items-center gap-2"><Avatar user={payer} size="xs" />{payer.name}</span>) : '—'}
               />
               {t.recurring_id && <Row icon={Repeat} label="Recurring" value="Monthly bill payment" />}
+              {imported && <Row icon={Landmark} label="Source" value={`Imported · ${imported}`} />}
+              {bankText(t) && <Row icon={FileText} label="Bank text" value={<span className="break-words font-normal">{bankText(t)}</span>} />}
+              {t.transfer && <Row icon={ArrowLeftRight} label="Transfer" value="Between your own accounts — not counted as income or spending" />}
+              {t.balance != null && <Row icon={Scale} label="Balance after" value={<span className="tabular">{fmt(t.balance)}</span>} />}
+              {t.visibility && t.visibility !== 'family' && (
+                <Row icon={Eye} label="Visible to" value={<span className="inline-flex flex-wrap items-center gap-2"><VisibilityBadge value={t.visibility} />{VISIBILITY[t.visibility].hint}</span>} />
+              )}
               {t.notes && <Row icon={StickyNote} label="Notes" value={<span className="whitespace-pre-wrap">{t.notes}</span>} />}
             </dl>
             {t.receipt_url && (

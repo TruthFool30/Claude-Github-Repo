@@ -11,17 +11,19 @@ export function createHub({ heartbeatMs = 25000, isSessionValid = null } = {}) {
   const clients = new Set();
   let nextId = 1;
 
-  function write(client, type, payload) {
-    const data = JSON.stringify({ type, payload: payload ?? null, at: new Date().toISOString() });
+  /** One SSE event, serialized once and written to every matching client. */
+  const frame = (type, payload) => `data: ${JSON.stringify({ type, payload: payload ?? null, at: new Date().toISOString() })}\n\n`;
+
+  function write(client, data) {
     try {
-      client.res.write(`data: ${data}\n\n`);
+      client.res.write(data);
     } catch {
       clients.delete(client);
     }
   }
 
   function end(client, type = null, payload = null) {
-    if (type) write(client, type, payload);
+    if (type) write(client, frame(type, payload));
     clients.delete(client);
     try { client.res.end(); } catch { /* ignore */ }
   }
@@ -63,22 +65,24 @@ export function createHub({ heartbeatMs = 25000, isSessionValid = null } = {}) {
         explicit: explicitFamily,
       };
       clients.add(client);
-      write(client, 'hello', { user_id: client.userId, family_id: client.familyId });
+      write(client, frame('hello', { user_id: client.userId, family_id: client.familyId }));
       req.on('close', () => clients.delete(client));
     },
 
     /** Send to every client currently viewing `familyId`. */
     broadcast(familyId, type, payload) {
-      for (const c of clients) if (c.familyId === Number(familyId)) write(c, type, payload);
+      let data;
+      for (const c of clients) if (c.familyId === Number(familyId)) write(c, (data ??= frame(type, payload)));
     },
 
     /** Send to specific users. When familyId is given, only to their clients bound to that family. */
     sendToUsers(userIds, type, payload, familyId = null) {
       const ids = new Set((userIds || []).map(Number));
+      let data;
       for (const c of clients) {
         if (!ids.has(c.userId)) continue;
         if (familyId != null && c.familyId !== Number(familyId)) continue;
-        write(c, type, payload);
+        write(c, (data ??= frame(type, payload)));
       }
     },
 
@@ -91,7 +95,7 @@ export function createHub({ heartbeatMs = 25000, isSessionValid = null } = {}) {
     detachUser(userId, familyId, payload = {}) {
       for (const c of clients) {
         if (c.userId === Number(userId) && c.familyId === Number(familyId)) {
-          write(c, 'family.removed', { family_id: Number(familyId), ...payload });
+          write(c, frame('family.removed', { family_id: Number(familyId), ...payload }));
           c.familyId = null;
         }
       }
@@ -101,7 +105,7 @@ export function createHub({ heartbeatMs = 25000, isSessionValid = null } = {}) {
     detachFamily(familyId, payload = {}) {
       for (const c of clients) {
         if (c.familyId === Number(familyId)) {
-          write(c, 'family.removed', { family_id: Number(familyId), ...payload });
+          write(c, frame('family.removed', { family_id: Number(familyId), ...payload }));
           c.familyId = null;
         }
       }

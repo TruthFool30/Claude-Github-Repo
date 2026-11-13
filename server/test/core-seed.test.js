@@ -1,7 +1,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { startServer } from './helpers.js';
-import { seedDemo, DEMO_PASSWORD } from '../src/seed.js';
+import { seedDemo, DEMO_PASSWORD, DEMO_TZ } from '../src/seed.js';
 
 let srv;
 before(async () => { srv = await startServer(); });
@@ -19,6 +19,9 @@ test('seed creates the Rivera family and is re-runnable', async () => {
   assert.equal(fam.name, 'Rivera Family');
   assert.deepEqual(fam.members.map((m) => [m.name.split(' ')[0], m.role]), [['Alex', 'admin'], ['Sam', 'member'], ['Mia', 'child'], ['Leo', 'child']]);
   assert.equal(srv.db.prepare('SELECT COUNT(*) AS n FROM families').get().n, 1);
+  // The family has a zone (not the server's UTC), and no demo money is dated after its today.
+  assert.equal(srv.ctx.time.familyTz(familyId), process.env.HEARTH_DEMO_TZ || DEMO_TZ);
+  assert.equal(srv.db.prepare('SELECT COUNT(*) AS n FROM budget_transactions WHERE family_id = ? AND date > ?').get(familyId, srv.ctx.time.todayForFamily(familyId)).n, 0);
   const mia = srv.agent();
   assert.equal((await mia.post('/api/auth/login', { email: 'mia@hearth.test', password: DEMO_PASSWORD })).status, 200);
 });

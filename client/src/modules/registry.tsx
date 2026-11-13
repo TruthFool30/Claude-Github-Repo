@@ -20,8 +20,3 @@ export const primaryModules = modules.filter((m) => m.nav === 'primary').slice(0
 export const secondaryModules = modules.filter((m) => !primaryModules.includes(m));
 
 export const moduleById: Record<string, ModuleDef> = Object.fromEntries(modules.map((m) => [m.id, m]));
-
-/** Module owning a URL path (for highlighting nav items). */
-export function moduleForPath(pathname: string): ModuleDef | undefined {
-  return modules.find((m) => pathname === m.path || pathname.startsWith(`${m.path}/`));
-}

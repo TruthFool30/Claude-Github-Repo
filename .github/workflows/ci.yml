@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Typecheck, build, server tests
+    runs-on: ubuntu-24.04  # Playwright 1.56 supports up to 24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+      # Dates and money depend on time zones: run the suite as a UTC, a US and an Asian server.
+      - run: npm test
+      - run: npm test
+        env:
+          TZ: America/Chicago
+      - run: npm test
+        env:
+          TZ: Asia/Tokyo
+
+  e2e:
+    name: Browser tests
+    if: github.event_name == 'pull_request'
+    needs: test
+    runs-on: ubuntu-24.04  # Playwright 1.56 supports up to 24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run build
+      - run: bash scripts/e2e-all.sh

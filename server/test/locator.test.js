@@ -318,6 +318,18 @@ describe('history and privacy', () => {
     assert.equal(back.location.place.name, 'Home');
   });
 
+  test('clearing history removes more notifications than SQLite allows bound variables', async () => {
+    const fx = await familyFixture(srv, 'Many notes');
+    const N = 40_000; // > SQLITE_MAX_VARIABLE_NUMBER (32766)
+    const ins = srv.db.prepare("INSERT INTO notifications (user_id, family_id, module, title, link) VALUES (?, ?, 'locator', 'x', ?)");
+    srv.db.exec('BEGIN');
+    for (let i = 0; i < N; i++) ins.run(fx.admin.user.id, fx.family.id, `/locator/member/${fx.member.user.id}?c=${i + 1}`);
+    srv.db.exec('COMMIT');
+    assert.equal((await fx.member.agent.del('/api/locator/history')).status, 200);
+    const left = srv.db.prepare("SELECT COUNT(*) AS n FROM notifications WHERE family_id = ? AND module = 'locator'").get(fx.family.id).n;
+    assert.equal(left, 0);
+  });
+
   test('members delete their own check-ins and clear history', async () => {
     const fx = await familyFixture(srv, 'Delete');
     const c1 = (await fx.member.agent.post('/api/locator/checkins', OUTSIDE)).body.checkin;

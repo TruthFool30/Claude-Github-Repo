@@ -51,6 +51,15 @@ export interface MeResponse {
   user: User;
   families: FamilySummary[];
   active_family_id: number | null;
+  /** Your own account only (never part of User, which other members see). */
+  two_factor_enabled: boolean;
+  recovery_codes_left: number;
+}
+
+/** POST /auth/login answer for accounts with two-factor login: send a code to /auth/login/2fa. */
+export interface TwoFactorChallenge {
+  two_factor_required: true;
+  ticket: string;
 }
 
 export interface Activity {

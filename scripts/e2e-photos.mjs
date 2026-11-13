@@ -1,6 +1,7 @@
 // Playwright smoke test for the photos module.
 //   BASE=http://localhost:4205 SHOTS=/tmp/shots node scripts/e2e-photos.mjs
 // Needs a freshly seeded instance (npm run seed) with HEARTH_RATE_LIMITS=off.
+import { existsSync } from 'node:fs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -9,12 +10,15 @@ import { chromium } from 'playwright';
 import { encodePng } from '../server/src/modules/photos/png.js';
 import { renderScene, PRESETS } from '../server/src/modules/photos/scenes.js';
 
+// Run Node and the browser in the demo family's time zone (seed.js DEMO_TZ), so "today" matches the server.
+process.env.TZ ||= process.env.HEARTH_DEMO_TZ || 'America/Chicago';
+
 const BASE = process.env.BASE || 'http://localhost:4205';
 const SHOTS = process.env.SHOTS || path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'e2e-shots', 'photos');
 fs.mkdirSync(SHOTS, { recursive: true });
 const TMP = fs.mkdtempSync(path.join((await import('node:os')).tmpdir(), 'photos-e2e-'));
 
-const browser = await chromium.launch({ executablePath: process.env.CHROMIUM || '/opt/pw-browsers/chromium' });
+const browser = await chromium.launch({ executablePath: process.env.CHROMIUM || (existsSync('/opt/pw-browsers/chromium') ? '/opt/pw-browsers/chromium' : undefined) });
 const errors = [];
 let failPage = null;
 let step = '';
@@ -27,7 +31,7 @@ async function context({ email = 'alex@hearth.test', mobile = false, theme = 'li
   const ctx = await browser.newContext(
     mobile ? { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 } : { viewport: { width: 1280, height: 800 } },
   );
-  await ctx.addInitScript((t) => localStorage.setItem('hearth-theme', t), theme);
+  await ctx.addInitScript((t) => window.localStorage?.setItem('hearth-theme', t), theme);
   const page = await ctx.newPage();
   page.on('console', (m) => m.type() === 'error' && !/favicon|Failed to load resource.*40[0134]/.test(m.text()) && errors.push(`[${email} ${step}] ${m.text()}`));
   page.on('pageerror', (e) => errors.push(`[${email} ${step}] pageerror ${e.message}`));
@@ -135,7 +139,7 @@ try {
   for (const k of ['ArrowRight', 'ArrowLeft', 'ArrowRight', 'ArrowRight', 'ArrowLeft']) await a.keyboard.press(k);
   await a.getByRole('dialog', { name: /Photo 2 of 3/ }).waitFor();
   await a.waitForTimeout(400);
-  await a.getByRole('dialog', { name: /Photo 2 of 3/ }).waitFor({ timeout: 100 });
+  assert.ok(await a.getByRole('dialog', { name: /Photo 2 of 3/ }).isVisible(), 'still on photo 2 (no drift)');
   await a.keyboard.press('ArrowRight');
   await a.keyboard.press('ArrowLeft');
   await a.keyboard.press('ArrowLeft');

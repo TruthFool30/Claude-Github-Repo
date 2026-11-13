@@ -1,16 +1,20 @@
 // Home / wall browser smoke test + screenshots.
 //   BASE=http://localhost:4201 SHOTS=/tmp/wall-shots node scripts/e2e-wall.mjs
 // Needs a freshly seeded instance (npm run seed) with HEARTH_RATE_LIMITS=off.
+import { existsSync } from 'node:fs';
 import fs from 'node:fs';
 import path from 'node:path';
 import assert from 'node:assert/strict';
 import { chromium } from 'playwright';
 
+// Run Node and the browser in the demo family's time zone (seed.js DEMO_TZ), so "today" matches the server.
+process.env.TZ ||= process.env.HEARTH_DEMO_TZ || 'America/Chicago';
+
 const BASE = process.env.BASE || 'http://localhost:4201';
 const SHOTS = process.env.SHOTS || '/tmp/wall-shots';
 fs.mkdirSync(SHOTS, { recursive: true });
 
-const browser = await chromium.launch({ executablePath: process.env.CHROMIUM || '/opt/pw-browsers/chromium' });
+const browser = await chromium.launch({ executablePath: process.env.CHROMIUM || (existsSync('/opt/pw-browsers/chromium') ? '/opt/pw-browsers/chromium' : undefined) });
 const consoleErrors = [];
 let step = 0;
 const log = (msg) => console.log(`  ${String(++step).padStart(2, '0')} ${msg}`);
@@ -18,7 +22,7 @@ const log = (msg) => console.log(`  ${String(++step).padStart(2, '0')} ${msg}`);
 async function open(email, { width = 1280, height = 800, theme = 'light', mobile = false } = {}) {
   const ctx = await browser.newContext({ viewport: { width, height }, isMobile: mobile, hasTouch: mobile, deviceScaleFactor: 1 });
   await ctx.addInitScript((t) => {
-    localStorage.setItem('hearth-theme', t);
+    window.localStorage?.setItem('hearth-theme', t);
     localStorage.removeItem('hearth-wall-filter');
     localStorage.removeItem('hearth-wall-draft');
   }, theme);

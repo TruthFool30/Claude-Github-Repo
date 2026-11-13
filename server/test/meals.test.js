@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { startServer, familyFixture, PNG_1X1, collectEvents } from './helpers.js';
 import { seedDemo, DEMO_PASSWORD } from '../src/seed.js';
-import { addDays, mondayOf, localDateKey } from '../src/modules/meals.js';
+import { addDays, mondayOf } from '../src/modules/meals.js';
 import { aggregateIngredients, parseIngredientLine, fmtQty, guessCategory, nameKey, ingredientText } from '../src/modules/meals/shopping.js';
 import { dateIn } from '../src/time.js';
 import * as shared from '../../shared/meals/ingredients.js';
@@ -391,7 +391,7 @@ describe('meal plan', () => {
   let other;
   let pasta;
   let salad;
-  const week = '2026-10-05'; // a Monday
+  const week = '2031-10-06'; // a Monday, far from any real "today" (the dashboard test plans for today)
   before(async () => {
     fx = await familyFixture(srv, 'Plan A');
     other = await familyFixture(srv, 'Plan B');
@@ -639,7 +639,7 @@ test('seed creates recipes with photos, favorites and this week\'s plan', async 
   assert.equal(photo.status, 200);
   assert.match(photo.headers.get('content-type'), /svg/);
 
-  const monday = mondayOf(localDateKey());
+  const monday = mondayOf(srv.ctx.time.todayForFamily(familyId)); // the seeded family's week, not the server's
   const plan = (await alex.get(`/api/meals/plan?start=${monday}`)).body;
   assert.ok(plan.entries.length >= 12);
   assert.equal(new Set(plan.entries.filter((e) => e.slot === 'dinner').map((e) => e.date)).size, 7, 'a dinner every day');

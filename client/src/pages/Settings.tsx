@@ -8,6 +8,7 @@ import { useTheme, type ThemeMode } from '../lib/theme';
 import type { MeResponse } from '../lib/types';
 import { Avatar, Button, Card, CardHeader, ColorPicker, Field, ImageUploader, Input, PageHeader, fileForm, toast } from '../ui';
 import { PasswordInput } from './PasswordInput';
+import { TwoFactorCard } from './TwoFactor';
 
 export default function SettingsPage() {
   const { user, logout } = useAuth();
@@ -16,11 +17,12 @@ export default function SettingsPage() {
   return (
     <div>
       <PageHeader title="Settings" subtitle="Your profile, appearance and account" icon={SettingsIcon} accent="#737889" />
-      <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_380px]">
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_380px]">
         <ProfileCard />
         <div className="flex flex-col gap-6">
           <AppearanceCard />
           <PasswordCard />
+          <TwoFactorCard />
           <Card>
             <CardHeader title="Account" subtitle={user.email ?? undefined} icon={LogOut} accent="#E5484D" />
             <Button

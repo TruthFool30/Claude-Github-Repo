@@ -2,15 +2,16 @@
 //   BASE=http://localhost:4202 SHOTS=/tmp/calendar-shots node scripts/e2e-calendar.mjs
 // Exercises: month/week/day/agenda views, create/edit/delete (single + recurring with scopes),
 // live updates in a second browser, member filter, deep links, keyboard shortcuts, child view-only.
+import { existsSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { chromium } from 'playwright';
 
 const BASE = process.env.BASE || 'http://localhost:4202';
 const SHOTS = process.env.SHOTS || '/tmp/calendar-shots';
-const TZ = process.env.TZ_ID || 'America/Los_Angeles'; // the seeded family's zone
+const TZ = process.env.TZ_ID || 'America/Chicago'; // the seeded family's zone (server/src/seed.js DEMO_TZ)
 fs.mkdirSync(SHOTS, { recursive: true });
-const browser = await chromium.launch({ executablePath: process.env.CHROMIUM || '/opt/pw-browsers/chromium' });
+const browser = await chromium.launch({ executablePath: process.env.CHROMIUM || (existsSync('/opt/pw-browsers/chromium') ? '/opt/pw-browsers/chromium' : undefined) });
 const errors = [];
 let passed = 0;
 
@@ -18,7 +19,7 @@ async function open(email, { width = 1280, height = 800, theme = 'light' } = {})
   const mobile = width < 700;
   const ctx = await browser.newContext({ viewport: { width, height }, isMobile: mobile, hasTouch: mobile, timezoneId: TZ });
   await ctx.addInitScript((t) => {
-    localStorage.setItem('hearth-theme', t);
+    window.localStorage?.setItem('hearth-theme', t);
   }, theme);
   const page = await ctx.newPage();
   page.on('pageerror', (e) => errors.push(`${email}: ${e.message}`));
@@ -105,6 +106,9 @@ await step('create an event (live in second browser)', async () => {
   await d.locator('input[placeholder="Add a place"]').fill("Tony's Pizza");
   await A.screenshot({ path: `${SHOTS}/e2e-editor-filled.png` });
   await d.getByRole('button', { name: 'Add event' }).click();
+  await A.getByText('E2E Pizza night added').first().waitFor();
+  // A busy day folds extra events under "+N more" in month view, so A works in the agenda, which lists them all.
+  await A.goto(`${BASE}/calendar?view=agenda`);
   await pill(A, 'E2E Pizza night').first().waitFor();
   await pill(S, 'E2E Pizza night').first().waitFor({ timeout: 8000 }); // live, no reload
 });
@@ -275,7 +279,7 @@ await step('drag an event to a new time in week view', async () => {
 await step('"+N more" opens a popover with the whole day', async () => {
   const day = '2031-03-12';
   for (const [i, t] of ['Alpha', 'Bravo', 'Charlie', 'Delta', 'Echo', 'Foxtrot'].entries()) {
-    const r = await A.request.post(`${BASE}/api/calendar/events`, { data: { title: `E2E ${t}`, start: new Date(`${day}T${String(9 + i).padStart(2, '0')}:00:00-07:00`).toISOString(), tz: TZ } });
+    const r = await A.request.post(`${BASE}/api/calendar/events`, { data: { title: `E2E ${t}`, start: new Date(`${day}T${String(9 + i).padStart(2, '0')}:00:00-05:00`).toISOString(), tz: TZ } });
     assert.equal(r.status(), 201);
   }
   await A.goto(`${BASE}/calendar?view=month&date=${day}`);
@@ -301,12 +305,12 @@ await step('ics export keeps the local zone and edited occurrences', async () =>
 
 await step('series edits: "all" shifts weekdays, "following" ignores one-off overrides', async () => {
   const post = await A.request.post(`${BASE}/api/calendar/events`, {
-    data: { title: 'E2E Tutoring', start: '2031-09-01T16:00:00-07:00', end: '2031-09-01T17:00:00-07:00', tz: TZ, rrule: { freq: 'weekly', byweekday: [1, 3] } },
+    data: { title: 'E2E Tutoring', start: '2031-09-01T16:00:00-05:00', end: '2031-09-01T17:00:00-05:00', tz: TZ, rrule: { freq: 'weekly', byweekday: [1, 3] } },
   });
   const ev = await post.json();
   const occs = (await (await A.request.get(`${BASE}/api/calendar/events?from=2031-08-31&to=2031-09-14&tz=${TZ}`)).json()).filter((o) => o.event_id === ev.id);
   const r = await A.request.patch(`${BASE}/api/calendar/events/${ev.id}`, {
-    data: { scope: 'all', occurrence: occs[0].occurrence, start: '2031-09-02T16:00:00-07:00', end: '2031-09-02T17:00:00-07:00' },
+    data: { scope: 'all', occurrence: occs[0].occurrence, start: '2031-09-02T16:00:00-05:00', end: '2031-09-02T17:00:00-05:00' },
   });
   assert.deepEqual((await r.json()).rrule.byweekday, [2, 4]);
   const hit = (await (await A.request.get(`${BASE}/api/search?q=Piano`)).json()).results.find((x) => x.module === 'calendar');

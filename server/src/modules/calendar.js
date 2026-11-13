@@ -12,7 +12,7 @@
 // Member birthdays are added automatically as yearly all-day entries (kind: 'birthday').
 import { Router } from 'express';
 import { ISO_NOW } from '../db.js';
-import { cleanStr, httpError, isColor, isDate, toId } from '../util.js';
+import { cleanStr, httpError, isColor, isDate, parseJson, toId } from '../util.js';
 import {
   dayFromKey, dayKey, dayNum, dayTimeToUtc, describeWhen, isValidTz, localClock, localDay, occurrenceIndex, offsetMs,
   seriesDays, weekday, ymd, zonedParts,
@@ -25,7 +25,6 @@ const FREQS = ['daily', 'weekly', 'monthly', 'yearly'];
 const DEFAULT_COLOR = '#0090FF';
 const REMINDER_WINDOW = 15 * 60_000; // reminders due within the last 15 min still fire (server restarts, 30 s tick)
 const ALL_DAY_REMINDER_HOUR = 9;
-const DEMO_TZ = 'America/Los_Angeles'; // all-day reminders are relative to 9:00 AM on the day
 
 export const migrations = [
   `CREATE TABLE IF NOT EXISTS calendar_events (
@@ -69,15 +68,6 @@ export const migrations = [
 // ---------------------------------------------------------------------------------------------
 // Loading + expansion
 // ---------------------------------------------------------------------------------------------
-
-const parseJson = (s, fallback) => {
-  if (s === null || s === undefined) return fallback;
-  try {
-    return JSON.parse(s);
-  } catch {
-    return fallback;
-  }
-};
 
 /** Load event rows (optionally only some ids / a coarse date window) with attendees + exceptions. */
 function loadEvents(db, familyId, { ids, fromKey, toKey, withReminders } = {}) {
@@ -1334,13 +1324,10 @@ export function search(ctx, familyId, q) {
 /** Demo content for the Rivera family: a lively, realistic few weeks around today. */
 export function seed(ctx, { familyId, users }) {
   const { db } = ctx;
-  // Family-local wall clock: the family's known zone, else a sensible default (never the server's UTC).
-  const known = db.prepare('SELECT 1 FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.family_id = ? AND u.timezone IS NOT NULL').get(familyId);
-  const envTz = process.env.HEARTH_DEMO_TZ;
-  const tz = envTz && isValidTz(envTz) ? envTz : known && ctx.time ? ctx.time.familyTz(familyId) : DEMO_TZ;
+  const tz = ctx.time.familyTz(familyId); // family-local wall clock (the seed sets the demo users' zone)
   const { alex, sam, mia, leo } = users;
   const today = localDay(Date.now(), tz);
-  const monday = today - ((weekday(today) + 6) % 7); // this week's Monday
+  const monday = today - weekday(today) + 1; // Monday of the week on screen (weeks start on Sunday by default)
   const at = (day, h, mi = 0) => new Date(dayTimeToUtc(day, h, mi, tz)).toISOString();
   const timed = (day, h, mi, durMin) => ({ all_day: false, start: at(day, h, mi), end: new Date(dayTimeToUtc(day, h, mi, tz) + durMin * 60_000).toISOString() });
   const allDay = (day, span = 0) => ({ all_day: true, start: dayKey(day), end: dayKey(day + span) });
@@ -1466,6 +1453,3 @@ export function seed(ctx, { familyId, users }) {
     body: describeWhen({ all_day: true, start: dayKey(monday + 18) }, tz, false), link: linkTo('Lake Tahoe trip'),
   });
 }
-
-// Re-exported for tests.
-export const _internal = { zonedParts, seriesDays, makeRange };

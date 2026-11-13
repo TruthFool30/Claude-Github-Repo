@@ -9,6 +9,7 @@ export interface SwitchProps {
   disabled?: boolean;
   className?: string;
   'aria-label'?: string;
+  'aria-describedby'?: string;
 }
 
 /** iOS-style toggle. With a label it renders as a full-width settings row. */
@@ -21,6 +22,7 @@ export function Switch({ checked, onChange, label, description, disabled, classN
       role="switch"
       aria-checked={checked}
       aria-label={aria['aria-label']}
+      aria-describedby={aria['aria-describedby']}
       disabled={disabled}
       onClick={() => onChange(!checked)}
       className={cn(

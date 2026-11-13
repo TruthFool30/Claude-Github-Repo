@@ -1,5 +1,6 @@
 // Budget module helpers: constants, validation, month math, serialization and the recurring-bill engine.
-import { httpError } from '../../util.js';
+import { dateIn } from '../../time.js';
+import { httpError, isDate } from '../../util.js';
 
 /** Icon keys the client knows how to render (client/src/modules/budget/icons.tsx mirrors this list). */
 export const ICONS = [
@@ -111,17 +112,24 @@ export function requestToday(ctx, req) {
   return ctx.time?.today ? ctx.time.today(req) : dateKey();
 }
 
-function isValidDate(s) {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
-  const [y, m, d] = s.split('-').map(Number);
-  const dt = new Date(Date.UTC(y, m - 1, d));
-  return dt.getUTCFullYear() === y && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d && inRange(s);
-}
-export { isValidDate };
+export const isValidDate = (s) => isDate(s) && inRange(s);
 
-export function monthLabel(month) {
+export function monthLabel(month, style = 'long') {
   const [y, m] = month.split('-').map(Number);
-  return new Date(y, m - 1, 1).toLocaleString('en-US', { month: 'long', year: 'numeric' });
+  return new Date(y, m - 1, 1).toLocaleString('en-US', { month: style, year: 'numeric' });
+}
+
+/**
+ * Automatic monthly contribution (cents) for `month`: what's left ÷ months remaining (this month
+ * through the target date's month, inclusive), rounded up so the goal is reached on time. Never
+ * more than what's left (ceil(left / n) ≤ left for n ≥ 1); 0 once the target month has passed.
+ */
+export function autoAmount(leftCents, month, targetDate) {
+  if (!targetDate || leftCents <= 0) return 0;
+  const [y, m] = month.split('-').map(Number);
+  const [ty, tm] = targetDate.split('-').map(Number);
+  const months = (ty - y) * 12 + tm - m + 1;
+  return months < 1 ? 0 : Math.ceil(leftCents / months);
 }
 
 export function money(cents, currency = 'USD') {
@@ -136,8 +144,10 @@ export function money(cents, currency = 'USD') {
 // ---- serialization -----------------------------------------------------------------------
 
 export const TX_SELECT = `
-  SELECT t.*, c.name AS c_name, c.icon AS c_icon, c.color AS c_color, c.kind AS c_kind
-  FROM budget_transactions t LEFT JOIN budget_categories c ON c.id = t.category_id`;
+  SELECT t.*, c.name AS c_name, c.icon AS c_icon, c.color AS c_color, c.kind AS c_kind, bi.account_label AS import_label,
+    rb.visibility AS rb_visibility, rb.created_by AS rb_created_by
+  FROM budget_transactions t LEFT JOIN budget_categories c ON c.id = t.category_id LEFT JOIN budget_imports bi ON bi.id = t.import_id
+  LEFT JOIN budget_recurring rb ON rb.id = t.recurring_id`;
 
 export function txOut(row) {
   if (!row) return null;
@@ -156,6 +166,11 @@ export function txOut(row) {
     created_by: row.created_by,
     created_at: row.created_at,
     updated_at: row.updated_at,
+    visibility: row.visibility ?? 'family',
+    transfer: !!row.transfer, // between the family's own accounts: in no income/spending total
+    import_id: row.import_id ?? null,
+    import_label: row.import_id ? row.import_label ?? null : null, // e.g. "DBS ••4821"
+    balance: row.balance == null ? null : fromCents(Number(row.balance)), // running balance (imported rows; opened by the caller)
   };
 }
 
@@ -225,6 +240,7 @@ export function billOut(row, extra = {}) {
     notes: row.notes,
     created_by: row.created_by,
     created_at: row.created_at,
+    visibility: row.visibility ?? 'family',
     ...extra,
   };
 }
@@ -237,13 +253,15 @@ export const BILL_SELECT = `
  * Record a payment of `bill` for `month` (transaction + run row). Returns the transaction row id.
  * Caller wraps in a transaction.
  */
-export function recordBillPayment(db, bill, month, { amountCents, date, userId, paidBy } = {}) {
+export function recordBillPayment(db, bill, month, { amountCents, date, userId, paidBy, description } = {}) {
   const { lastInsertRowid } = db.prepare(
-    `INSERT INTO budget_transactions (family_id, kind, amount_cents, category_id, description, date, paid_by, recurring_id, created_by)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO budget_transactions (family_id, kind, amount_cents, category_id, description, date, paid_by, recurring_id, created_by, visibility)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
-    bill.family_id, bill.kind, amountCents ?? bill.amount_cents, bill.category_id, bill.description,
-    date ?? dueDate(month, bill.day_of_month), paidBy === undefined ? bill.paid_by : paidBy, bill.id, userId ?? bill.created_by,
+    bill.family_id, bill.kind, amountCents ?? bill.amount_cents, bill.category_id, description ?? bill.description,
+    date ?? dueDate(month, bill.day_of_month), paidBy === undefined ? bill.paid_by : paidBy, bill.id,
+    // Payments of a private bill (from a private import) stay private to its creator.
+    bill.visibility === 'private' ? bill.created_by : userId ?? bill.created_by, bill.visibility ?? 'family',
   );
   db.prepare(
     `INSERT INTO budget_recurring_runs (recurring_id, family_id, month, status, transaction_id) VALUES (?, ?, ?, 'paid', ?)
@@ -254,25 +272,30 @@ export function recordBillPayment(db, bill, month, { amountCents, date, userId, 
 
 /**
  * Auto-create transactions for "auto" bills whose due date has arrived (on/after the day the bill
- * was created, at most 12 months back) and that have no run yet for that month.
+ * was created in zone `tz`, at most 12 months back) and that have no run yet for that month.
  * Returns the created transaction ids.
  */
-export function generateDue(db, familyId, today = dateKey()) {
+export function generateDue(db, familyId, today = dateKey(), tz = null) {
   const bills = db.prepare('SELECT * FROM budget_recurring WHERE family_id = ? AND active = 1 AND auto_create = 1').all(familyId);
   if (!bills.length) return [];
-  const hasRun = db.prepare('SELECT 1 FROM budget_recurring_runs WHERE recurring_id = ? AND month = ?');
   const created = [];
   const current = monthOf(today);
+  const earliest = addMonths(current, -12);
+  const runs = new Set(
+    db.prepare('SELECT recurring_id, month FROM budget_recurring_runs WHERE family_id = ? AND month >= ?')
+      .all(familyId, earliest).map((r) => `${r.recurring_id}|${r.month}`),
+  );
   db.exec('SAVEPOINT budget_gen');
   try {
     for (const bill of bills) {
-      const since = (bill.generate_from || bill.created_at || '').slice(0, 10);
-      let month = bill.start_month > addMonths(current, -12) ? bill.start_month : addMonths(current, -12);
+      // The day the bill was created, in the same zone as `today` (created_at is a UTC instant).
+      const since = tz && bill.created_at ? dateIn(tz, new Date(bill.created_at)) : (bill.created_at || '').slice(0, 10);
+      let month = bill.start_month > earliest ? bill.start_month : earliest;
       for (; month <= current; month = addMonths(month, 1)) {
         if (bill.end_month && month > bill.end_month) break;
         const due = dueDate(month, bill.day_of_month);
         if (due > today || due < since) continue;
-        if (hasRun.get(bill.id, month)) continue;
+        if (runs.has(`${bill.id}|${month}`)) continue;
         created.push(recordBillPayment(db, bill, month, {}));
       }
     }

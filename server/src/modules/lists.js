@@ -12,7 +12,7 @@
 // everywhere and purged after a day.
 import { Router } from 'express';
 import { ISO_NOW } from '../db.js';
-import { cleanStr, httpError, isColor, isDate, toId } from '../util.js';
+import { cleanStr, firstName, httpError, isColor, isDate, toId } from '../util.js';
 import { CATEGORIES, guessCategory, normalizeCategory, parseQuantity } from './lists/categories.js';
 import { seedLists } from './lists/seed.js';
 
@@ -125,7 +125,6 @@ function cleanCategory(value) {
   return s ? normalizeCategory(s) : null;
 }
 
-const firstName = (n) => String(n ?? '').trim().split(/\s+/)[0] || 'Someone';
 const quote = (s) => `“${s.length > 60 ? `${s.slice(0, 57)}…` : s}”`;
 
 function dueLabel(due, today) {

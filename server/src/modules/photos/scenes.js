@@ -1,7 +1,6 @@
 // Procedural "photo" scenes for the demo seed — no network, no image libraries.
 // Every scene is resolution independent (normalized coordinates), so the same seed renders
 // the full-size image and its thumbnail identically.
-import { encodePng } from './png.js';
 
 const clamp = (x, a = 0, b = 1) => (x < a ? a : x > b ? b : x);
 const smooth = (e0, e1, x) => {
@@ -426,10 +425,6 @@ export function renderScene(kind, params, width, height, seed = 1) {
     }
   }
   return out;
-}
-
-export function scenePng(kind, params, width, height, seed) {
-  return encodePng(width, height, renderScene(kind, params, width, height, seed));
 }
 
 // Palettes for the demo seed ---------------------------------------------------------------------

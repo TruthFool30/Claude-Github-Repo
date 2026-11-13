@@ -6,8 +6,8 @@ import { api, errorMessage } from '../../lib/api';
 import { useAuth } from '../../lib/auth';
 import { cn } from '../../lib/cn';
 import { toDateKey } from '../../lib/format';
-import { Button, Field, ImageUploader, Input, MemberPicker, Modal, SegmentedControl, Textarea, fileForm, toast } from '../../ui';
-import { amountToInput, keys, localDay, parseAmount, useCanManage, useCategories, useMoney, type Kind, type Transaction } from './api';
+import { Button, Field, ImageUploader, Input, MemberPicker, Modal, SegmentedControl, Switch, Textarea, VisibilityPicker, fileForm, toast } from '../../ui';
+import { amountToInput, keys, localDay, parseAmount, useCanManage, useCategories, useMoney, type Kind, type Transaction, type TxVisibility } from './api';
 import { CategoryIcon, MoneyInput } from './shared';
 
 export interface TxDraft {
@@ -38,6 +38,8 @@ export function TransactionForm({
   const [date, setDate] = useState(toDateKey());
   const [paidBy, setPaidBy] = useState<number | null>(null);
   const [notes, setNotes] = useState('');
+  const [visibility, setVisibility] = useState<TxVisibility>('family');
+  const [transfer, setTransfer] = useState(false);
   const [receipt, setReceipt] = useState<File | null>(null);
   const [receiptPreview, setReceiptPreview] = useState<string | null>(null);
   const [removeReceipt, setRemoveReceipt] = useState(false);
@@ -54,6 +56,8 @@ export function TransactionForm({
     setDate(editing?.date ?? draft?.date ?? toDateKey());
     setPaidBy(editing ? editing.paid_by : user?.id ?? null);
     setNotes(editing?.notes ?? '');
+    setVisibility(editing?.visibility ?? 'family');
+    setTransfer(!!editing?.transfer);
     setReceipt(null);
     setReceiptPreview(null);
     setRemoveReceipt(false);
@@ -64,6 +68,10 @@ export function TransactionForm({
     if (receiptPreview) URL.revokeObjectURL(receiptPreview);
   }, [receiptPreview]);
 
+  // Grown-ups only (the server refuses children); only the creator may make a row private.
+  const canChangeVisibility = canManage;
+  const mine = !editing || editing.created_by === user?.id;
+  const visOptions: TxVisibility[] = mine || editing?.visibility === 'private' ? ['family', 'adults', 'private'] : ['family', 'adults'];
   const visible = useMemo(() => categories.filter((c) => c.kind === kind), [categories, kind]);
   const changeKind = (k: Kind) => {
     setKind(k);
@@ -81,7 +89,12 @@ export function TransactionForm({
     setSaving(true);
     let saved: Transaction;
     try {
-      const body = { kind, amount: n, description: description.trim() || null, category_id: categoryId, date, paid_by: paidBy, notes: notes.trim() || null, ...localDay() };
+      const body = {
+        kind, amount: n, description: description.trim() || null, category_id: categoryId, date, paid_by: paidBy, notes: notes.trim() || null, ...localDay(),
+        // Only sent when it differs from the current (or default "Everyone") visibility.
+        ...(canChangeVisibility && visibility !== (editing?.visibility ?? 'family') ? { visibility } : {}),
+        ...(transfer !== !!editing?.transfer ? { transfer } : {}),
+      };
       saved = editing
         ? await api.patch<Transaction>(`/budget/transactions/${editing.id}`, body)
         : await api.post<Transaction>('/budget/transactions', body);
@@ -204,6 +217,15 @@ export function TransactionForm({
         <Field label="Notes">
           <Textarea name="notes" value={notes} onChange={(e) => setNotes(e.target.value)} rows={2} autoGrow maxLength={1000} placeholder="Anything to remember?" />
         </Field>
+        {canManage && (
+          <Switch
+            checked={transfer}
+            onChange={setTransfer}
+            label="This is a transfer between my own accounts"
+            description="Listed, but not counted as income or spending"
+          />
+        )}
+        {canChangeVisibility && <VisibilityPicker stacked value={visibility} onChange={setVisibility} options={visOptions} what="this transaction" />}
         <div>
           <span className="mb-2 block text-[13px] font-semibold text-fg">Receipt</span>
           {shownReceipt ? (

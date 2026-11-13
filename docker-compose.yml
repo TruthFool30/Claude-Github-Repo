@@ -14,6 +14,10 @@ services:
       # Behind a reverse proxy in another container/host, trust it so rate limits see real client IPs
       # (e.g. "1" for one proxy hop, or its subnet). Default trusts only loopback.
       # TRUST_PROXY: "1"
+      # Encryption key for vault documents and info cards (32 bytes: `openssl rand -base64 32`).
+      # Unset, a key is generated into the volume as /app/data/hearth.key — then a backup of the
+      # volume holds both the data and its key. Losing the key loses the encrypted documents.
+      # HEARTH_ENCRYPTION_KEY: "paste-your-key-here"
     volumes:
       - hearth-data:/app/data
 

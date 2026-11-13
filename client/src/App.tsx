@@ -6,14 +6,14 @@ import { LogoMark } from './layout/Logo';
 import { modules } from './modules/registry';
 import { PageSpinner } from './ui';
 import Login from './pages/Login';
-import Register from './pages/Register';
-import Onboarding from './pages/Onboarding';
-import FamilyPage from './pages/Family';
-import SettingsPage from './pages/Settings';
 import NotFound from './pages/NotFound';
 
+const Register = lazy(() => import('./pages/Register'));
+const Onboarding = lazy(() => import('./pages/Onboarding'));
+const FamilyPage = lazy(() => import('./pages/Family'));
+const SettingsPage = lazy(() => import('./pages/Settings'));
+const JoinPage = lazy(() => import('./pages/Join'));
 const UiKit = lazy(() => import('./pages/UiKit'));
-import JoinPage from './pages/Join';
 
 function Splash() {
   return (
@@ -55,33 +55,36 @@ function PublicOnly({ children, allowNoFamily }: { children: ReactNode; allowNoF
 }
 
 export default function App() {
+  // Lazy pages outside the AppShell (register, join, onboarding) show the splash while loading.
   return (
-    <Routes>
-      <Route path="/login" element={<PublicOnly><Login /></PublicOnly>} />
-      <Route path="/register" element={<PublicOnly allowNoFamily><Register /></PublicOnly>} />
-      <Route path="/join/:code" element={<JoinPage />} />
-      <Route element={<RequireAuth />}>
-        <Route path="/onboarding" element={<Onboarding />} />
-        <Route element={<RequireFamily><AppShell /></RequireFamily>}>
-          <Route index element={<Navigate to="/home" replace />} />
-          {modules.map((m) => (
-            <Route
-              key={m.id}
-              path={`${m.path}/*`}
-              element={
-                <Suspense fallback={<PageSpinner />}>
-                  <m.element />
-                </Suspense>
-              }
-            />
-          ))}
-          <Route path="/family" element={<FamilyPage />} />
-          <Route path="/settings" element={<SettingsPage />} />
-          <Route path="/profile" element={<Navigate to="/settings" replace />} />
-          <Route path="/ui-kit" element={<UiKit />} />
-          <Route path="*" element={<NotFound />} />
+    <Suspense fallback={<Splash />}>
+      <Routes>
+        <Route path="/login" element={<PublicOnly><Login /></PublicOnly>} />
+        <Route path="/register" element={<PublicOnly allowNoFamily><Register /></PublicOnly>} />
+        <Route path="/join/:code" element={<JoinPage />} />
+        <Route element={<RequireAuth />}>
+          <Route path="/onboarding" element={<Onboarding />} />
+          <Route element={<RequireFamily><AppShell /></RequireFamily>}>
+            <Route index element={<Navigate to="/home" replace />} />
+            {modules.map((m) => (
+              <Route
+                key={m.id}
+                path={`${m.path}/*`}
+                element={
+                  <Suspense fallback={<PageSpinner />}>
+                    <m.element />
+                  </Suspense>
+                }
+              />
+            ))}
+            <Route path="/family" element={<FamilyPage />} />
+            <Route path="/settings" element={<SettingsPage />} />
+            <Route path="/profile" element={<Navigate to="/settings" replace />} />
+            <Route path="/ui-kit" element={<UiKit />} />
+            <Route path="*" element={<NotFound />} />
+          </Route>
         </Route>
-      </Route>
-    </Routes>
+      </Routes>
+    </Suspense>
   );
 }

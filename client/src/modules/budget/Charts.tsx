@@ -90,16 +90,25 @@ export function SpendingDonut({ slices, total, fmt }: { slices: Slice[]; total: 
 }
 
 export function TrendChart({
-  trend, month, fmt, onSelect,
-}: { trend: Summary['trend']; month: string; fmt: (n: number, o?: { compact?: boolean }) => string; onSelect: (m: string) => void }) {
-  const data = trend.map((t) => ({ ...t, label: monthLabel(t.month, 'short') }));
+  trend, month, fmt, onSelect, partialMonth, netLabel = 'Balance',
+}: {
+  trend: Summary['trend']; month: string; fmt: (n: number, o?: { compact?: boolean }) => string; onSelect?: (m: string) => void;
+  /** Insights: every month at full strength except this one (still in progress), drawn faded + dashed. */
+  partialMonth?: string;
+  /** Tooltip label for income − spending ("Surplus" on Insights). */
+  netLabel?: string;
+}) {
+  const data = trend.map((t) => ({ ...t, label: monthLabel(t.month, 'short') + (t.month === partialMonth ? '*' : '') }));
+  const opacity = (m: string) => (partialMonth ? (m === partialMonth ? 0.35 : 1) : m === month ? 1 : 0.45);
+  const dash = (m: string, color: string) => (m === partialMonth ? { stroke: color, strokeDasharray: '3 2', strokeWidth: 1 } : {});
   return (
     <div>
       <div className="mb-3 flex items-center gap-4 text-[13px] text-muted" aria-hidden>
         <span className="inline-flex items-center gap-1.5"><span className="size-2.5 rounded-sm" style={{ backgroundColor: INCOME_COLOR }} />Income</span>
         <span className="inline-flex items-center gap-1.5"><span className="size-2.5 rounded-sm" style={{ backgroundColor: SPENT_COLOR }} />Spent</span>
+        {partialMonth && data.some((d) => d.month === partialMonth) && <span className="ml-auto text-xs">* this month so far</span>}
       </div>
-      <div className="h-[220px] w-full" role="img" aria-label={`Income and spending, last 6 months: ${data.map((d) => `${d.label} income ${fmt(d.income)}, spent ${fmt(d.spent)}`).join('; ')}`}>
+      <div className="h-[220px] w-full" role="img" aria-label={`Income and spending, last ${data.length} months: ${data.map((d) => `${d.label} income ${fmt(d.income)}, spent ${fmt(d.spent)}`).join('; ')}`}>
         <ResponsiveContainer width="100%" height="100%">
           <BarChart data={data} barGap={2} barCategoryGap="26%" margin={{ top: 4, right: 4, bottom: 0, left: -8 }}>
             <CartesianGrid vertical={false} stroke="var(--border)" />
@@ -112,19 +121,19 @@ export function TrendChart({
                 const d = payload[0].payload as (typeof data)[number];
                 return (
                   <TipBox>
-                    <div className="mb-1 font-semibold text-fg">{monthLabel(d.month)}</div>
+                    <div className="mb-1 font-semibold text-fg">{monthLabel(d.month)}{d.month === partialMonth ? ' (so far)' : ''}</div>
                     <div className="flex items-center gap-2 text-muted"><span className="size-2 rounded-sm" style={{ backgroundColor: INCOME_COLOR }} />Income <span className="ml-auto pl-4 font-semibold text-fg tabular">{fmt(d.income)}</span></div>
                     <div className="flex items-center gap-2 text-muted"><span className="size-2 rounded-sm" style={{ backgroundColor: SPENT_COLOR }} />Spent <span className="ml-auto pl-4 font-semibold text-fg tabular">{fmt(d.spent)}</span></div>
-                    <div className="mt-1 border-t border-border pt-1 text-muted">Balance <span className="float-right pl-4 font-semibold text-fg tabular">{fmt(d.income - d.spent)}</span></div>
+                    <div className="mt-1 border-t border-border pt-1 text-muted">{netLabel} <span className="float-right pl-4 font-semibold text-fg tabular">{fmt(d.income - d.spent)}</span></div>
                   </TipBox>
                 );
               }}
             />
-            <Bar dataKey="income" name="Income" radius={[4, 4, 0, 0]} maxBarSize={22} onClick={(d) => onSelect((d as unknown as { month: string }).month)} className="cursor-pointer">
-              {data.map((d) => <Cell key={d.month} fill={INCOME_COLOR} fillOpacity={d.month === month ? 1 : 0.45} />)}
+            <Bar dataKey="income" name="Income" radius={[4, 4, 0, 0]} maxBarSize={22} onClick={(d) => onSelect?.((d as unknown as { month: string }).month)} className={onSelect ? 'cursor-pointer' : undefined}>
+              {data.map((d) => <Cell key={d.month} fill={INCOME_COLOR} fillOpacity={opacity(d.month)} {...dash(d.month, INCOME_COLOR)} />)}
             </Bar>
-            <Bar dataKey="spent" name="Spent" radius={[4, 4, 0, 0]} maxBarSize={22} onClick={(d) => onSelect((d as unknown as { month: string }).month)} className="cursor-pointer">
-              {data.map((d) => <Cell key={d.month} fill={SPENT_COLOR} fillOpacity={d.month === month ? 1 : 0.45} />)}
+            <Bar dataKey="spent" name="Spent" radius={[4, 4, 0, 0]} maxBarSize={22} onClick={(d) => onSelect?.((d as unknown as { month: string }).month)} className={onSelect ? 'cursor-pointer' : undefined}>
+              {data.map((d) => <Cell key={d.month} fill={SPENT_COLOR} fillOpacity={opacity(d.month)} {...dash(d.month, SPENT_COLOR)} />)}
             </Bar>
           </BarChart>
         </ResponsiveContainer>

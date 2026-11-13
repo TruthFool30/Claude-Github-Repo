@@ -1,12 +1,12 @@
 // Transactions tab: filters + day-grouped list.
 import { useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router';
-import { Plus, Receipt, Search, SearchX, X } from 'lucide-react';
+import { Landmark, Plus, Receipt, Search, SearchX, X } from 'lucide-react';
 import { useAuth } from '../../lib/auth';
-import { fmtDay, plural } from '../../lib/format';
+import { fmtDate, fmtDay, plural } from '../../lib/format';
 import { useDebounce } from '../../lib/hooks';
 import { Button, Card, EmptyState, IconButton, Input, MemberPicker, SegmentedControl, Select, SkeletonList } from '../../ui';
-import { monthLabel, useCategories, useMoney, useMonthParam, useTransactions, type Kind } from './api';
+import { importLabel, monthLabel, useCategories, useImports, useMoney, useMonthParam, useTransactions, type Kind } from './api';
 import { useBudget } from './context';
 import { TransactionRow } from './TransactionDetail';
 import mod from './index';
@@ -18,16 +18,22 @@ export default function Transactions() {
   const { addTransaction, openTransaction } = useBudget();
   const { data: categories = [] } = useCategories();
   const [kind, setKind] = useState<Kind | ''>('');
-  const [params] = useSearchParams();
+  const [params, setParams] = useSearchParams();
+  // ?import=<id> (the Wall's "imported N transactions" link, the success screen): that import only, every month.
+  const importId = Number(params.get('import')) || undefined;
+  const { data: imports } = useImports();
+  const clearImport = () => setParams((p) => { const n = new URLSearchParams(p); n.delete('import'); return n; }, { replace: true });
   const [q, setQ] = useState(() => params.get('q') ?? '');
   const [categoryId, setCategoryId] = useState(() => params.get('category') ?? '');
   const [paidBy, setPaidBy] = useState<number | null>(null);
   const debounced = useDebounce(q.trim(), 250);
-  const filters = { month, q: debounced.length >= 2 ? debounced : undefined, kind, category_id: categoryId || undefined, paid_by: paidBy };
+  const filters = { month, q: debounced.length >= 2 ? debounced : undefined, kind, category_id: categoryId || undefined, paid_by: paidBy, import_id: importId };
   const list = useTransactions(filters);
   const { isLoading, isError, refetch, isFetching, hasNextPage, fetchNextPage, isFetchingNextPage } = list;
   const data = useMemo(() => list.data?.pages.flatMap((p) => p.items), [list.data]);
-  const filtered = !!(filters.q || kind || categoryId || paidBy);
+  const filtered = !!(filters.q || kind || categoryId || paidBy || importId);
+  const imp = importId ? imports?.find((i) => i.id === importId) : undefined;
+  const importName = imp ? importLabel(imp) : data?.[0]?.import_label ?? 'a bank statement';
 
   const groups = useMemo(() => {
     const map = new Map<string, NonNullable<typeof data>>();
@@ -46,6 +52,7 @@ export default function Transactions() {
   }, [data]);
 
   const clear = () => {
+    if (importId) clearImport();
     setQ('');
     setKind('');
     setCategoryId('');
@@ -60,6 +67,16 @@ export default function Transactions() {
 
   return (
     <div className="grid [&>*]:min-w-0 grid-cols-1 gap-5 lg:grid-cols-[1fr_300px] lg:items-start">
+      {importId && (
+        <div className="lg:order-first lg:col-span-2 flex flex-wrap items-center gap-2 rounded-2xl border border-info/25 bg-info-soft px-3 py-2 text-sm text-info-soft-fg">
+          <Landmark size={16} className="shrink-0" aria-hidden />
+          <span className="min-w-0 flex-1">
+            Imported from <b>{importName}</b>
+            {imp && <span className="opacity-80"> · {fmtDate(imp.period_from, 'd MMM')} – {fmtDate(imp.period_to, 'd MMM yyyy')}</span>}
+          </span>
+          <Button size="sm" variant="ghost" icon={X} onClick={clearImport}>Clear filter</Button>
+        </div>
+      )}
       <div className="min-w-0 lg:order-2">
         <Card padding="sm" className="flex flex-col gap-3 lg:sticky lg:top-24 lg:p-4">
           <Input
@@ -96,7 +113,7 @@ export default function Transactions() {
       <div className="min-w-0 lg:order-1">
         <div className="mb-3 flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 px-1">
           <h2 className="text-[15px] font-semibold text-fg" aria-live="polite">
-            {filters.q ? `Results for “${filters.q}” in all months` : monthLabel(month)}
+            {filters.q ? `Results for “${filters.q}”${importId ? '' : ' in all months'}` : importId ? 'This import, all months' : monthLabel(month)}
             {data && <span className="ml-2 font-normal text-muted">· {hasNextPage ? `${data.length}+ transactions` : plural(data.length, 'transaction')}</span>}
           </h2>
           {data && data.length > 0 && !hasNextPage && (

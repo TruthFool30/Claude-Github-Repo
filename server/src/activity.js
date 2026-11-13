@@ -51,14 +51,13 @@ export function emitActivityEvent(hub, row, type, payload) {
 export function makeLogActivity(db, hub) {
   const insert = db.prepare(
     `INSERT INTO activity (family_id, user_id, module, verb, entity_id, summary, link, created_at, audience)
-     VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE(?, strftime('%Y-%m-%dT%H:%M:%fZ','now')), ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE(?, strftime('%Y-%m-%dT%H:%M:%fZ','now')), ?) RETURNING *`,
   );
   return function logActivity({ familyId, userId = null, module, verb, entityId = null, summary, link = null, createdAt = null, audience = null }) {
     if (!familyId || !module || !verb || !summary) throw new Error('logActivity: familyId, module, verb and summary are required');
     if (audience != null && !Array.isArray(audience)) throw new Error('logActivity: audience must be an array of user ids');
     const aud = audience ? JSON.stringify([...new Set(audience.map(Number).filter(Number.isInteger))]) : null;
-    const { lastInsertRowid } = insert.run(familyId, userId, module, verb, entityId, summary, link, createdAt, aud);
-    const row = db.prepare('SELECT * FROM activity WHERE id = ?').get(lastInsertRowid);
+    const row = insert.get(familyId, userId, module, verb, entityId, summary, link, createdAt, aud);
     const [hydrated] = hydrateActivity(db, [row]);
     emitActivityEvent(hub, row, 'activity', hydrated);
     return hydrated;

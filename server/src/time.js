@@ -20,10 +20,26 @@ export function isValidTz(tz) {
   return ok;
 }
 
+/** Intl formatters are slow to build: one per (kind, zone), bounded like validCache. */
+const fmtCache = new Map();
+function formatter(kind, zone) {
+  const key = `${kind}|${zone}`;
+  let f = fmtCache.get(key);
+  if (!f) {
+    f = kind === 'date'
+      ? new Intl.DateTimeFormat('en-CA', { timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit' })
+      : new Intl.DateTimeFormat('en-US', {
+        timeZone: zone, hourCycle: 'h23', year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', second: 'numeric',
+      });
+    if (fmtCache.size < 1000) fmtCache.set(key, f);
+  }
+  return f;
+}
+
 /** 'YYYY-MM-DD' of `date` (default now) in zone `tz`. */
 export function dateIn(tz, date = new Date()) {
   const zone = isValidTz(tz) ? tz : SERVER_TZ;
-  const parts = new Intl.DateTimeFormat('en-CA', { timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(date);
+  const parts = formatter('date', zone).formatToParts(date);
   const get = (t) => parts.find((p) => p.type === t)?.value;
   return `${get('year')}-${get('month')}-${get('day')}`;
 }
@@ -31,9 +47,7 @@ export function dateIn(tz, date = new Date()) {
 /** Minutes east of UTC for `tz` at `date` (e.g. -360 for America/Denver in summer). */
 export function offsetMinutes(tz, date = new Date()) {
   const zone = isValidTz(tz) ? tz : SERVER_TZ;
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: zone, hourCycle: 'h23', year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', second: 'numeric',
-  }).formatToParts(date);
+  const parts = formatter('offset', zone).formatToParts(date);
   const get = (t) => Number(parts.find((p) => p.type === t)?.value);
   const asUtc = Date.UTC(get('year'), get('month') - 1, get('day'), get('hour'), get('minute'), get('second'));
   return Math.round((asUtc - Math.floor(date.getTime() / 1000) * 1000) / 60000);
