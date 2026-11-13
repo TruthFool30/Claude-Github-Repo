@@ -5,6 +5,7 @@
 // For desktop + phone, light + dark: turn 2FA on from Settings (the TOTP is computed from the
 // manual setup key), save the recovery codes, sign in with password + code, sign in with a
 // recovery code, make new codes, turn 2FA off. Screenshots of every screen go to screenshots/2fa/.
+import { existsSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { chromium } from 'playwright';
@@ -16,7 +17,7 @@ process.env.TZ ||= process.env.HEARTH_DEMO_TZ || 'America/Chicago';
 const BASE = process.env.BASE || 'http://localhost:4013';
 const SHOTS = process.env.SHOTS || 'screenshots/2fa';
 fs.mkdirSync(SHOTS, { recursive: true });
-const browser = await chromium.launch({ executablePath: process.env.CHROMIUM || '/opt/pw-browsers/chromium' });
+const browser = await chromium.launch({ executablePath: process.env.CHROMIUM || (existsSync('/opt/pw-browsers/chromium') ? '/opt/pw-browsers/chromium' : undefined) });
 const pageErrors = [];
 let passed = 0;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

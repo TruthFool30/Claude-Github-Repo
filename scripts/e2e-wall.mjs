@@ -1,6 +1,7 @@
 // Home / wall browser smoke test + screenshots.
 //   BASE=http://localhost:4201 SHOTS=/tmp/wall-shots node scripts/e2e-wall.mjs
 // Needs a freshly seeded instance (npm run seed) with HEARTH_RATE_LIMITS=off.
+import { existsSync } from 'node:fs';
 import fs from 'node:fs';
 import path from 'node:path';
 import assert from 'node:assert/strict';
@@ -13,7 +14,7 @@ const BASE = process.env.BASE || 'http://localhost:4201';
 const SHOTS = process.env.SHOTS || '/tmp/wall-shots';
 fs.mkdirSync(SHOTS, { recursive: true });
 
-const browser = await chromium.launch({ executablePath: process.env.CHROMIUM || '/opt/pw-browsers/chromium' });
+const browser = await chromium.launch({ executablePath: process.env.CHROMIUM || (existsSync('/opt/pw-browsers/chromium') ? '/opt/pw-browsers/chromium' : undefined) });
 const consoleErrors = [];
 let step = 0;
 const log = (msg) => console.log(`  ${String(++step).padStart(2, '0')} ${msg}`);

@@ -1,6 +1,7 @@
 // Locator browser smoke test + screenshots.
 //   BASE=http://localhost:4208 SHOTS=/tmp/shots node scripts/e2e-locator.mjs
 // Needs a freshly seeded instance (npm run seed). Exits non-zero on the first failed assertion.
+import { existsSync } from 'node:fs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -15,7 +16,7 @@ const BASE = process.env.BASE || 'http://localhost:4208';
 const SHOTS = process.env.SHOTS || path.join(root, 'e2e-shots', 'locator');
 fs.mkdirSync(SHOTS, { recursive: true });
 
-const browser = await chromium.launch({ executablePath: process.env.CHROMIUM || '/opt/pw-browsers/chromium' });
+const browser = await chromium.launch({ executablePath: process.env.CHROMIUM || (existsSync('/opt/pw-browsers/chromium') ? '/opt/pw-browsers/chromium' : undefined) });
 const consoleErrors = [];
 let step = '';
 const ok = (cond, msg) => {

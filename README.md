@@ -106,6 +106,13 @@ file next to the database); if that key is lost, reset 2FA the same way.
 | `npm run reset-2fa -- <email>` | Turns off two-factor login for one account (lockout escape hatch) |
 | `npm run typecheck` | `tsc --noEmit -p client` |
 | `npm run e2e` | Playwright regression checks against a running seeded instance (`BASE=http://localhost:8080`) |
+| `scripts/e2e-all.sh` | Every e2e script, each against its own freshly seeded server (after `npm run build`; needs `npx playwright install chromium`) |
+
+## Continuous integration
+
+GitHub Actions (`.github/workflows/ci.yml`) runs the typecheck, the build and the server tests (as a UTC, a US and an
+Asian server) on every push to `main` and every pull request; pull requests also run all browser tests
+(`scripts/e2e-all.sh`). Results show as checks on the pull request.
 
 ## Configuration
 

@@ -1,6 +1,7 @@
 // Lists module browser smoke test + screenshots.
 //   BASE=http://localhost:4203 SHOTS=/tmp/lists-shots node scripts/e2e-lists.mjs
 // Expects a freshly seeded instance (npm run seed) with HEARTH_RATE_LIMITS=off.
+import { existsSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -20,7 +21,7 @@ fs.mkdirSync(SHOTS, { recursive: true });
 const TZ = process.env.E2E_TZ || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
 const TZ_CTX = { timezoneId: TZ, extraHTTPHeaders: { 'X-Timezone': TZ } };
 
-const browser = await chromium.launch({ executablePath: process.env.CHROMIUM || '/opt/pw-browsers/chromium' });
+const browser = await chromium.launch({ executablePath: process.env.CHROMIUM || (existsSync('/opt/pw-browsers/chromium') ? '/opt/pw-browsers/chromium' : undefined) });
 const errors = [];
 let step = '';
 

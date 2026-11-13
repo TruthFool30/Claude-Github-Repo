@@ -1,6 +1,7 @@
 // Playwright smoke test for the messages module.
 //   BASE=http://localhost:4204 SHOTS=/tmp/shots node scripts/e2e-messages.mjs
 // Expects a freshly seeded instance (npm run seed) with HEARTH_RATE_LIMITS=off.
+import { existsSync } from 'node:fs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -14,7 +15,7 @@ const SHOTS = process.env.SHOTS || path.join(path.dirname(fileURLToPath(import.m
 fs.mkdirSync(SHOTS, { recursive: true });
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
 
-const browser = await chromium.launch({ executablePath: process.env.CHROMIUM || '/opt/pw-browsers/chromium' });
+const browser = await chromium.launch({ executablePath: process.env.CHROMIUM || (existsSync('/opt/pw-browsers/chromium') ? '/opt/pw-browsers/chromium' : undefined) });
 const errors = [];
 let passed = 0;
 const step = async (name, fn) => {

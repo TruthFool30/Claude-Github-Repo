@@ -3,6 +3,7 @@
 // Needs a FRESHLY seeded instance (npm run seed; it imports statements and checks duplicates, so a
 // second run on the same DB fails) started with HEARTH_RATE_LIMITS=off, and a built client.
 // Uploads the synthetic statements in server/test/fixtures/statements/ (Sep–Oct 2026, made-up data).
+import { existsSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { chromium } from 'playwright';
@@ -20,7 +21,7 @@ const PASSWORD = 'sample-pass-123';
 const INSECURE = `http://hearth-lan.test:${new URL(BASE).port}`;
 
 const browser = await chromium.launch({
-  executablePath: process.env.CHROMIUM || '/opt/pw-browsers/chromium',
+  executablePath: process.env.CHROMIUM || (existsSync('/opt/pw-browsers/chromium') ? '/opt/pw-browsers/chromium' : undefined),
   args: ['--host-resolver-rules=MAP hearth-lan.test 127.0.0.1'],
 });
 const errors = [];

@@ -1,6 +1,7 @@
 // Playwright smoke test for the photos module.
 //   BASE=http://localhost:4205 SHOTS=/tmp/shots node scripts/e2e-photos.mjs
 // Needs a freshly seeded instance (npm run seed) with HEARTH_RATE_LIMITS=off.
+import { existsSync } from 'node:fs';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -17,7 +18,7 @@ const SHOTS = process.env.SHOTS || path.join(path.dirname(fileURLToPath(import.m
 fs.mkdirSync(SHOTS, { recursive: true });
 const TMP = fs.mkdtempSync(path.join((await import('node:os')).tmpdir(), 'photos-e2e-'));
 
-const browser = await chromium.launch({ executablePath: process.env.CHROMIUM || '/opt/pw-browsers/chromium' });
+const browser = await chromium.launch({ executablePath: process.env.CHROMIUM || (existsSync('/opt/pw-browsers/chromium') ? '/opt/pw-browsers/chromium' : undefined) });
 const errors = [];
 let failPage = null;
 let step = '';

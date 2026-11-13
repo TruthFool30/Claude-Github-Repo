@@ -2,6 +2,7 @@
 //   BASE=http://localhost:4207 node scripts/e2e-budget.mjs
 // Needs a seeded instance (npm run seed) and a built client. Uses two browser contexts
 // (Alex + Sam) to check live updates, plus Mia for the child view.
+import { existsSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import { chromium } from 'playwright';
 
@@ -9,7 +10,7 @@ import { chromium } from 'playwright';
 process.env.TZ ||= process.env.HEARTH_DEMO_TZ || 'America/Chicago';
 
 const BASE = process.env.BASE || 'http://localhost:4207';
-const browser = await chromium.launch({ executablePath: process.env.CHROMIUM || '/opt/pw-browsers/chromium' });
+const browser = await chromium.launch({ executablePath: process.env.CHROMIUM || (existsSync('/opt/pw-browsers/chromium') ? '/opt/pw-browsers/chromium' : undefined) });
 const errors = [];
 let step = 0;
 const ok = (msg) => console.log(`  ✓ ${++step}. ${msg}`);

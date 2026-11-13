@@ -1,6 +1,7 @@
 // Playwright smoke test + screenshots for the Contacts & Docs (vault) module.
 //   BASE=http://localhost:4209 SHOTS=/tmp/vault-shots node scripts/e2e-vault.mjs
 // Needs a freshly seeded instance (npm run seed) with HEARTH_RATE_LIMITS=off.
+import { existsSync } from 'node:fs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -14,7 +15,7 @@ const SHOTS = process.env.SHOTS || path.join(os.tmpdir(), 'vault-shots');
 const NO_SHOTS = process.env.NO_SHOTS === '1';
 fs.mkdirSync(SHOTS, { recursive: true });
 
-const browser = await chromium.launch({ executablePath: process.env.CHROMIUM || '/opt/pw-browsers/chromium' });
+const browser = await chromium.launch({ executablePath: process.env.CHROMIUM || (existsSync('/opt/pw-browsers/chromium') ? '/opt/pw-browsers/chromium' : undefined) });
 const errors = [];
 let passed = 0;
 function ok(cond, msg) {

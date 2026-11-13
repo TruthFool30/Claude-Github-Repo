@@ -3,6 +3,7 @@
 //   PORT=4012 DB_PATH=/tmp/h/h.db UPLOAD_DIR=/tmp/h/up npm start
 //   BASE=http://localhost:4012 node scripts/e2e-foundation.mjs
 // Exits non-zero on the first failed check. (Not part of `npm test`, which needs no browser.)
+import { existsSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import { chromium, request } from 'playwright';
 
@@ -10,7 +11,7 @@ import { chromium, request } from 'playwright';
 process.env.TZ ||= process.env.HEARTH_DEMO_TZ || 'America/Chicago';
 
 const BASE = process.env.BASE || 'http://localhost:4012';
-const browser = await chromium.launch({ executablePath: process.env.CHROMIUM || '/opt/pw-browsers/chromium' });
+const browser = await chromium.launch({ executablePath: process.env.CHROMIUM || (existsSync('/opt/pw-browsers/chromium') ? '/opt/pw-browsers/chromium' : undefined) });
 const pageErrors = [];
 let passed = 0;
 

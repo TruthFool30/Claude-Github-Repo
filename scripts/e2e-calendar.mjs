@@ -2,6 +2,7 @@
 //   BASE=http://localhost:4202 SHOTS=/tmp/calendar-shots node scripts/e2e-calendar.mjs
 // Exercises: month/week/day/agenda views, create/edit/delete (single + recurring with scopes),
 // live updates in a second browser, member filter, deep links, keyboard shortcuts, child view-only.
+import { existsSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { chromium } from 'playwright';
@@ -10,7 +11,7 @@ const BASE = process.env.BASE || 'http://localhost:4202';
 const SHOTS = process.env.SHOTS || '/tmp/calendar-shots';
 const TZ = process.env.TZ_ID || 'America/Chicago'; // the seeded family's zone (server/src/seed.js DEMO_TZ)
 fs.mkdirSync(SHOTS, { recursive: true });
-const browser = await chromium.launch({ executablePath: process.env.CHROMIUM || '/opt/pw-browsers/chromium' });
+const browser = await chromium.launch({ executablePath: process.env.CHROMIUM || (existsSync('/opt/pw-browsers/chromium') ? '/opt/pw-browsers/chromium' : undefined) });
 const errors = [];
 let passed = 0;
 
